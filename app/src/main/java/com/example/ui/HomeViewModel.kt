@@ -75,6 +75,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedGalleryFolderUris = MutableStateFlow<Set<String>>(emptySet())
     val selectedGalleryFolderUris = _selectedGalleryFolderUris.asStateFlow()
 
+    private val _activePresetName = MutableStateFlow<String?>(null)
+    val activePresetName = _activePresetName.asStateFlow()
+
     init {
         viewModelScope.launch {
             @OptIn(FlowPreview::class)
@@ -314,7 +317,13 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 presetDao.insertPreset(preset)
             }
+            _activePresetName.value = name
         }
+    }
+
+    fun updateActivePreset() {
+        val name = _activePresetName.value ?: return
+        saveCurrentAsPreset(name)
     }
 
     fun setGallerySortType(type: String) {
@@ -354,6 +363,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadPreset(preset: PresetEntity) {
         viewModelScope.launch {
+            _activePresetName.value = preset.name
             folderDao.deleteAllFolders()
             
             val folderEntities = preset.folderUris.map { uri ->
@@ -456,6 +466,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearAllFolders() {
         viewModelScope.launch(Dispatchers.IO) {
+            _activePresetName.value = null
             folderDao.deleteAllFolders()
             favoriteDao.deleteAllFavorites()
             withContext(Dispatchers.Main) {

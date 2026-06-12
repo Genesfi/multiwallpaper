@@ -236,6 +236,7 @@ fun FolderScreen(viewModel: HomeViewModel) {
     val selectedIds by viewModel.selectedFolderIds.collectAsState()
     val scannedImages by viewModel.scannedImages.collectAsState()
     val presets by viewModel.presets.collectAsState()
+    val activePresetName by viewModel.activePresetName.collectAsState()
 
     var showPresetDialog by remember { mutableStateOf(false) }
     var showSavePresetDialog by remember { mutableStateOf(false) }
@@ -253,20 +254,45 @@ fun FolderScreen(viewModel: HomeViewModel) {
         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column {
                 Text("SOURCES (${folders.size})", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (presets.isNotEmpty()) {
+                if (activePresetName != null) {
+                    Text("Active: $activePresetName", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                } else if (presets.isNotEmpty()) {
                     Text("${presets.size} Presets available", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.clickable { showPresetDialog = true })
                 }
             }
-            Row {
-                IconButton(onClick = { showSavePresetDialog = true }, enabled = folders.isNotEmpty()) {
-                    Icon(Icons.Default.Save, contentDescription = "Save Preset", tint = MaterialTheme.colorScheme.primary)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (activePresetName != null) {
+                    IconButton(onClick = { viewModel.updateActivePreset() }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.CloudSync, contentDescription = "Update Preset", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                    }
                 }
-                IconButton(onClick = { showPresetDialog = true }) {
-                    Icon(Icons.Default.CollectionsBookmark, contentDescription = "Presets")
+                IconButton(onClick = { showSavePresetDialog = true }, enabled = folders.isNotEmpty(), modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Save, contentDescription = "Save Preset", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                 }
-                if (folders.isNotEmpty()) TextButton(onClick = { viewModel.clearAllFolders() }) { Text("Clear All", color = MaterialTheme.colorScheme.error) }
-                if (isScanning) CircularProgressIndicator(modifier = Modifier.size(16.dp).align(Alignment.CenterVertically))
-                else if (folders.isNotEmpty()) TextButton(onClick = { viewModel.scanFolders() }) { Text("Re-Scan") }
+                IconButton(onClick = { showPresetDialog = true }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.CollectionsBookmark, contentDescription = "Presets", modifier = Modifier.size(20.dp))
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                if (folders.isNotEmpty()) {
+                    TextButton(
+                        onClick = { viewModel.clearAllFolders() },
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text("Clear All", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    }
+                }
+                if (isScanning) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp).align(Alignment.CenterVertically))
+                } else if (folders.isNotEmpty()) {
+                    TextButton(
+                        onClick = { viewModel.scanFolders() },
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text("Re-Scan", fontSize = 12.sp)
+                    }
+                }
             }
         }
         
@@ -350,7 +376,23 @@ fun PresetManagerDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
     
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Presets") },
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Presets")
+                TextButton(onClick = { 
+                    viewModel.clearAllFolders()
+                    onDismiss()
+                }) {
+                    Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("New Preset")
+                }
+            }
+        },
         text = {
             if (presets.isEmpty()) {
                 Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
