@@ -7,79 +7,78 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
 import android.service.wallpaper.WallpaperService
-import android.util.Log
 import android.view.SurfaceHolder
 import com.example.data.AppDatabase
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collectLatest
 import java.io.InputStream
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
 class MultiWallpaperLiveService : WallpaperService() {
 
-        override fun onCreateEngine(): Engine {
-            val engine = MultiWallpaperEngine()
-            engine.setOffsetNotificationsEnabled(true)
-            return engine
-        }
+    override fun onCreateEngine(): Engine {
+        val engine = MultiWallpaperEngine()
+        engine.setOffsetNotificationsEnabled(true)
+        return engine
+    }
 
     inner class MultiWallpaperEngine : Engine() {
         private val handler = Handler(Looper.getMainLooper())
+        private val engineScope = CoroutineScope(Dispatchers.Main + Job())
         private var visible = false
         private var xOffset = 0f
         private var xStep = 0f
         
-        // Manual Swipe Detection for HyperOS
         private var lastX = 0f
         private var manualPageIndex = 0
-        private val swipeThreshold = 150f // pixels to trigger a page change
+        private val swipeThreshold = 150f
 
         private var isLoading = false
         private var surfaceWidth = 1080
         private var surfaceHeight = 2400
 
-        // Cached bitmaps for each screen index
         private val pageBitmaps = mutableMapOf<Int, Bitmap>()
+        
+        private var nextBitmap: Bitmap? = null
+        private var transitionAlpha = 255
+        private var isTransitioning = false
 
-        // Draw and rotation execution
         private val drawRunnable = Runnable { drawFrame() }
         private val rotationRunnable = Runnable { rotateWallpapers() }
 
-        init {
-            // Trigger initial loading
-            loadWallpapersForPages()
-        }
-
         override fun onCreate(surfaceHolder: SurfaceHolder?) {
             super.onCreate(surfaceHolder)
-            // Listen for touches to handle manual swipes on HyperOS
             setTouchEventsEnabled(true)
+            
+            val db = AppDatabase.getDatabase(this@MultiWallpaperLiveService)
+            engineScope.launch {
+                db.folderDao().getAllFolders().collectLatest {
+                    loadWallpapersForPages()
+                }
+            }
+        }
+
+        override fun onDestroy() {
+            super.onDestroy()
+            engineScope.cancel()
+            handler.removeCallbacks(drawRunnable)
+            handler.removeCallbacks(rotationRunnable)
+            recycleBitmaps()
         }
 
         override fun onTouchEvent(event: android.view.MotionEvent) {
             super.onTouchEvent(event)
-            
             val numBitmaps = pageBitmaps.size
             if (numBitmaps <= 1) return
 
             when (event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    lastX = event.x
-                }
+                android.view.MotionEvent.ACTION_DOWN -> lastX = event.x
                 android.view.MotionEvent.ACTION_UP -> {
                     val deltaX = event.x - lastX
-                    // Increase threshold slightly to prevent accidental swipes while scrolling home apps
                     if (kotlin.math.abs(deltaX) > swipeThreshold) {
-                        if (deltaX > 0) {
-                            // Swipe Right (Gesture moves left to right) -> Show PREVIOUS wallpaper
-                            manualPageIndex = if (manualPageIndex > 0) manualPageIndex - 1 else numBitmaps - 1
-                        } else {
-                            // Swipe Left (Gesture moves right to left) -> Show NEXT wallpaper
-                            manualPageIndex = if (manualPageIndex < numBitmaps - 1) manualPageIndex + 1 else 0
-                        }
-                        
-                        Log.d("MultiWallpaperDebug", "Manual Swipe Action! Delta: $deltaX, New Index: $manualPageIndex")
-                        
-                        // FORCE REDRAW IMMEDIATELY
+                        if (deltaX > 0) manualPageIndex = if (manualPageIndex > 0) manualPageIndex - 1 else numBitmaps - 1
+                        else manualPageIndex = if (manualPageIndex < numBitmaps - 1) manualPageIndex + 1 else 0
                         drawFrame()
                     }
                 }
@@ -97,43 +96,22 @@ class MultiWallpaperLiveService : WallpaperService() {
             }
         }
 
-        override fun onOffsetsChanged(
-            xOffset: Float,
-            yOffset: Float,
-            xStep: Float,
-            yStep: Float,
-            xPixels: Int,
-            yPixels: Int
-        ) {
+        override fun onOffsetsChanged(xOffset: Float, yOffset: Float, xStep: Float, yStep: Float, xPixels: Int, yPixels: Int) {
             val validXOffset = if (xOffset.isNaN()) 0f else xOffset
             val validXStep = if (xStep.isNaN()) 0f else xStep
             
-            // LOG DATA UNTUK DEBUG
-            Log.d("MultiWallpaperDebug", "Slide Event -> xOffset: $validXOffset, xStep: $validXStep, xPixels: $xPixels")
-            
-            // Simpan nilai terbaru
             if (this.xOffset != validXOffset || this.xStep != validXStep) {
                 this.xOffset = validXOffset
                 this.xStep = validXStep
                 
-                // SYNC manualPageIndex: Pastikan manual swipe dan auto mode sinkron
                 val numBitmaps = pageBitmaps.size
                 if (numBitmaps > 1) {
-                    val systemPageIndex = if (validXStep > 0f) {
-                        (validXOffset / validXStep).roundToInt()
-                    } else {
-                        (validXOffset * (numBitmaps - 1)).roundToInt()
-                    }.coerceIn(0, numBitmaps - 1)
-                    
-                    if (manualPageIndex != systemPageIndex) {
-                        manualPageIndex = systemPageIndex
-                        Log.d("MultiWallpaperDebug", "Syncing manualPageIndex to $manualPageIndex")
-                    }
+                    val systemPageIndex = if (validXStep > 0f) (validXOffset / validXStep).roundToInt()
+                                         else (validXOffset * (numBitmaps - 1)).roundToInt()
+                    val targetIndex = systemPageIndex.coerceIn(0, numBitmaps - 1)
+                    if (manualPageIndex != targetIndex) manualPageIndex = targetIndex
                 }
-                
-                if (visible) {
-                    drawFrame()
-                }
+                if (visible) drawFrame()
             }
         }
 
@@ -141,33 +119,11 @@ class MultiWallpaperLiveService : WallpaperService() {
             super.onSurfaceChanged(holder, format, width, height)
             this.surfaceWidth = width
             this.surfaceHeight = height
-            
-            // Suggest a very wide width (5x screen width) to force HyperOS/MIUI 
-            // to recognize this as a scrollable live wallpaper.
             try {
                 val wm = getSystemService(Context.WALLPAPER_SERVICE) as android.app.WallpaperManager
                 wm.suggestDesiredDimensions(width * 5, height)
-            } catch (e: Exception) {
-                Log.e("MultiWallpaperEngine", "Error suggesting dimensions", e)
-            }
-
+            } catch (e: Exception) {}
             drawFrame()
-        }
-
-        override fun onCommand(
-            action: String?,
-            x: Int,
-            y: Int,
-            z: Int,
-            extras: android.os.Bundle?,
-            resultRequested: Boolean
-        ): android.os.Bundle? {
-            // MIUI/HyperOS sometimes sends commands instead of smooth offsets
-            if (action == "android.wallpaper.tap" || action == "android.home.drop") {
-                // Potential page change indicator, trigger a redraw
-                drawFrame()
-            }
-            return super.onCommand(action, x, y, z, extras, resultRequested)
         }
 
         private fun scheduleRotation() {
@@ -177,213 +133,161 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun rotateWallpapers() {
-            loadWallpapersForPages()
-            scheduleRotation()
+            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val transitionType = prefs.getString("transition_type", "slide")
+            
+            if (transitionType == "fade" && pageBitmaps.isNotEmpty()) {
+                startFadeRotation()
+            } else {
+                loadWallpapersForPages()
+                scheduleRotation()
+            }
+        }
+
+        private fun startFadeRotation() {
+            Thread {
+                val uris = getAllAvailableUris()
+                if (uris.isNotEmpty()) {
+                    val newBmp = decodeSampledBitmapFromUri(Uri.parse(uris[Random.nextInt(uris.size)]), surfaceWidth, surfaceHeight)
+                    handler.post {
+                        if (newBmp != null) {
+                            nextBitmap = newBmp
+                            isTransitioning = true
+                            transitionAlpha = 0
+                            animateFade()
+                        } else {
+                            loadWallpapersForPages()
+                            scheduleRotation()
+                        }
+                    }
+                }
+            }.start()
+        }
+
+        private fun animateFade() {
+            if (!isTransitioning) return
+            transitionAlpha += 15
+            if (transitionAlpha >= 255) {
+                transitionAlpha = 255
+                isTransitioning = false
+                val old = pageBitmaps[manualPageIndex]
+                pageBitmaps[manualPageIndex] = nextBitmap!!
+                nextBitmap = null
+                old?.recycle()
+                drawFrame()
+                scheduleRotation()
+            } else {
+                drawFrame()
+                handler.postDelayed({ animateFade() }, 30)
+            }
         }
 
         private fun getRotationIntervalMs(): Long {
             val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
-            val minutes = prefs.getFloat("interval_minutes", 1f) // default 1 minute for easy test
-            return (minutes * 60 * 1000L).toLong()
+            val seconds = prefs.getFloat("interval_seconds", 60f)
+            return (seconds * 1000L).toLong()
+        }
+
+        private fun getAllAvailableUris(): List<String> {
+            val db = AppDatabase.getDatabase(this@MultiWallpaperLiveService)
+            val folders = db.folderDao().getAllFoldersSync()
+            val favorites = db.favoriteDao().getAllFavoritesSync()
+            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            
+            if (prefs.getBoolean("use_favorites_only", false)) return favorites.map { it.uriString }
+            
+            val all = mutableListOf<String>()
+            for (f in folders) all.addAll(scanFolderForImages(Uri.parse(f.uriString)))
+            return all
         }
 
         private fun loadWallpapersForPages() {
-            val context = this@MultiWallpaperLiveService
-            val db = AppDatabase.getDatabase(context)
-
             Thread {
                 try {
-                    val folders = db.folderDao().getAllFoldersSync()
-                    val favorites = db.favoriteDao().getAllFavoritesSync()
-
-                    if (folders.isEmpty() && favorites.isEmpty()) {
-                        handler.post { 
-                            isLoading = false
-                            drawFrame() 
-                        }
+                    val allUris = getAllAvailableUris()
+                    if (allUris.isEmpty()) {
+                        handler.post { recycleBitmaps(); isLoading = false; drawFrame() }
                         return@Thread
                     }
 
+                    handler.post { if (pageBitmaps.isEmpty()) { isLoading = true; drawFrame() } }
+
+                    val random = Random(System.currentTimeMillis())
+                    val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(allUris[random.nextInt(allUris.size)]), surfaceWidth, surfaceHeight)
+                    
                     handler.post {
-                        if (pageBitmaps.isEmpty()) {
-                            isLoading = true
-                            drawFrame()
-                        }
+                        recycleBitmaps()
+                        if (firstBitmap != null) pageBitmaps[0] = firstBitmap
+                        isLoading = false
+                        drawFrame()
                     }
 
-                    val prefs = context.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
-                    val useFavoritesOnly = prefs.getBoolean("use_favorites_only", false)
-
-                    val allImageUris = mutableListOf<String>()
-                    if (useFavoritesOnly) {
-                        allImageUris.addAll(favorites.map { it.uriString })
-                    } else {
-                        for (folder in folders) {
-                            try {
-                                val uri = Uri.parse(folder.uriString)
-                                val list = scanFolderForImages(uri)
-                                allImageUris.addAll(list)
-                            } catch (e: Exception) {
-                                Log.e("MultiWallpaperEngine", "Error scanning ${folder.uriString}", e)
-                            }
-                        }
+                    val temp = mutableMapOf<Int, Bitmap>()
+                    for (p in 1 until 10) {
+                        val b = decodeSampledBitmapFromUri(Uri.parse(allUris[random.nextInt(allUris.size)]), surfaceWidth, surfaceHeight)
+                        if (b != null) temp[p] = b
                     }
-
-                    if (allImageUris.isNotEmpty()) {
-                        val random = Random(System.currentTimeMillis())
-                        
-                        // 1. LOAD SATU GAMBAR PERTAMA AGAR CEPAT MUNCUL
-                        val firstUriStr = allImageUris[random.nextInt(allImageUris.size)]
-                        val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(firstUriStr), surfaceWidth, surfaceHeight)
-                        
-                        handler.post {
-                            if (firstBitmap != null) {
-                                recycleBitmaps()
-                                pageBitmaps[0] = firstBitmap
-                            }
-                            isLoading = false
-                            drawFrame()
-                        }
-
-                        // 2. LOAD SISANYA DI BACKGROUND
-                        val tempBitmaps = mutableMapOf<Int, Bitmap>()
-                        val poolSize = 10 
-                        for (page in 1 until poolSize) {
-                            val uriStr = allImageUris[random.nextInt(allImageUris.size)]
-                            val bitmap = decodeSampledBitmapFromUri(Uri.parse(uriStr), surfaceWidth, surfaceHeight)
-                            if (bitmap != null) {
-                                tempBitmaps[page] = bitmap
-                            }
-                        }
-
-                        handler.post {
-                            pageBitmaps.putAll(tempBitmaps)
-                        }
-                    } else {
-                        handler.post { 
-                            isLoading = false
-                            drawFrame() 
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e("MultiWallpaperEngine", "Error loading wallpapers", e)
-                    handler.post { isLoading = false }
-                }
+                    handler.post { pageBitmaps.putAll(temp) }
+                } catch (e: Exception) { handler.post { isLoading = false } }
             }.start()
         }
 
         private fun scanFolderForImages(uri: Uri): List<String> {
             val list = mutableListOf<String>()
-            val context = this@MultiWallpaperLiveService
-            
             if (uri.scheme == "file") {
                 val root = java.io.File(uri.path ?: "")
                 if (root.exists() && root.isDirectory) {
-                    val files = root.listFiles()
-                    files?.forEach { file ->
-                        if (file.isFile && (file.name.endsWith(".jpg", true) || file.name.endsWith(".png", true) || file.name.endsWith(".webp", true))) {
-                            list.add(Uri.fromFile(file).toString())
-                        } else if (file.isDirectory) {
-                            // Recursive scan for file system
-                            list.addAll(scanFolderForImages(Uri.fromFile(file)))
+                    fun scan(file: java.io.File) {
+                        file.listFiles()?.forEach { f ->
+                            if (f.isFile && (f.name.endsWith(".jpg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true))) list.add(Uri.fromFile(f).toString())
+                            else if (f.isDirectory && !f.name.startsWith(".")) scan(f)
                         }
                     }
+                    scan(root)
                 }
                 return list
             }
-
-            // SAF logic
-            val folderQueue = java.util.ArrayDeque<Uri>()
-            folderQueue.add(uri)
-
-            while (folderQueue.isNotEmpty()) {
-                val currentFolderUri = folderQueue.poll() ?: continue
+            val q = java.util.ArrayDeque<Uri>(); q.add(uri)
+            while (q.isNotEmpty()) {
+                val curr = q.poll() ?: continue
                 try {
-                    val treeId = if (currentFolderUri == uri) {
-                        DocumentsContract.getTreeDocumentId(currentFolderUri)
-                    } else {
-                        DocumentsContract.getDocumentId(currentFolderUri)
-                    }
-                    
-                    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, treeId)
-                    val cursor = context.contentResolver.query(
-                        childrenUri,
-                        arrayOf(
-                            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                            DocumentsContract.Document.COLUMN_MIME_TYPE
-                        ),
-                        null, null, null
-                    )
-                    
-                    cursor?.use { c ->
-                        val idCol = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                        val mimeCol = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    val id = if (curr == uri) DocumentsContract.getTreeDocumentId(curr) else DocumentsContract.getDocumentId(curr)
+                    contentResolver.query(DocumentsContract.buildChildDocumentsUriUsingTree(uri, id), arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_MIME_TYPE), null, null, null)?.use { c ->
                         while (c.moveToNext()) {
-                            val docId = c.getString(idCol)
-                            val mimeType = c.getString(mimeCol)
-                            if (mimeType != null) {
-                                if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
-                                    val subFolderUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
-                                    folderQueue.add(subFolderUri)
-                                } else if (mimeType.startsWith("image/")) {
-                                    val childUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
-                                    list.add(childUri.toString())
-                                }
-                            }
+                            val dId = c.getString(0); val mime = c.getString(1)
+                            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) q.add(DocumentsContract.buildDocumentUriUsingTree(uri, dId))
+                            else if (mime != null && mime.startsWith("image/")) list.add(DocumentsContract.buildDocumentUriUsingTree(uri, dId).toString())
                         }
                     }
-                } catch (e: Exception) {
-                    Log.e("MultiWallpaperEngine", "Failed querying document tree at $currentFolderUri", e)
-                }
+                } catch (e: Exception) {}
             }
             return list
         }
 
         private fun decodeSampledBitmapFromUri(uri: Uri, reqWidth: Int, reqHeight: Int): Bitmap? {
-            var input: InputStream? = null
             return try {
-                val context = this@MultiWallpaperLiveService
-                input = context.contentResolver.openInputStream(uri) ?: return null
-                val options = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
+                contentResolver.openInputStream(uri)?.use { input ->
+                    val opt = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeStream(input, null, opt)
+                    opt.inSampleSize = calculateInSampleSize(opt, reqWidth, reqHeight)
+                    opt.inJustDecodeBounds = false
+                    // Re-read stream correctly
+                    contentResolver.openInputStream(uri)?.use { i2 -> BitmapFactory.decodeStream(i2, null, opt) }
                 }
-                BitmapFactory.decodeStream(input, null, options)
-                input.close()
-
-                options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
-                options.inJustDecodeBounds = false
-
-                input = context.contentResolver.openInputStream(uri)
-                BitmapFactory.decodeStream(input, null, options)
-            } catch (e: Exception) {
-                Log.e("MultiWallpaperEngine", "Error decoding uri $uri", e)
-                null
-            } finally {
-                try { input?.close() } catch (ignored: Exception) {}
-            }
+            } catch (e: Exception) { null }
         }
 
-        private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
-            val (height: Int, width: Int) = options.outHeight to options.outWidth
-            var inSampleSize = 1
-
-            if (height > reqHeight || width > reqWidth) {
-                val halfHeight = height / 2
-                val halfWidth = width / 2
-                while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
-                    inSampleSize *= 2
-                }
+        private fun calculateInSampleSize(opt: BitmapFactory.Options, rw: Int, rh: Int): Int {
+            var s = 1; if (opt.outHeight > rh || opt.outWidth > rw) {
+                val hh = opt.outHeight / 2; val hw = opt.outWidth / 2
+                while (hh / s >= rh && hw / s >= rw) s *= 2
             }
-            return inSampleSize
+            return s
         }
 
         private fun recycleBitmaps() {
-            for (bitmap in pageBitmaps.values) {
-                if (!bitmap.isRecycled) {
-                    bitmap.recycle()
-                }
-            }
-            pageBitmaps.clear()
+            pageBitmaps.values.forEach { if (!it.isRecycled) it.recycle() }; pageBitmaps.clear()
+            nextBitmap?.recycle(); nextBitmap = null
         }
 
         private fun drawFrame() {
@@ -391,128 +295,57 @@ class MultiWallpaperLiveService : WallpaperService() {
             var canvas: Canvas? = null
             try {
                 canvas = holder.lockCanvas()
-                if (canvas != null) {
-                    drawCanvas(canvas)
-                }
-            } catch (e: Exception) {
-                Log.e("MultiWallpaperEngine", "Error locking canvas", e)
+                if (canvas != null) drawCanvas(canvas)
             } finally {
-                if (canvas != null) {
-                    try {
-                        holder.unlockCanvasAndPost(canvas)
-                    } catch (ignored: Exception) {}
-                }
+                if (canvas != null) holder.unlockCanvasAndPost(canvas)
             }
         }
 
         private fun drawCanvas(canvas: Canvas) {
-            val width = canvas.width
-            val height = canvas.height
-
+            val w = canvas.width; val h = canvas.height
             if (pageBitmaps.isEmpty() || isLoading) {
-                val paint = Paint().apply {
-                    color = Color.parseColor("#1A1F2C")
-                }
-                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-
-                val textPaint = Paint().apply {
-                    color = Color.parseColor("#E2E8F0")
-                    textSize = 42f
-                    textAlign = Paint.Align.CENTER
-                    isAntiAlias = true
-                    typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-                }
-                val subTextPaint = Paint().apply {
-                    color = Color.parseColor("#94A3B8")
-                    textSize = 34f
-                    textAlign = Paint.Align.CENTER
-                    isAntiAlias = true
-                    typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
-                }
-                
-                val title = if (isLoading) "Sedang Memuat..." else "Pilih Folder di Aplikasi"
-                val subtitle = if (isLoading) "Harap tunggu sebentar" else "Lalu Klik Atur Sebagai Wallpaper"
-                
-                canvas.drawText(title, width / 2f, height / 2f - 40f, textPaint)
-                canvas.drawText(subtitle, width / 2f, height / 2f + 20f, subTextPaint)
+                canvas.drawColor(Color.parseColor("#1A1F2C"))
+                val p = Paint().apply { color = Color.WHITE; textSize = 40f; textAlign = Paint.Align.CENTER; isAntiAlias = true }
+                if (isLoading) {
+                    canvas.drawText("Loading...", w / 2f, h / 2f, p)
+                    p.style = Paint.Style.STROKE; p.strokeWidth = 4f
+                    canvas.drawCircle(w / 2f, h / 2f + 60f, 30f, p)
+                } else canvas.drawText("Select folders in App", w / 2f, h / 2f, p)
                 return
             }
 
-            val numBitmaps = pageBitmaps.size
-            
-            // HYPER OS FIX: Deteksi apakah kita sedang transisi lancar atau di titik snap (halaman diam)
-            // xStep memberi tahu jarak antar halaman. Jika xOffset bukan kelipatan xStep, berarti sedang transisi.
-            val isFluid = if (xStep > 0f) {
-                val offsetInPages = xOffset / xStep
-                val distToSnap = kotlin.math.abs(offsetInPages - offsetInPages.roundToInt())
-                distToSnap > 0.01f // Jika lebih dari 1% dari titik snap, anggap fluid
-            } else {
-                // Jika xStep 0 (HyperOS awal), anggap tidak fluid agar manual mode jalan
-                false
-            }
-            
-            // Di HyperOS, xStep sering tersisa dari launcher sebelumnya (misal 0.5) tapi xOffset diam (stuck).
-            // Kita gunakan manualPageIndex sebagai sumber utama saat launcher sedang diam.
-            val pageIndex = if (isFluid) {
-                (xOffset * (numBitmaps - 1)).roundToInt().coerceIn(0, numBitmaps - 1)
-            } else {
-                manualPageIndex.coerceIn(0, numBitmaps - 1)
-            }
-            
-            Log.d("MultiWallpaperDebug", "Drawing -> Mode: ${if(isFluid) "Auto" else "Manual"}, Index: $pageIndex, xOffset: $xOffset, manualIndex: $manualPageIndex")
+            val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.01f else false
+            val idx = if (isFluid) (xOffset * (pageBitmaps.size - 1)).roundToInt().coerceIn(0, pageBitmaps.size - 1) else manualPageIndex.coerceIn(0, pageBitmaps.size - 1)
 
-            val currentBitmap = pageBitmaps[pageIndex]
-            if (currentBitmap != null) {
-                val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
-                val transitionType = prefs.getString("transition_type", "slide") // slide or fade
-
-                if (transitionType == "fade" && isFluid) {
-                    // Smooth Fade logic only for standard launchers
-                    val position = xOffset * (numBitmaps - 1)
-                    val leftIdx = position.toInt()
-                    val rightIdx = (leftIdx + 1).coerceAtMost(numBitmaps - 1)
-                    val fraction = position - leftIdx
-                    
-                    val leftBitmap = pageBitmaps[leftIdx]
-                    val rightBitmap = pageBitmaps[rightIdx]
-                    
-                    if (leftBitmap != null && rightBitmap != null && leftIdx != rightIdx) {
-                        val paint = Paint().apply { isFilterBitmap = true }
-                        paint.alpha = ((1f - fraction) * 255).toInt()
-                        drawSingleBitmapWithPaint(canvas, leftBitmap, width, height, paint)
-                        paint.alpha = (fraction * 255).toInt()
-                        drawSingleBitmapWithPaint(canvas, rightBitmap, width, height, paint)
-                    } else if (leftBitmap != null) {
-                        drawSingleBitmap(canvas, leftBitmap, width, height)
-                    }
-                } else {
-                    // Force Instant Snap for Manual Mode (HyperOS)
-                    drawSingleBitmap(canvas, currentBitmap, width, height)
-                }
+            val curr = pageBitmaps[idx]
+            if (curr != null) {
+                val transition = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE).getString("transition_type", "slide")
+                if (isTransitioning && nextBitmap != null) {
+                    val paint = Paint().apply { isFilterBitmap = true }
+                    paint.alpha = 255 - transitionAlpha
+                    drawSingleBitmapWithPaint(canvas, curr, w, h, paint)
+                    paint.alpha = transitionAlpha
+                    drawSingleBitmapWithPaint(canvas, nextBitmap!!, w, h, paint)
+                } else if (transition == "fade" && isFluid) {
+                    val pos = xOffset * (pageBitmaps.size - 1); val l = pos.toInt(); val r = (l + 1).coerceAtMost(pageBitmaps.size - 1); val f = pos - l
+                    val lb = pageBitmaps[l]; val rb = pageBitmaps[r]
+                    if (lb != null && rb != null && l != r) {
+                        val p = Paint().apply { isFilterBitmap = true }
+                        p.alpha = ((1f - f) * 255).toInt(); drawSingleBitmapWithPaint(canvas, lb, w, h, p)
+                        p.alpha = (f * 255).toInt(); drawSingleBitmapWithPaint(canvas, rb, w, h, p)
+                    } else if (lb != null) drawSingleBitmap(canvas, lb, w, h)
+                } else drawSingleBitmap(canvas, curr, w, h)
             }
         }
 
-        private fun drawSingleBitmap(canvas: Canvas, bitmap: Bitmap, width: Int, height: Int) {
-            val paint = Paint().apply { isFilterBitmap = true }
-            drawSingleBitmapWithPaint(canvas, bitmap, width, height, paint)
+        private fun drawSingleBitmap(canvas: Canvas, b: Bitmap, w: Int, h: Int) {
+            drawSingleBitmapWithPaint(canvas, b, w, h, Paint().apply { isFilterBitmap = true })
         }
 
-        private fun drawSingleBitmapWithPaint(canvas: Canvas, bitmap: Bitmap, width: Int, height: Int, paint: Paint) {
-            val src = Rect(0, 0, bitmap.width, bitmap.height)
-            val scaleX = width.toFloat() / bitmap.width
-            val scaleY = height.toFloat() / bitmap.height
-            val scale = maxOf(scaleX, scaleY)
-
-            val outWidth = bitmap.width * scale
-            val outHeight = bitmap.height * scale
-
-            val left = (width - outWidth) / 2f
-            val top = (height - outHeight) / 2f
-            val right = left + outWidth
-            val bottom = top + outHeight
-
-            val dst = Rect(left.toInt(), top.toInt(), right.toInt(), bottom.toInt())
-            canvas.drawBitmap(bitmap, src, dst, paint)
+        private fun drawSingleBitmapWithPaint(canvas: Canvas, b: Bitmap, w: Int, h: Int, p: Paint) {
+            val s = maxOf(w.toFloat() / b.width, h.toFloat() / b.height)
+            val ow = b.width * s; val oh = b.height * s
+            canvas.drawBitmap(b, Rect(0, 0, b.width, b.height), RectF((w - ow) / 2f, (h - oh) / 2f, (w + ow) / 2f, (h + oh) / 2f), p)
         }
     }
 }
