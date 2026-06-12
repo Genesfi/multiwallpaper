@@ -12,7 +12,10 @@ interface FolderDao {
     fun getAllFoldersSync(): List<FolderEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertFolder(folder: FolderEntity)
+    suspend fun insertFolders(folders: List<FolderEntity>)
+
+    @Query("DELETE FROM folders")
+    suspend fun deleteAllFolders()
 
     @Delete
     suspend fun deleteFolder(folder: FolderEntity)

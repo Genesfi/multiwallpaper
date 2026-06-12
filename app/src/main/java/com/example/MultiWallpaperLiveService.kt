@@ -220,7 +220,8 @@ class MultiWallpaperLiveService : WallpaperService() {
                     } else {
                         for (folder in folders) {
                             try {
-                                val list = scanFolderForImages(Uri.parse(folder.uriString))
+                                val uri = Uri.parse(folder.uriString)
+                                val list = scanFolderForImages(uri)
                                 allImageUris.addAll(list)
                             } catch (e: Exception) {
                                 Log.e("MultiWallpaperEngine", "Error scanning ${folder.uriString}", e)
@@ -244,7 +245,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                             drawFrame()
                         }
 
-                        // 2. LOAD SISANYA DI BACKGROUND (Kurangi pool ke 10 agar lebih enteng)
+                        // 2. LOAD SISANYA DI BACKGROUND
                         val tempBitmaps = mutableMapOf<Int, Bitmap>()
                         val poolSize = 10 
                         for (page in 1 until poolSize) {
@@ -257,7 +258,6 @@ class MultiWallpaperLiveService : WallpaperService() {
 
                         handler.post {
                             pageBitmaps.putAll(tempBitmaps)
-                            // Jika user sudah geser ke halaman lain saat loading selesai, gambar akan muncul
                         }
                     } else {
                         handler.post { 
@@ -272,24 +272,40 @@ class MultiWallpaperLiveService : WallpaperService() {
             }.start()
         }
 
-        private fun scanFolderForImages(treeUri: Uri): List<String> {
+        private fun scanFolderForImages(uri: Uri): List<String> {
             val list = mutableListOf<String>()
             val context = this@MultiWallpaperLiveService
             
-            // Queue for BFS recursive scanning
+            if (uri.scheme == "file") {
+                val root = java.io.File(uri.path ?: "")
+                if (root.exists() && root.isDirectory) {
+                    val files = root.listFiles()
+                    files?.forEach { file ->
+                        if (file.isFile && (file.name.endsWith(".jpg", true) || file.name.endsWith(".png", true) || file.name.endsWith(".webp", true))) {
+                            list.add(Uri.fromFile(file).toString())
+                        } else if (file.isDirectory) {
+                            // Recursive scan for file system
+                            list.addAll(scanFolderForImages(Uri.fromFile(file)))
+                        }
+                    }
+                }
+                return list
+            }
+
+            // SAF logic
             val folderQueue = java.util.ArrayDeque<Uri>()
-            folderQueue.add(treeUri)
+            folderQueue.add(uri)
 
             while (folderQueue.isNotEmpty()) {
                 val currentFolderUri = folderQueue.poll() ?: continue
                 try {
-                    val treeId = if (currentFolderUri == treeUri) {
+                    val treeId = if (currentFolderUri == uri) {
                         DocumentsContract.getTreeDocumentId(currentFolderUri)
                     } else {
                         DocumentsContract.getDocumentId(currentFolderUri)
                     }
                     
-                    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeId)
+                    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, treeId)
                     val cursor = context.contentResolver.query(
                         childrenUri,
                         arrayOf(
@@ -307,10 +323,10 @@ class MultiWallpaperLiveService : WallpaperService() {
                             val mimeType = c.getString(mimeCol)
                             if (mimeType != null) {
                                 if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
-                                    val subFolderUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                                    val subFolderUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
                                     folderQueue.add(subFolderUri)
                                 } else if (mimeType.startsWith("image/")) {
-                                    val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                                    val childUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
                                     list.add(childUri.toString())
                                 }
                             }

@@ -4,7 +4,6 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.util.Log
@@ -15,6 +14,7 @@ import com.example.data.AppDatabase
 import com.example.data.FavoriteImageEntity
 import com.example.data.FolderEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -42,6 +42,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
+    // Selection State for deletion
+    private val _selectedFolderIds = MutableStateFlow<Set<Int>>(emptySet())
+    val selectedFolderIds = _selectedFolderIds.asStateFlow()
+
     // Settings States
     private val _intervalMinutes = MutableStateFlow(prefs.getFloat("interval_minutes", 1f))
     val intervalMinutes = _intervalMinutes.asStateFlow()
@@ -55,13 +59,17 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     init {
         // Automatically start scanning when folders change
         viewModelScope.launch {
-            folders.collect {
+            @OptIn(FlowPreview::class)
+            folders.debounce(1000).collect {
                 scanFolders()
             }
         }
     }
 
     // File Explorer State
+    private val _currentPath = MutableStateFlow(Environment.getExternalStorageDirectory())
+    val currentPath = _currentPath.asStateFlow()
+
     private val _currentPathItems = MutableStateFlow<List<FileItem>>(emptyList())
     val currentPathItems = _currentPathItems.asStateFlow()
 
@@ -71,73 +79,77 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _isAllSelected = MutableStateFlow(false)
     val isAllSelected = _isAllSelected.asStateFlow()
 
+    fun navigateTo(directory: java.io.File) {
+        _currentPath.value = directory
+        refreshCurrentPath()
+    }
+
+    fun navigateBack(): Boolean {
+        val parent = _currentPath.value.parentFile
+        val root = Environment.getExternalStorageDirectory()
+        if (parent != null && parent.absolutePath.startsWith(root.absolutePath) && parent.absolutePath != root.parentFile?.absolutePath) {
+            navigateTo(parent)
+            return true
+        }
+        return false
+    }
+
+    fun refreshCurrentPath() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val items = mutableListOf<FileItem>()
+            try {
+                val files = _currentPath.value.listFiles()
+                files?.forEach { file ->
+                    if (file.isDirectory && !file.name.startsWith(".")) {
+                        items.add(FileItem(file.name, Uri.fromFile(file), true))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "Failed to list files", e)
+            }
+            _currentPathItems.value = items.sortedBy { it.name }
+            updateAllSelectedState()
+        }
+    }
+
+    private fun updateAllSelectedState() {
+        val currentItems = _currentPathItems.value
+        if (currentItems.isEmpty()) {
+            _isAllSelected.value = false
+            return
+        }
+        _isAllSelected.value = currentItems.all { _selectedFolders.value.contains(it.uri) }
+    }
+
     fun toggleSelectAll() {
         val newState = !_isAllSelected.value
         _isAllSelected.value = newState
+        val currentItems = _currentPathItems.value
+        val currentSelected = _selectedFolders.value.toMutableSet()
+        
         if (newState) {
-            _selectedFolders.value = _currentPathItems.value.map { it.uri }.toSet()
+            currentItems.forEach { currentSelected.add(it.uri) }
         } else {
-            _selectedFolders.value = emptySet()
+            currentItems.forEach { currentSelected.remove(it.uri) }
         }
+        _selectedFolders.value = currentSelected
     }
 
     fun toggleFolderSelection(uri: Uri) {
         val current = _selectedFolders.value.toMutableSet()
         if (current.contains(uri)) current.remove(uri) else current.add(uri)
         _selectedFolders.value = current
+        updateAllSelectedState()
     }
 
-    fun browseFolder(uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val context = getApplication<Application>()
-            val items = mutableListOf<FileItem>()
-            
-            // Try standard File API first if permission is granted
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) {
-                try {
-                    // Logic to extract real path from URI if possible, or use root
-                    val root = Environment.getExternalStorageDirectory()
-                    val files = root.listFiles()
-                    files?.forEach { file ->
-                        if (file.isDirectory && !file.name.startsWith(".")) {
-                            items.add(FileItem(file.name, Uri.fromFile(file), true))
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e("HomeViewModel", "File API browsing failed", e)
-                }
-            }
-            
-            // Fallback to DocumentTree if items are empty or standard API fails
-            if (items.isEmpty()) {
-                try {
-                    val treeId = DocumentsContract.getTreeDocumentId(uri)
-                    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, treeId)
-                    val cursor = context.contentResolver.query(
-                        childrenUri,
-                        arrayOf(
-                            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                            DocumentsContract.Document.COLUMN_MIME_TYPE
-                        ),
-                        null, null, null
-                    )
-                    cursor?.use { c ->
-                        while (c.moveToNext()) {
-                            val id = c.getString(0)
-                            val name = c.getString(1)
-                            val mime = c.getString(2)
-                            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                                items.add(FileItem(name, DocumentsContract.buildDocumentUriUsingTree(uri, id), true))
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e("HomeViewModel", "Error browsing folder", e)
-                }
-            }
-            _currentPathItems.value = items.sortedBy { it.name }
-        }
+    fun toggleFolderIdSelection(id: Int) {
+        val current = _selectedFolderIds.value.toMutableSet()
+        if (current.contains(id)) current.remove(id) else current.add(id)
+        _selectedFolderIds.value = current
+    }
+
+    fun clearFolderIdSelection() {
+        _selectedFolderIds.value = emptySet()
     }
 
     fun confirmMultiSelect() {
@@ -166,62 +178,49 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun addFolders(uris: List<Uri>) {
         viewModelScope.launch(Dispatchers.IO) {
             val contentResolver = getApplication<Application>().contentResolver
+            val foldersToInsert = mutableListOf<FolderEntity>()
+            
             uris.forEach { uri ->
                 try {
-                    contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
-                    
                     var displayName = "Folder"
-                    val documentId = DocumentsContract.getTreeDocumentId(uri)
-                    val documentUri = DocumentsContract.buildDocumentUriUsingTree(uri, documentId)
-                    val cursor = contentResolver.query(
-                        documentUri,
-                        arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-                        null, null, null
-                    )
-                    cursor?.use { c ->
-                        if (c.moveToFirst()) {
-                            displayName = c.getString(0) ?: "Folder"
+                    if (uri.scheme == "file") {
+                        displayName = java.io.File(uri.path ?: "").name
+                    } else {
+                        contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                        val documentId = DocumentsContract.getTreeDocumentId(uri)
+                        val documentUri = DocumentsContract.buildDocumentUriUsingTree(uri, documentId)
+                        val cursor = contentResolver.query(
+                            documentUri,
+                            arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                            null, null, null
+                        )
+                        cursor?.use { c ->
+                            if (c.moveToFirst()) {
+                                displayName = c.getString(0) ?: "Folder"
+                            }
                         }
                     }
 
-                    folderDao.insertFolder(
+                    foldersToInsert.add(
                         FolderEntity(
                             uriString = uri.toString(),
                             displayName = displayName
                         )
                     )
                 } catch (e: Exception) {
-                    Log.e("HomeViewModel", "Failed to add folder: $uri", e)
+                    Log.e("HomeViewModel", "Failed to prepare folder: $uri", e)
                 }
             }
-            withContext(Dispatchers.Main) {
-                Toast.makeText(getApplication(), "${uris.size} folder ditambahkan!", Toast.LENGTH_SHORT).show()
+            
+            if (foldersToInsert.isNotEmpty()) {
+                folderDao.insertFolders(foldersToInsert)
             }
-            scanFolders()
-        }
-    }
-
-    fun addImagesDirectly(uris: List<Uri>) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val contentResolver = getApplication<Application>().contentResolver
-            uris.forEach { uri ->
-                try {
-                    contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
-                    // We treat individual images as a special virtual folder for simplicity
-                    // or we can add them to a "Manual Selection" folder in DB.
-                } catch (e: Exception) {
-                    Log.e("HomeViewModel", "Permission failed for image: $uri")
-                }
-            }
-            // For now, let's notify user this is coming soon or just use recursive folder
+            
             withContext(Dispatchers.Main) {
-                Toast.makeText(getApplication(), "${uris.size} gambar dipilih!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(getApplication(), "${foldersToInsert.size} folder ditambahkan!", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -230,9 +229,31 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             folderDao.deleteFolder(folder)
             withContext(Dispatchers.Main) {
-                Toast.makeText(getApplication(), "Folder dihapus dari daftar", Toast.LENGTH_SHORT).show()
+                Toast.makeText(getApplication(), "Folder dihapus", Toast.LENGTH_SHORT).show()
             }
-            scanFolders()
+        }
+    }
+
+    fun deleteSelectedFolders() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ids = _selectedFolderIds.value.toList()
+            ids.forEach { id ->
+                folderDao.deleteFolderById(id)
+            }
+            withContext(Dispatchers.Main) {
+                Toast.makeText(getApplication(), "${ids.size} folder dihapus", Toast.LENGTH_SHORT).show()
+                clearFolderIdSelection()
+            }
+        }
+    }
+
+    fun clearAllFolders() {
+        viewModelScope.launch(Dispatchers.IO) {
+            folderDao.deleteAllFolders()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(getApplication(), "Daftar folder dibersihkan!", Toast.LENGTH_SHORT).show()
+                clearFolderIdSelection()
+            }
         }
     }
 
@@ -250,8 +271,13 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 )
             }
-            // Rescan to update UI
-            scanFolders()
+            // Real-time update in memory for the scanned list
+            val currentList = _scannedImages.value.toMutableList()
+            val index = currentList.indexOfFirst { it.uriString == img.uriString }
+            if (index != -1) {
+                currentList[index] = currentList[index].copy(isFavorite = !exists)
+                _scannedImages.value = currentList
+            }
         }
     }
 
@@ -259,71 +285,96 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         if (_isScanning.value) return
         _isScanning.value = true
         viewModelScope.launch(Dispatchers.IO) {
-            val context = getApplication<Application>()
             val foldersList = folders.value
             val tempImages = mutableListOf<WallpaperImg>()
+            
+            // Optimization: Fetch all favorite URIs once to avoid DB overhead during recursive scan
+            val favoriteUris = favoriteDao.getAllFavoritesSync().map { it.uriString }.toSet()
 
             for (folder in foldersList) {
                 try {
-                    val treeUri = Uri.parse(folder.uriString)
+                    val uri = Uri.parse(folder.uriString)
                     
-                    // Recursive scan BFS
-                    val folderQueue = java.util.ArrayDeque<Uri>()
-                    folderQueue.add(treeUri)
-
-                    while (folderQueue.isNotEmpty()) {
-                        val currentUri = folderQueue.poll() ?: continue
-                        val treeId = if (currentUri == treeUri) {
-                            DocumentsContract.getTreeDocumentId(currentUri)
-                        } else {
-                            DocumentsContract.getDocumentId(currentUri)
+                    if (uri.scheme == "file") {
+                        val root = java.io.File(uri.path ?: "")
+                        if (root.exists() && root.isDirectory) {
+                            scanRecursive(root, folder.uriString, tempImages, favoriteUris)
                         }
-                        
-                        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeId)
-                        val cursor = context.contentResolver.query(
-                            childrenUri,
-                            arrayOf(
-                                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                                DocumentsContract.Document.COLUMN_MIME_TYPE
-                            ),
-                            null, null, null
-                        )
-                        cursor?.use { c ->
-                            val idCol = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                            val nameCol = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                            val mimeCol = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-                            while (c.moveToNext()) {
-                                val docId = c.getString(idCol)
-                                val name = c.getString(nameCol) ?: "Gambar"
-                                val mimeType = c.getString(mimeCol)
-                                if (mimeType != null) {
-                                    if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
-                                        val subFolderUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                                        folderQueue.add(subFolderUri)
-                                    } else if (mimeType.startsWith("image/")) {
-                                        val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                                        val isFav = favoriteDao.isFavoriteSync(childUri.toString())
-                                        tempImages.add(
-                                            WallpaperImg(
-                                                uriString = childUri.toString(),
-                                                folderUriString = folder.uriString,
-                                                displayName = name,
-                                                isFavorite = isFav
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                    } else {
+                        // SAF logic
+                        scanSafRecursive(uri, folder.uriString, tempImages, favoriteUris)
                     }
                 } catch (e: Exception) {
-                    Log.e("HomeViewModel", "Error scanning documents for ${folder.displayName}", e)
+                    Log.e("HomeViewModel", "Error scanning for ${folder.displayName}", e)
                 }
             }
 
             _scannedImages.value = tempImages
             _isScanning.value = false
+        }
+    }
+
+    private fun scanRecursive(file: java.io.File, rootUri: String, list: MutableList<WallpaperImg>, favoriteUris: Set<String>) {
+        val files = file.listFiles()
+        files?.forEach { f ->
+            if (f.isFile && (f.name.endsWith(".jpg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true))) {
+                val fileUriStr = Uri.fromFile(f).toString()
+                val isFav = favoriteUris.contains(fileUriStr)
+                list.add(WallpaperImg(fileUriStr, rootUri, f.name, isFav))
+            } else if (f.isDirectory && !f.name.startsWith(".")) {
+                scanRecursive(f, rootUri, list, favoriteUris)
+            }
+        }
+    }
+
+    private fun scanSafRecursive(treeUri: Uri, rootUriStr: String, list: MutableList<WallpaperImg>, favoriteUris: Set<String>) {
+        val context = getApplication<Application>()
+        val folderQueue = java.util.ArrayDeque<Uri>()
+        folderQueue.add(treeUri)
+
+        while (folderQueue.isNotEmpty()) {
+            val currentUri = folderQueue.poll() ?: continue
+            try {
+                val treeId = if (currentUri == treeUri) {
+                    DocumentsContract.getTreeDocumentId(currentUri)
+                } else {
+                    DocumentsContract.getDocumentId(currentUri)
+                }
+                
+                val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeId)
+                val cursor = context.contentResolver.query(
+                    childrenUri,
+                    arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE
+                    ),
+                    null, null, null
+                )
+                cursor?.use { c ->
+                    val idCol = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val nameCol = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val mimeCol = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    while (c.moveToNext()) {
+                        val docId = c.getString(idCol)
+                        val name = c.getString(nameCol) ?: "Gambar"
+                        val mimeType = c.getString(mimeCol)
+                        if (mimeType != null) {
+                            if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+                                val subFolderUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                                folderQueue.add(subFolderUri)
+                            } else if (mimeType.startsWith("image/")) {
+                                val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                                val childUriStr = childUri.toString()
+                                val isFav = favoriteUris.contains(childUriStr)
+                                list.add(WallpaperImg(childUriStr, rootUriStr, name, isFav))
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "SAF Scan Error", e)
+            }
         }
     }
 }
