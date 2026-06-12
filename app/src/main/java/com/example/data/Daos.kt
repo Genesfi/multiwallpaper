@@ -49,6 +49,12 @@ interface FavoriteDao {
 
     @Query("DELETE FROM favorites WHERE uriString = :uriString")
     suspend fun deleteFavoriteByUri(uriString: String)
+
+    @Query("DELETE FROM favorites WHERE folderUriString = :folderUriString")
+    suspend fun deleteFavoritesByFolderUri(folderUriString: String)
+
+    @Query("DELETE FROM favorites")
+    suspend fun deleteAllFavorites()
 }
 
 @Dao

@@ -67,6 +67,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var parallaxStrength = 0.5f
         private var transitionType = "slide"
         private var fadeSpeed = 15
+        private var useFavoritesOnly = false
         private var currentRoll = 0f
         private var currentPitch = 0f
         private val smoothingFactor = 0.05f // Stronger LPF to ignore jitter
@@ -112,10 +113,18 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private fun updateSettings() {
             val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val newUseFav = prefs.getBoolean("use_favorites_only", false)
+            val useFavChanged = useFavoritesOnly != newUseFav
+            
+            useFavoritesOnly = newUseFav
             parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
             parallaxStrength = prefs.getFloat("parallax_strength", 0.5f)
             transitionType = prefs.getString("transition_type", "slide") ?: "slide"
             fadeSpeed = prefs.getInt("fade_speed", 15)
+            
+            if (useFavChanged) {
+                loadWallpapersForPages()
+            }
             
             if (visible && parallaxEnabled) {
                 registerSensor()
