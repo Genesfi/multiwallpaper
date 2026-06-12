@@ -54,6 +54,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _transitionType = MutableStateFlow(prefs.getString("transition_type", "slide") ?: "slide")
     val transitionType = _transitionType.asStateFlow()
 
+    private val _doubleTapEnabled = MutableStateFlow(prefs.getBoolean("double_tap_enabled", true))
+    val doubleTapEnabled = _doubleTapEnabled.asStateFlow()
+
     init {
         viewModelScope.launch {
             @OptIn(FlowPreview::class)
@@ -98,7 +101,13 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 val files = _currentPath.value.listFiles()
                 files?.forEach { file ->
                     if (file.isDirectory && !file.name.startsWith(".")) {
-                        items.add(FileItem(file.name, Uri.fromFile(file), true))
+                        // Find a preview image for this folder
+                        val previewUri = file.listFiles()?.firstOrNull { 
+                            val n = it.name.lowercase()
+                            n.endsWith(".jpg") || n.endsWith(".png") || n.endsWith(".webp")
+                        }?.let { Uri.fromFile(it) }
+                        
+                        items.add(FileItem(file.name, Uri.fromFile(file), true, previewUri))
                     }
                 }
             } catch (e: Exception) {
@@ -229,7 +238,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setIntervalSeconds(seconds: Float) {
-        val capped = seconds.coerceAtLeast(10f)
+        val capped = seconds.coerceAtLeast(5f)
         prefs.edit().putFloat("interval_seconds", capped).apply()
         _intervalSeconds.value = capped
     }
@@ -237,6 +246,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setUseFavoritesOnly(enable: Boolean) {
         prefs.edit().putBoolean("use_favorites_only", enable).apply()
         _useFavoritesOnly.value = enable
+    }
+
+    fun setDoubleTapEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("double_tap_enabled", enable).apply()
+        _doubleTapEnabled.value = enable
     }
 
     fun addFolders(uris: List<Uri>) {
@@ -253,7 +267,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         val documentId = DocumentsContract.getTreeDocumentId(uri)
                         val documentUri = DocumentsContract.buildDocumentUriUsingTree(uri, documentId)
-                        val cursor = contentResolver.query(documentUri, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)
+                        val cursor = contentResolver.query(
+                            documentUri,
+                            arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                            null, null, null
+                        )
                         cursor?.use { c -> if (c.moveToFirst()) displayName = c.getString(0) ?: "Folder" }
                     }
                     foldersToInsert.add(FolderEntity(uriString = uri.toString(), displayName = displayName))
@@ -394,5 +412,6 @@ data class WallpaperImg(
 data class FileItem(
     val name: String,
     val uri: Uri,
-    val isDirectory: Boolean
+    val isDirectory: Boolean,
+    val previewUri: Uri? = null
 )

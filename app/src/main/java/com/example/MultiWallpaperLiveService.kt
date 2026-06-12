@@ -34,6 +34,9 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var manualPageIndex = 0
         private val swipeThreshold = 150f
 
+        private var lastTapTime: Long = 0
+        private val doubleTapThreshold = 300L
+
         private var isLoading = false
         private var surfaceWidth = 1080
         private var surfaceHeight = 2400
@@ -70,13 +73,25 @@ class MultiWallpaperLiveService : WallpaperService() {
         override fun onTouchEvent(event: android.view.MotionEvent) {
             super.onTouchEvent(event)
             val numBitmaps = pageBitmaps.size
-            if (numBitmaps <= 1) return
+            if (numBitmaps <= 0) return
 
             when (event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> lastX = event.x
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    val currTime = System.currentTimeMillis()
+                    val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+                    val doubleTapEnabled = prefs.getBoolean("double_tap_enabled", true)
+                    
+                    if (doubleTapEnabled && (currTime - lastTapTime) < doubleTapThreshold) {
+                        rotateWallpapers() // Trigger change
+                        lastTapTime = 0
+                    } else {
+                        lastTapTime = currTime
+                    }
+                    lastX = event.x
+                }
                 android.view.MotionEvent.ACTION_UP -> {
                     val deltaX = event.x - lastX
-                    if (kotlin.math.abs(deltaX) > swipeThreshold) {
+                    if (kotlin.math.abs(deltaX) > swipeThreshold && numBitmaps > 1) {
                         if (deltaX > 0) manualPageIndex = if (manualPageIndex > 0) manualPageIndex - 1 else numBitmaps - 1
                         else manualPageIndex = if (manualPageIndex < numBitmaps - 1) manualPageIndex + 1 else 0
                         drawFrame()
@@ -271,7 +286,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                     BitmapFactory.decodeStream(input, null, opt)
                     opt.inSampleSize = calculateInSampleSize(opt, reqWidth, reqHeight)
                     opt.inJustDecodeBounds = false
-                    // Re-read stream correctly
+                    // Correct stream re-reading
                     contentResolver.openInputStream(uri)?.use { i2 -> BitmapFactory.decodeStream(i2, null, opt) }
                 }
             } catch (e: Exception) { null }
