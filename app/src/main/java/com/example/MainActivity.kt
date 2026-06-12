@@ -373,6 +373,7 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     val transition by viewModel.transitionType.collectAsState()
     val useFav by viewModel.useFavoritesOnly.collectAsState()
     val doubleTap by viewModel.doubleTapEnabled.collectAsState()
+    val fadeSpeed by viewModel.fadeSpeed.collectAsState()
     
     var unit by remember { mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") }
     val displayValue = remember(totalSeconds, unit) {
@@ -455,6 +456,26 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { viewModel.setTransitionType("slide") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "slide") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Slide") }
             Button(onClick = { viewModel.setTransitionType("fade") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "fade") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Fade") }
+        }
+        
+        if (transition == "fade") {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Fade Speed", fontWeight = FontWeight.Bold)
+            Slider(
+                value = fadeSpeed.toFloat(),
+                onValueChange = { viewModel.setFadeSpeed(it.roundToInt()) },
+                valueRange = 5f..50f,
+                steps = 9
+            )
+            Text(
+                text = when {
+                    fadeSpeed < 15 -> "Slow"
+                    fadeSpeed < 35 -> "Normal"
+                    else -> "Fast"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         
         Spacer(modifier = Modifier.height(32.dp))

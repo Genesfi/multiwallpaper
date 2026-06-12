@@ -35,7 +35,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private val swipeThreshold = 150f
 
         private var lastTapTime: Long = 0
-        private val doubleTapThreshold = 300L
+        private val doubleTapThreshold = 500L
 
         private var isLoading = false
         private var surfaceWidth = 1080
@@ -77,21 +77,24 @@ class MultiWallpaperLiveService : WallpaperService() {
 
             when (event.action) {
                 android.view.MotionEvent.ACTION_DOWN -> {
+                    lastX = event.x
+                }
+                android.view.MotionEvent.ACTION_UP -> {
                     val currTime = System.currentTimeMillis()
                     val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
                     val doubleTapEnabled = prefs.getBoolean("double_tap_enabled", true)
                     
-                    if (doubleTapEnabled && (currTime - lastTapTime) < doubleTapThreshold) {
+                    val deltaX = event.x - lastX
+                    val isSwipe = kotlin.math.abs(deltaX) > swipeThreshold
+
+                    if (doubleTapEnabled && !isSwipe && (currTime - lastTapTime) < doubleTapThreshold) {
                         rotateWallpapers() // Trigger change
                         lastTapTime = 0
                     } else {
                         lastTapTime = currTime
                     }
-                    lastX = event.x
-                }
-                android.view.MotionEvent.ACTION_UP -> {
-                    val deltaX = event.x - lastX
-                    if (kotlin.math.abs(deltaX) > swipeThreshold && numBitmaps > 1) {
+
+                    if (isSwipe && numBitmaps > 1) {
                         if (deltaX > 0) manualPageIndex = if (manualPageIndex > 0) manualPageIndex - 1 else numBitmaps - 1
                         else manualPageIndex = if (manualPageIndex < numBitmaps - 1) manualPageIndex + 1 else 0
                         drawFrame()
@@ -148,6 +151,8 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun rotateWallpapers() {
+            if (isTransitioning) return // Avoid overlapping transitions
+
             val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
             val transitionType = prefs.getString("transition_type", "slide")
             
@@ -181,7 +186,9 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private fun animateFade() {
             if (!isTransitioning) return
-            transitionAlpha += 15
+            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val speed = prefs.getInt("fade_speed", 15)
+            transitionAlpha += speed
             if (transitionAlpha >= 255) {
                 transitionAlpha = 255
                 isTransitioning = false

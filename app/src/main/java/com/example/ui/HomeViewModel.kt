@@ -57,6 +57,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _doubleTapEnabled = MutableStateFlow(prefs.getBoolean("double_tap_enabled", true))
     val doubleTapEnabled = _doubleTapEnabled.asStateFlow()
 
+    private val _fadeSpeed = MutableStateFlow(prefs.getInt("fade_speed", 15))
+    val fadeSpeed = _fadeSpeed.asStateFlow()
+
     init {
         viewModelScope.launch {
             @OptIn(FlowPreview::class)
@@ -251,6 +254,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setDoubleTapEnabled(enable: Boolean) {
         prefs.edit().putBoolean("double_tap_enabled", enable).apply()
         _doubleTapEnabled.value = enable
+    }
+
+    fun setFadeSpeed(speed: Int) {
+        prefs.edit().putInt("fade_speed", speed).apply()
+        _fadeSpeed.value = speed
     }
 
     fun addFolders(uris: List<Uri>) {
