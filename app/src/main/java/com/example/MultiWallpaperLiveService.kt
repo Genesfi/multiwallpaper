@@ -33,6 +33,10 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var manualPageIndex = 0
         private val swipeThreshold = 150f // pixels to trigger a page change
 
+        private var isLoading = false
+        private var surfaceWidth = 1080
+        private var surfaceHeight = 2400
+
         // Cached bitmaps for each screen index
         private val pageBitmaps = mutableMapOf<Int, Bitmap>()
 
@@ -63,15 +67,19 @@ class MultiWallpaperLiveService : WallpaperService() {
                 }
                 android.view.MotionEvent.ACTION_UP -> {
                     val deltaX = event.x - lastX
+                    // Increase threshold slightly to prevent accidental swipes while scrolling home apps
                     if (kotlin.math.abs(deltaX) > swipeThreshold) {
                         if (deltaX > 0) {
-                            // Swipe Right -> Go to Previous Page
-                            manualPageIndex = (manualPageIndex - 1).coerceAtLeast(0)
+                            // Swipe Right (Gesture moves left to right) -> Show PREVIOUS wallpaper
+                            manualPageIndex = if (manualPageIndex > 0) manualPageIndex - 1 else numBitmaps - 1
                         } else {
-                            // Swipe Left -> Go to Next Page
-                            manualPageIndex = (manualPageIndex + 1).coerceAtMost(numBitmaps - 1)
+                            // Swipe Left (Gesture moves right to left) -> Show NEXT wallpaper
+                            manualPageIndex = if (manualPageIndex < numBitmaps - 1) manualPageIndex + 1 else 0
                         }
-                        Log.d("MultiWallpaperDebug", "Manual Swipe Detected! New Page: $manualPageIndex")
+                        
+                        Log.d("MultiWallpaperDebug", "Manual Swipe Action! Delta: $deltaX, New Index: $manualPageIndex")
+                        
+                        // FORCE REDRAW IMMEDIATELY
                         drawFrame()
                     }
                 }
@@ -107,6 +115,22 @@ class MultiWallpaperLiveService : WallpaperService() {
             if (this.xOffset != validXOffset || this.xStep != validXStep) {
                 this.xOffset = validXOffset
                 this.xStep = validXStep
+                
+                // SYNC manualPageIndex: Pastikan manual swipe dan auto mode sinkron
+                val numBitmaps = pageBitmaps.size
+                if (numBitmaps > 1) {
+                    val systemPageIndex = if (validXStep > 0f) {
+                        (validXOffset / validXStep).roundToInt()
+                    } else {
+                        (validXOffset * (numBitmaps - 1)).roundToInt()
+                    }.coerceIn(0, numBitmaps - 1)
+                    
+                    if (manualPageIndex != systemPageIndex) {
+                        manualPageIndex = systemPageIndex
+                        Log.d("MultiWallpaperDebug", "Syncing manualPageIndex to $manualPageIndex")
+                    }
+                }
+                
                 if (visible) {
                     drawFrame()
                 }
@@ -115,6 +139,8 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         override fun onSurfaceChanged(holder: SurfaceHolder?, format: Int, width: Int, height: Int) {
             super.onSurfaceChanged(holder, format, width, height)
+            this.surfaceWidth = width
+            this.surfaceHeight = height
             
             // Suggest a very wide width (5x screen width) to force HyperOS/MIUI 
             // to recognize this as a scrollable live wallpaper.
@@ -170,6 +196,21 @@ class MultiWallpaperLiveService : WallpaperService() {
                     val folders = db.folderDao().getAllFoldersSync()
                     val favorites = db.favoriteDao().getAllFavoritesSync()
 
+                    if (folders.isEmpty() && favorites.isEmpty()) {
+                        handler.post { 
+                            isLoading = false
+                            drawFrame() 
+                        }
+                        return@Thread
+                    }
+
+                    handler.post {
+                        if (pageBitmaps.isEmpty()) {
+                            isLoading = true
+                            drawFrame()
+                        }
+                    }
+
                     val prefs = context.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
                     val useFavoritesOnly = prefs.getBoolean("use_favorites_only", false)
 
@@ -177,7 +218,6 @@ class MultiWallpaperLiveService : WallpaperService() {
                     if (useFavoritesOnly) {
                         allImageUris.addAll(favorites.map { it.uriString })
                     } else {
-                        // Scan user folders
                         for (folder in folders) {
                             try {
                                 val list = scanFolderForImages(Uri.parse(folder.uriString))
@@ -189,29 +229,45 @@ class MultiWallpaperLiveService : WallpaperService() {
                     }
 
                     if (allImageUris.isNotEmpty()) {
-                        val tempBitmaps = mutableMapOf<Int, Bitmap>()
                         val random = Random(System.currentTimeMillis())
+                        
+                        // 1. LOAD SATU GAMBAR PERTAMA AGAR CEPAT MUNCUL
+                        val firstUriStr = allImageUris[random.nextInt(allImageUris.size)]
+                        val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(firstUriStr), surfaceWidth, surfaceHeight)
+                        
+                        handler.post {
+                            if (firstBitmap != null) {
+                                recycleBitmaps()
+                                pageBitmaps[0] = firstBitmap
+                            }
+                            isLoading = false
+                            drawFrame()
+                        }
 
-                        // Populate a pool of up to 20 pages to handle many home screen pages
-                        val poolSize = 20
-                        for (page in 0 until poolSize) {
+                        // 2. LOAD SISANYA DI BACKGROUND (Kurangi pool ke 10 agar lebih enteng)
+                        val tempBitmaps = mutableMapOf<Int, Bitmap>()
+                        val poolSize = 10 
+                        for (page in 1 until poolSize) {
                             val uriStr = allImageUris[random.nextInt(allImageUris.size)]
-                            val bitmap = decodeSampledBitmapFromUri(Uri.parse(uriStr), 1080, 2400)
+                            val bitmap = decodeSampledBitmapFromUri(Uri.parse(uriStr), surfaceWidth, surfaceHeight)
                             if (bitmap != null) {
                                 tempBitmaps[page] = bitmap
                             }
                         }
 
                         handler.post {
-                            recycleBitmaps()
                             pageBitmaps.putAll(tempBitmaps)
-                            drawFrame()
+                            // Jika user sudah geser ke halaman lain saat loading selesai, gambar akan muncul
                         }
                     } else {
-                        Log.d("MultiWallpaperEngine", "No image URIs found to set.")
+                        handler.post { 
+                            isLoading = false
+                            drawFrame() 
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e("MultiWallpaperEngine", "Error loading wallpapers", e)
+                    handler.post { isLoading = false }
                 }
             }.start()
         }
@@ -337,7 +393,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             val width = canvas.width
             val height = canvas.height
 
-            if (pageBitmaps.isEmpty()) {
+            if (pageBitmaps.isEmpty() || isLoading) {
                 val paint = Paint().apply {
                     color = Color.parseColor("#1A1F2C")
                 }
@@ -357,28 +413,45 @@ class MultiWallpaperLiveService : WallpaperService() {
                     isAntiAlias = true
                     typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
                 }
-                canvas.drawText("Pilih Folder di Aplikasi", width / 2f, height / 2f - 40f, textPaint)
-                canvas.drawText("Lalu Klik Atur Sebagai Wallpaper", width / 2f, height / 2f + 20f, subTextPaint)
+                
+                val title = if (isLoading) "Sedang Memuat..." else "Pilih Folder di Aplikasi"
+                val subtitle = if (isLoading) "Harap tunggu sebentar" else "Lalu Klik Atur Sebagai Wallpaper"
+                
+                canvas.drawText(title, width / 2f, height / 2f - 40f, textPaint)
+                canvas.drawText(subtitle, width / 2f, height / 2f + 20f, subTextPaint)
                 return
             }
 
             val numBitmaps = pageBitmaps.size
             
-            // LOGIC FOR NORMAL LAUNCHERS (If xOffset is working)
-            // LOGIC FOR HYPER OS (If xOffset is blocked, use manualPageIndex)
-            val pageIndex = if (xOffset > 0f || xStep > 0f) {
+            // HYPER OS FIX: Deteksi apakah kita sedang transisi lancar atau di titik snap (halaman diam)
+            // xStep memberi tahu jarak antar halaman. Jika xOffset bukan kelipatan xStep, berarti sedang transisi.
+            val isFluid = if (xStep > 0f) {
+                val offsetInPages = xOffset / xStep
+                val distToSnap = kotlin.math.abs(offsetInPages - offsetInPages.roundToInt())
+                distToSnap > 0.01f // Jika lebih dari 1% dari titik snap, anggap fluid
+            } else {
+                // Jika xStep 0 (HyperOS awal), anggap tidak fluid agar manual mode jalan
+                false
+            }
+            
+            // Di HyperOS, xStep sering tersisa dari launcher sebelumnya (misal 0.5) tapi xOffset diam (stuck).
+            // Kita gunakan manualPageIndex sebagai sumber utama saat launcher sedang diam.
+            val pageIndex = if (isFluid) {
                 (xOffset * (numBitmaps - 1)).roundToInt().coerceIn(0, numBitmaps - 1)
             } else {
                 manualPageIndex.coerceIn(0, numBitmaps - 1)
             }
             
+            Log.d("MultiWallpaperDebug", "Drawing -> Mode: ${if(isFluid) "Auto" else "Manual"}, Index: $pageIndex, xOffset: $xOffset, manualIndex: $manualPageIndex")
+
             val currentBitmap = pageBitmaps[pageIndex]
             if (currentBitmap != null) {
                 val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
                 val transitionType = prefs.getString("transition_type", "slide") // slide or fade
 
-                if (transitionType == "fade" && (xOffset > 0f || xStep > 0f)) {
-                    // Smooth Fade logic for standard launchers
+                if (transitionType == "fade" && isFluid) {
+                    // Smooth Fade logic only for standard launchers
                     val position = xOffset * (numBitmaps - 1)
                     val leftIdx = position.toInt()
                     val rightIdx = (leftIdx + 1).coerceAtMost(numBitmaps - 1)
@@ -397,7 +470,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                         drawSingleBitmap(canvas, leftBitmap, width, height)
                     }
                 } else {
-                    // Default Slide/Instant logic (Standard or Manual)
+                    // Force Instant Snap for Manual Mode (HyperOS)
                     drawSingleBitmap(canvas, currentBitmap, width, height)
                 }
             }

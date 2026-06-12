@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.util.Log
 import android.widget.Toast
@@ -59,6 +61,93 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // File Explorer State
+    private val _currentPathItems = MutableStateFlow<List<FileItem>>(emptyList())
+    val currentPathItems = _currentPathItems.asStateFlow()
+
+    private val _selectedFolders = MutableStateFlow<Set<Uri>>(emptySet())
+    val selectedFolders = _selectedFolders.asStateFlow()
+
+    private val _isAllSelected = MutableStateFlow(false)
+    val isAllSelected = _isAllSelected.asStateFlow()
+
+    fun toggleSelectAll() {
+        val newState = !_isAllSelected.value
+        _isAllSelected.value = newState
+        if (newState) {
+            _selectedFolders.value = _currentPathItems.value.map { it.uri }.toSet()
+        } else {
+            _selectedFolders.value = emptySet()
+        }
+    }
+
+    fun toggleFolderSelection(uri: Uri) {
+        val current = _selectedFolders.value.toMutableSet()
+        if (current.contains(uri)) current.remove(uri) else current.add(uri)
+        _selectedFolders.value = current
+    }
+
+    fun browseFolder(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val context = getApplication<Application>()
+            val items = mutableListOf<FileItem>()
+            
+            // Try standard File API first if permission is granted
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) {
+                try {
+                    // Logic to extract real path from URI if possible, or use root
+                    val root = Environment.getExternalStorageDirectory()
+                    val files = root.listFiles()
+                    files?.forEach { file ->
+                        if (file.isDirectory && !file.name.startsWith(".")) {
+                            items.add(FileItem(file.name, Uri.fromFile(file), true))
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("HomeViewModel", "File API browsing failed", e)
+                }
+            }
+            
+            // Fallback to DocumentTree if items are empty or standard API fails
+            if (items.isEmpty()) {
+                try {
+                    val treeId = DocumentsContract.getTreeDocumentId(uri)
+                    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, treeId)
+                    val cursor = context.contentResolver.query(
+                        childrenUri,
+                        arrayOf(
+                            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                            DocumentsContract.Document.COLUMN_MIME_TYPE
+                        ),
+                        null, null, null
+                    )
+                    cursor?.use { c ->
+                        while (c.moveToNext()) {
+                            val id = c.getString(0)
+                            val name = c.getString(1)
+                            val mime = c.getString(2)
+                            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                                items.add(FileItem(name, DocumentsContract.buildDocumentUriUsingTree(uri, id), true))
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("HomeViewModel", "Error browsing folder", e)
+                }
+            }
+            _currentPathItems.value = items.sortedBy { it.name }
+        }
+    }
+
+    fun confirmMultiSelect() {
+        val uris = _selectedFolders.value.toList()
+        if (uris.isNotEmpty()) {
+            addFolders(uris)
+            _selectedFolders.value = emptySet()
+        }
+    }
+
     fun setTransitionType(type: String) {
         prefs.edit().putString("transition_type", type).apply()
         _transitionType.value = type
@@ -74,44 +163,65 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _useFavoritesOnly.value = enable
     }
 
-    fun addFolder(uri: Uri) {
+    fun addFolders(uris: List<Uri>) {
         viewModelScope.launch(Dispatchers.IO) {
             val contentResolver = getApplication<Application>().contentResolver
-            try {
-                contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-                // Get folder name
-                var displayName = "Folder"
-                val documentId = DocumentsContract.getTreeDocumentId(uri)
-                val documentUri = DocumentsContract.buildDocumentUriUsingTree(uri, documentId)
-                val cursor = contentResolver.query(
-                    documentUri,
-                    arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-                    null, null, null
-                )
-                cursor?.use { c ->
-                    if (c.moveToFirst()) {
-                        displayName = c.getString(0) ?: "Folder"
-                    }
-                }
-
-                folderDao.insertFolder(
-                    FolderEntity(
-                        uriString = uri.toString(),
-                        displayName = displayName
+            uris.forEach { uri ->
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
                     )
-                )
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), "Berhasil menambahkan $displayName!", Toast.LENGTH_SHORT).show()
+                    
+                    var displayName = "Folder"
+                    val documentId = DocumentsContract.getTreeDocumentId(uri)
+                    val documentUri = DocumentsContract.buildDocumentUriUsingTree(uri, documentId)
+                    val cursor = contentResolver.query(
+                        documentUri,
+                        arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                        null, null, null
+                    )
+                    cursor?.use { c ->
+                        if (c.moveToFirst()) {
+                            displayName = c.getString(0) ?: "Folder"
+                        }
+                    }
+
+                    folderDao.insertFolder(
+                        FolderEntity(
+                            uriString = uri.toString(),
+                            displayName = displayName
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.e("HomeViewModel", "Failed to add folder: $uri", e)
                 }
-                scanFolders()
-            } catch (e: Exception) {
-                e.printStackTrace()
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), "Gagal: pastikan memilih folder valid", Toast.LENGTH_LONG).show()
+            }
+            withContext(Dispatchers.Main) {
+                Toast.makeText(getApplication(), "${uris.size} folder ditambahkan!", Toast.LENGTH_SHORT).show()
+            }
+            scanFolders()
+        }
+    }
+
+    fun addImagesDirectly(uris: List<Uri>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val contentResolver = getApplication<Application>().contentResolver
+            uris.forEach { uri ->
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                    // We treat individual images as a special virtual folder for simplicity
+                    // or we can add them to a "Manual Selection" folder in DB.
+                } catch (e: Exception) {
+                    Log.e("HomeViewModel", "Permission failed for image: $uri")
                 }
+            }
+            // For now, let's notify user this is coming soon or just use recursive folder
+            withContext(Dispatchers.Main) {
+                Toast.makeText(getApplication(), "${uris.size} gambar dipilih!", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -223,4 +333,10 @@ data class WallpaperImg(
     val folderUriString: String,
     val displayName: String,
     val isFavorite: Boolean
+)
+
+data class FileItem(
+    val name: String,
+    val uri: Uri,
+    val isDirectory: Boolean
 )

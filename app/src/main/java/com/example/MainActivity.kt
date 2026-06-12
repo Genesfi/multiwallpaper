@@ -55,15 +55,70 @@ import com.example.ui.HomeViewModel
 import com.example.ui.WallpaperImg
 import com.example.ui.theme.MyApplicationTheme
 
+import android.provider.Settings
+import androidx.activity.result.ActivityResultLauncher
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
-                MainLayout()
+                PermissionRequestWrapper {
+                    MainLayout()
+                }
             }
         }
+    }
+}
+
+@Composable
+fun PermissionRequestWrapper(content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    var hasStoragePermission by remember { 
+        mutableStateOf(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Environment.isExternalStorageManager()
+            } else {
+                true // Handled by standard permissions
+            }
+        )
+    }
+
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            hasStoragePermission = Environment.isExternalStorageManager()
+        }
+    }
+
+    if (!hasStoragePermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
+                Icon(Icons.Default.Storage, contentDescription = null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Izin Akses File Diperlukan", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text(
+                    "Agar bisa membaca folder secara massal dan tembus sub-folder, aplikasi butuh izin akses semua file.",
+                    textAlign = TextAlign.Center,
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(24.dp))
+                Button(onClick = {
+                    val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    launcher.launch(intent)
+                }) {
+                    Text("Berikan Izin Sekarang")
+                }
+            }
+        }
+    } else {
+        content()
     }
 }
 
@@ -76,6 +131,7 @@ enum class NavigationTab {
 fun MainLayout() {
     val viewModel: HomeViewModel = viewModel()
     var currentTab by remember { mutableStateOf(NavigationTab.FOLDERS) }
+    var showMultiSelectDialog by remember { mutableStateOf(false) }
     
     val folders by viewModel.folders.collectAsState()
     val favorites by viewModel.favorites.collectAsState()
@@ -83,12 +139,31 @@ fun MainLayout() {
     val isScanning by viewModel.isScanning.collectAsState()
     val context = LocalContext.current
 
-    // Document tree launcher
+    // Root folder access
+    val rootFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            viewModel.browseFolder(uri)
+            showMultiSelectDialog = true
+        }
+    }
+
+    // Document tree launcher (Single select fallback)
     val folderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->
         if (uri != null) {
-            viewModel.addFolder(uri)
+            viewModel.addFolders(listOf(uri))
+        }
+    }
+
+    // New Multi-Select File Picker (Fallback/Alternative)
+    val filesLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) {
+            viewModel.addImagesDirectly(uris)
         }
     }
 
@@ -241,15 +316,24 @@ fun MainLayout() {
                 if (currentTab == NavigationTab.FOLDERS) {
                     ExtendedFloatingActionButton(
                         modifier = Modifier.testTag("add_folder_fab"),
-                        onClick = { folderLauncher.launch(null) },
+                        onClick = { rootFolderLauncher.launch(null) },
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary,
                         shape = RoundedCornerShape(16.dp),
                         elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 2.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.AddCircle, contentDescription = "Add Folder")
+                        Icon(imageVector = Icons.Default.Checklist, contentDescription = "Mark Folders")
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Add Folder", fontWeight = FontWeight.Bold)
+                        Text("Mark Multi Folders", fontWeight = FontWeight.Bold)
+                    }
+                    
+                    SmallFloatingActionButton(
+                        onClick = { filesLauncher.launch(arrayOf("image/*")) },
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Default.AddPhotoAlternate, contentDescription = "Add Photos")
                     }
                 }
             }
@@ -299,6 +383,87 @@ fun MainLayout() {
                         viewModel = viewModel,
                         onSetWallpaperClick = { triggerLiveWallpaperSelection(context) }
                     )
+                }
+            }
+
+            if (showMultiSelectDialog) {
+                MultiFolderSelectDialog(
+                    viewModel = viewModel,
+                    onDismiss = { showMultiSelectDialog = false }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun MultiFolderSelectDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
+    val items by viewModel.currentPathItems.collectAsState()
+    val selected by viewModel.selectedFolders.collectAsState()
+    val isAllSelected by viewModel.isAllSelected.collectAsState()
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier.fillMaxWidth().height(600.dp),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Pilih Banyak Folder",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { viewModel.toggleSelectAll() }) {
+                        Text(if (isAllSelected) "Batal Semua" else "Pilih Semua")
+                    }
+                }
+                
+                Divider(modifier = Modifier.padding(vertical = 8.dp))
+                
+                LazyColumn(modifier = Modifier.weight(1f)) {
+                    items(items) { item ->
+                        val isSelected = selected.contains(item.uri)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { viewModel.toggleFolderSelection(item.uri) }
+                                .padding(vertical = 10.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = isSelected,
+                                onCheckedChange = { viewModel.toggleFolderSelection(item.uri) }
+                            )
+                            Icon(
+                                Icons.Default.Folder,
+                                contentDescription = null,
+                                tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.Gray,
+                                modifier = Modifier.size(32.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                item.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("Batal") }
+                    Button(
+                        modifier = Modifier.padding(start = 8.dp),
+                        onClick = {
+                            viewModel.confirmMultiSelect()
+                            onDismiss()
+                        }
+                    ) {
+                        Text("Gunakan (${selected.size}) Folder")
+                    }
                 }
             }
         }
