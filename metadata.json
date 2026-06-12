@@ -1,0 +1,6 @@
+{
+  "name": "Multi Wallpaper",
+  "description": "A native multi-category wallpaper application designed to change different wallpapers for every screen slide from local user folders and intervals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
