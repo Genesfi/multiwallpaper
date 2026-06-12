@@ -44,6 +44,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private val pageBitmaps = mutableMapOf<Int, Bitmap>()
         
         private var nextBitmap: Bitmap? = null
+        private var preloadedBitmap: Bitmap? = null
         private var transitionAlpha = 255
         private var isTransitioning = false
 
@@ -157,11 +158,35 @@ class MultiWallpaperLiveService : WallpaperService() {
             val transitionType = prefs.getString("transition_type", "slide")
             
             if (transitionType == "fade" && pageBitmaps.isNotEmpty()) {
-                startFadeRotation()
+                if (preloadedBitmap != null) {
+                    // Use preloaded bitmap immediately
+                    nextBitmap = preloadedBitmap
+                    preloadedBitmap = null
+                    isTransitioning = true
+                    transitionAlpha = 0
+                    animateFade()
+                    preloadNextWallpaper() // Preload for the next time
+                } else {
+                    // Fallback if not preloaded yet
+                    startFadeRotation()
+                }
             } else {
                 loadWallpapersForPages()
                 scheduleRotation()
             }
+        }
+
+        private fun preloadNextWallpaper() {
+            Thread {
+                val uris = getAllAvailableUris()
+                if (uris.isNotEmpty()) {
+                    val bmp = decodeSampledBitmapFromUri(Uri.parse(uris[Random.nextInt(uris.size)]), surfaceWidth, surfaceHeight)
+                    handler.post {
+                        preloadedBitmap?.recycle()
+                        preloadedBitmap = bmp
+                    }
+                }
+            }.start()
         }
 
         private fun startFadeRotation() {
@@ -175,6 +200,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                             isTransitioning = true
                             transitionAlpha = 0
                             animateFade()
+                            preloadNextWallpaper() // Start preloading for future use
                         } else {
                             loadWallpapersForPages()
                             scheduleRotation()
@@ -242,6 +268,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                         if (firstBitmap != null) pageBitmaps[0] = firstBitmap
                         isLoading = false
                         drawFrame()
+                        preloadNextWallpaper() // Preload after initial load
                     }
 
                     val temp = mutableMapOf<Int, Bitmap>()
@@ -310,6 +337,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private fun recycleBitmaps() {
             pageBitmaps.values.forEach { if (!it.isRecycled) it.recycle() }; pageBitmaps.clear()
             nextBitmap?.recycle(); nextBitmap = null
+            preloadedBitmap?.recycle(); preloadedBitmap = null
         }
 
         private fun drawFrame() {
