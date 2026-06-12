@@ -23,6 +23,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val folderDao = db.folderDao()
     private val favoriteDao = db.favoriteDao()
     private val presetDao = db.presetDao()
+    private val scannedImageDao = db.scannedImageDao()
 
     val prefs = application.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
 
@@ -82,6 +83,17 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val activePresetName = _activePresetName.asStateFlow()
 
     init {
+        viewModelScope.launch {
+            scannedImageDao.getAllImages().collect { entities ->
+                val favUris = withContext(Dispatchers.IO) {
+                    favoriteDao.getAllFavoritesSync().map { it.uriString }.toSet()
+                }
+                _scannedImages.value = entities.map { 
+                    WallpaperImg(it.uriString, it.folderUriString, it.displayName, favUris.contains(it.uriString))
+                }
+            }
+        }
+
         viewModelScope.launch {
             @OptIn(FlowPreview::class)
             folders.debounce(1000).collect {
@@ -372,6 +384,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _activePresetName.value = preset.name
             folderDao.deleteAllFolders()
+            favoriteDao.deleteAllFavorites() // Fix: Clear previous favorites
 
             val folderEntities = preset.folderUris.map { uri ->
                 val name = try {
@@ -390,16 +403,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 val favs = adapter.fromJson(preset.favoriteData)
 
                 if (favs != null) {
-                    // Option: Clear existing favorites or merge?
-                    // To make it a true "preset", let's replace favorites.
-                    // However, delete + insert might be safer.
-                    // Assuming we want the preset's exact favorite list.
-                    // We don't have a delete all favorites dao method yet, let's just insert (Room REPLACE will handle existing)
-                    favs.forEach { favoriteDao.insertFavorite(it) }
+                    favoriteDao.insertFavorites(favs)
                 }
             } catch (e: Exception) {
                 Log.e("HomeViewModel", "Error loading favorites from preset", e)
             }
+            
+            // Re-scan to update cached images for the new preset folders
+            scanFolders()
         }
     }
 
@@ -521,7 +532,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            _scannedImages.value = tempImages
+            // Sync with Database Cache
+            scannedImageDao.deleteAllImages()
+            scannedImageDao.insertImages(tempImages.map { 
+                ScannedImageEntity(it.uriString, it.folderUriString, it.displayName)
+            })
+
             _isScanning.value = false
         }
     }
@@ -531,7 +547,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         files?.forEach { f ->
             if (f.isFile && (f.name.endsWith(".jpg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true))) {
                 val fileUriStr = Uri.fromFile(f).toString()
-                list.add(WallpaperImg(fileUriStr, rootUri, f.name, favoriteUris.contains(fileUriStr)))
+                // Use immediate parent as folderUriString for better search/grouping
+                val parentUriStr = Uri.fromFile(f.parentFile).toString()
+                list.add(WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr)))
             } else if (f.isDirectory && !f.name.startsWith(".")) {
                 scanRecursive(f, rootUri, list, favoriteUris)
             }
@@ -559,7 +577,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                 folderQueue.add(DocumentsContract.buildDocumentUriUsingTree(treeUri, docId))
                             } else if (mimeType.startsWith("image/")) {
                                 val childUriStr = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId).toString()
-                                list.add(WallpaperImg(childUriStr, rootUriStr, name, favoriteUris.contains(childUriStr)))
+                                // For SAF, the currentUri is the immediate parent
+                                list.add(WallpaperImg(childUriStr, currentUri.toString(), name, favoriteUris.contains(childUriStr)))
                             }
                         }
                     }

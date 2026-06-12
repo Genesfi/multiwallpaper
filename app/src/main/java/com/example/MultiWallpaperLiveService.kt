@@ -12,6 +12,8 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
 import android.service.wallpaper.WallpaperService
+import android.util.Log
+import android.view.MotionEvent
 import android.view.SurfaceHolder
 import com.example.data.AppDatabase
 import kotlinx.coroutines.*
@@ -345,47 +347,49 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private fun getAllAvailableUris(): List<String> {
             val db = AppDatabase.getDatabase(this@MultiWallpaperLiveService)
-            val folders = db.folderDao().getAllFoldersSync()
-            val favorites = db.favoriteDao().getAllFavoritesSync()
             val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
             
-            if (prefs.getBoolean("use_favorites_only", false)) return favorites.map { it.uriString }
-            
-            val all = mutableListOf<String>()
-            for (f in folders) all.addAll(scanFolderForImages(Uri.parse(f.uriString)))
-            return all
+            return if (prefs.getBoolean("use_favorites_only", false)) {
+                db.favoriteDao().getAllFavoritesSync().map { it.uriString }
+            } else {
+                // Optimization: Use cached scanned images instead of re-scanning folders
+                db.scannedImageDao().getAllImagesSync().map { it.uriString }
+            }
         }
 
         private fun loadWallpapersForPages() {
-            Thread {
+            engineScope.launch(Dispatchers.IO) {
                 try {
                     val allUris = getAllAvailableUris()
                     if (allUris.isEmpty()) {
-                        handler.post { recycleBitmaps(); isLoading = false; requestDraw() }
-                        return@Thread
+                        withContext(Dispatchers.Main) { recycleBitmaps(); isLoading = false; requestDraw() }
+                        return@launch
                     }
 
-                    handler.post { if (pageBitmaps.isEmpty()) { isLoading = true; requestDraw() } }
+                    withContext(Dispatchers.Main) { if (pageBitmaps.isEmpty()) { isLoading = true; requestDraw() } }
 
                     val random = Random(System.currentTimeMillis())
+                    
+                    // Optimization: Only load the first few pages initially to reduce boot lag and memory
                     val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(allUris[random.nextInt(allUris.size)]), surfaceWidth, surfaceHeight)
                     
-                    handler.post {
+                    withContext(Dispatchers.Main) {
                         recycleBitmaps()
                         if (firstBitmap != null) pageBitmaps[0] = firstBitmap
                         isLoading = false
                         requestDraw()
-                        preloadNextWallpaper() // Preload after initial load
+                        preloadNextWallpaper()
                     }
 
+                    // Load others lazily
                     val temp = mutableMapOf<Int, Bitmap>()
-                    for (p in 1 until 10) {
+                    for (p in 1 until 5) { // Reduced initial load from 10 to 5
                         val b = decodeSampledBitmapFromUri(Uri.parse(allUris[random.nextInt(allUris.size)]), surfaceWidth, surfaceHeight)
                         if (b != null) temp[p] = b
                     }
-                    handler.post { pageBitmaps.putAll(temp) }
-                } catch (e: Exception) { handler.post { isLoading = false } }
-            }.start()
+                    withContext(Dispatchers.Main) { pageBitmaps.putAll(temp) }
+                } catch (e: Exception) { withContext(Dispatchers.Main) { isLoading = false } }
+            }
         }
 
         private fun scanFolderForImages(uri: Uri): List<String> {
@@ -422,12 +426,17 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private fun decodeSampledBitmapFromUri(uri: Uri, reqWidth: Int, reqHeight: Int): Bitmap? {
             return try {
+                // Optimization: Cap the requested size to prevent OOM and lag with 4K images
+                val maxWidth = if (reqWidth > 0) reqWidth.coerceAtMost(2048) else 2048
+                val maxHeight = if (reqHeight > 0) reqHeight.coerceAtMost(2048) else 2048
+
                 contentResolver.openInputStream(uri)?.use { input ->
                     val opt = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     BitmapFactory.decodeStream(input, null, opt)
-                    opt.inSampleSize = calculateInSampleSize(opt, reqWidth, reqHeight)
+                    opt.inSampleSize = calculateInSampleSize(opt, maxWidth, maxHeight)
                     opt.inJustDecodeBounds = false
-                    // Correct stream re-reading
+                    opt.inPreferredConfig = Bitmap.Config.RGB_565 // Use 16-bit color for memory efficiency if quality allows
+
                     contentResolver.openInputStream(uri)?.use { i2 -> BitmapFactory.decodeStream(i2, null, opt) }
                 }
             } catch (e: Exception) { null }

@@ -44,6 +44,9 @@ interface FavoriteDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFavorite(favorite: FavoriteImageEntity)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertFavorites(favorites: List<FavoriteImageEntity>)
+
     @Delete
     suspend fun deleteFavorite(favorite: FavoriteImageEntity)
 
@@ -55,6 +58,24 @@ interface FavoriteDao {
 
     @Query("DELETE FROM favorites")
     suspend fun deleteAllFavorites()
+}
+
+@Dao
+interface ScannedImageDao {
+    @Query("SELECT * FROM scanned_images")
+    fun getAllImages(): Flow<List<ScannedImageEntity>>
+
+    @Query("SELECT * FROM scanned_images")
+    fun getAllImagesSync(): List<ScannedImageEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertImages(images: List<ScannedImageEntity>)
+
+    @Query("DELETE FROM scanned_images")
+    suspend fun deleteAllImages()
+
+    @Query("DELETE FROM scanned_images WHERE folderUriString = :folderUriString")
+    suspend fun deleteImagesByFolderUri(folderUriString: String)
 }
 
 @Dao

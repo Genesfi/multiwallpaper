@@ -19,6 +19,14 @@ data class FavoriteImageEntity(
     val addedTime: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "scanned_images")
+data class ScannedImageEntity(
+    @PrimaryKey val uriString: String,
+    val folderUriString: String,
+    val displayName: String,
+    val lastScanned: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "presets")
 data class PresetEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,

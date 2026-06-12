@@ -22,12 +22,13 @@ class Converters {
     }
 }
 
-@Database(entities = [FolderEntity::class, FavoriteImageEntity::class, PresetEntity::class], version = 3, exportSchema = false)
+@Database(entities = [FolderEntity::class, FavoriteImageEntity::class, PresetEntity::class, ScannedImageEntity::class], version = 4, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun folderDao(): FolderDao
     abstract fun favoriteDao(): FavoriteDao
     abstract fun presetDao(): PresetDao
+    abstract fun scannedImageDao(): ScannedImageDao
 
     companion object {
         @Volatile

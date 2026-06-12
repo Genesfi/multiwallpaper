@@ -476,7 +476,16 @@ fun GalleryScreen(viewModel: HomeViewModel) {
     
     val grouped = remember(images, sortType, searchQuery) {
         val filtered = if (searchQuery.isBlank()) images 
-                       else images.filter { it.displayName.contains(searchQuery, ignoreCase = true) || it.folderUriString.contains(searchQuery, ignoreCase = true) }
+                       else images.filter { img ->
+                           val folderName = try {
+                               val u = Uri.parse(img.folderUriString)
+                               if (u.scheme == "file") java.io.File(u.path ?: "").name else Uri.decode(img.folderUriString).split("/").lastOrNull() ?: ""
+                           } catch (e: Exception) { "" }
+                           
+                           img.displayName.contains(searchQuery, ignoreCase = true) || 
+                           folderName.contains(searchQuery, ignoreCase = true) ||
+                           img.folderUriString.contains(searchQuery, ignoreCase = true)
+                       }
         
         val groups = filtered.groupBy { it.folderUriString }
         when (sortType) {
