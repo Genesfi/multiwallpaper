@@ -75,6 +75,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedGalleryFolderUris = MutableStateFlow<Set<String>>(emptySet())
     val selectedGalleryFolderUris = _selectedGalleryFolderUris.asStateFlow()
 
+    private val _gallerySearchQuery = MutableStateFlow("")
+    val gallerySearchQuery = _gallerySearchQuery.asStateFlow()
+
     private val _activePresetName = MutableStateFlow<String?>(null)
     val activePresetName = _activePresetName.asStateFlow()
 
@@ -123,11 +126,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 files?.forEach { file ->
                     if (file.isDirectory && !file.name.startsWith(".")) {
                         // Find a preview image for this folder
-                        val previewUri = file.listFiles()?.firstOrNull { 
+                        val previewUri = file.listFiles()?.firstOrNull {
                             val n = it.name.lowercase()
                             n.endsWith(".jpg") || n.endsWith(".png") || n.endsWith(".webp")
                         }?.let { Uri.fromFile(it) }
-                        
+
                         items.add(FileItem(file.name, Uri.fromFile(file), true, previewUri))
                     }
                 }
@@ -153,7 +156,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _isAllSelected.value = newState
         val currentItems = _currentPathItems.value
         val currentSelected = _selectedFolders.value.toMutableSet()
-        
+
         if (newState) {
             currentItems.forEach { currentSelected.add(it.uri) }
         } else {
@@ -193,7 +196,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val uris = _selectedGalleryUris.value
             val images = _scannedImages.value.filter { uris.contains(it.uriString) }
-            
+
             images.forEach { img ->
                 if (!img.isFavorite) {
                     favoriteDao.insertFavorite(
@@ -205,12 +208,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
-            
+
             withContext(Dispatchers.Main) {
                 Toast.makeText(getApplication(), "${images.size} items added to favorites", Toast.LENGTH_SHORT).show()
                 clearGallerySelection()
-                val updatedList = _scannedImages.value.map { 
-                    if (uris.contains(it.uriString)) it.copy(isFavorite = true) else it 
+                val updatedList = _scannedImages.value.map {
+                    if (uris.contains(it.uriString)) it.copy(isFavorite = true) else it
                 }
                 _scannedImages.value = updatedList
             }
@@ -221,7 +224,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val folderImages = _scannedImages.value.filter { it.folderUriString == folderUri }
             val isCurrentlyFavorite = folderImages.any { it.isFavorite }
-            
+
             if (isCurrentlyFavorite) {
                 folderImages.forEach { favoriteDao.deleteFavoriteByUri(it.uriString) }
             } else {
@@ -235,10 +238,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
-            
+
             withContext(Dispatchers.Main) {
-                val updatedList = _scannedImages.value.map { 
-                    if (it.folderUriString == folderUri) it.copy(isFavorite = !isCurrentlyFavorite) else it 
+                val updatedList = _scannedImages.value.map {
+                    if (it.folderUriString == folderUri) it.copy(isFavorite = !isCurrentlyFavorite) else it
                 }
                 _scannedImages.value = updatedList
             }
@@ -293,7 +296,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val folderUris = folders.value.map { it.uriString }
             val thumb = favorites.value.firstOrNull()?.uriString ?: scannedImages.value.firstOrNull()?.uriString
-            
+
             val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
             val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
             val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
@@ -331,6 +334,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _gallerySortType.value = type
     }
 
+    fun setGallerySearchQuery(query: String) {
+        _gallerySearchQuery.value = query
+    }
+
     fun toggleGalleryFolderSelection(uri: String) {
         val current = _selectedGalleryFolderUris.value.toMutableSet()
         if (current.contains(uri)) current.remove(uri) else current.add(uri)
@@ -345,11 +352,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val folderUris = _selectedGalleryFolderUris.value
             if (folderUris.isEmpty()) return@launch
-            
+
             // Check if ANY image in these folders is NOT a favorite
             val allImagesInSelected = scannedImages.value.filter { folderUris.contains(it.folderUriString) }
             val allFav = allImagesInSelected.all { it.isFavorite }
-            
+
             if (allFav) {
                 // Unstar all in these folders
                 allImagesInSelected.forEach { toggleFavorite(it) }
@@ -365,7 +372,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _activePresetName.value = preset.name
             folderDao.deleteAllFolders()
-            
+
             val folderEntities = preset.folderUris.map { uri ->
                 val name = try {
                     val u = Uri.parse(uri)
@@ -374,16 +381,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 FolderEntity(uriString = uri, displayName = name)
             }
             folderDao.insertFolders(folderEntities)
-            
+
             // Restore Favorites
             try {
                 val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
                 val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
                 val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
                 val favs = adapter.fromJson(preset.favoriteData)
-                
+
                 if (favs != null) {
-                    // Option: Clear existing favorites or merge? 
+                    // Option: Clear existing favorites or merge?
                     // To make it a true "preset", let's replace favorites.
                     // However, delete + insert might be safer.
                     // Assuming we want the preset's exact favorite list.
@@ -407,7 +414,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val contentResolver = getApplication<Application>().contentResolver
             val currentFolderUris = folders.value.map { it.uriString }.toSet()
             val foldersToInsert = mutableListOf<FolderEntity>()
-            
+
             uris.forEach { uri ->
                 try {
                     val uriStr = uri.toString()
@@ -432,11 +439,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     Log.e("HomeViewModel", "Prepare folder fail: $uri", e)
                 }
             }
-            
+
             if (foldersToInsert.isNotEmpty()) {
                 folderDao.insertFolders(foldersToInsert)
             }
-            
+
             withContext(Dispatchers.Main) {
                 Toast.makeText(getApplication(), "${foldersToInsert.size} folders added!", Toast.LENGTH_SHORT).show()
             }
@@ -454,10 +461,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val selectedIds = _selectedFolderIds.value.toList()
             val folderUrisToDelete = folders.value.filter { selectedIds.contains(it.id) }.map { it.uriString }
-            
+
             selectedIds.forEach { folderDao.deleteFolderById(it) }
             folderUrisToDelete.forEach { uri -> favoriteDao.deleteFavoritesByFolderUri(uri) }
-            
+
             withContext(Dispatchers.Main) {
                 clearFolderIdSelection()
             }
@@ -537,8 +544,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         while (folderQueue.isNotEmpty()) {
             val currentUri = folderQueue.poll() ?: continue
             try {
-                val treeId = if (currentUri == treeUri) DocumentsContract.getTreeDocumentId(currentUri) 
-                             else DocumentsContract.getDocumentId(currentUri)
+                val treeId = if (currentUri == treeUri) DocumentsContract.getTreeDocumentId(currentUri)
+                else DocumentsContract.getDocumentId(currentUri)
                 val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeId)
                 val context = getApplication<Application>()
                 val cursor = context.contentResolver.query(childrenUri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE), null, null, null)

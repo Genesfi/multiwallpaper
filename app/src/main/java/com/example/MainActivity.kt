@@ -102,6 +102,7 @@ fun MainLayout() {
     val selectedFolderIds by viewModel.selectedFolderIds.collectAsState()
     val selectedGalleryUris by viewModel.selectedGalleryUris.collectAsState()
     val selectedGalleryFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
+    val gallerySearchQuery by viewModel.gallerySearchQuery.collectAsState()
     val context = LocalContext.current
 
     Scaffold(
@@ -114,6 +115,8 @@ fun MainLayout() {
                         IconButton(onClick = { viewModel.clearFolderIdSelection() }) { Icon(Icons.Default.Close, null) }
                     } else if (currentTab == NavigationTab.GALLERY && (selectedGalleryUris.isNotEmpty() || selectedGalleryFolderUris.isNotEmpty())) {
                         IconButton(onClick = { viewModel.clearGallerySelection(); viewModel.clearGalleryFolderSelection() }) { Icon(Icons.Default.Close, null) }
+                    } else if (currentTab == NavigationTab.GALLERY && gallerySearchQuery.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.setGallerySearchQuery("") }) { Icon(Icons.Default.Close, null) }
                     } else {
                         IconButton(onClick = { triggerLiveWallpaperSelection(context) }) { Icon(Icons.Default.Wallpaper, null, tint = MaterialTheme.colorScheme.primary) }
                     }
@@ -126,6 +129,25 @@ fun MainLayout() {
                     } else if (currentTab == NavigationTab.GALLERY && selectedGalleryFolderUris.isNotEmpty()) {
                         IconButton(onClick = { viewModel.toggleFavoriteSelectedFolders() }) { Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308)) }
                     } else if (currentTab == NavigationTab.GALLERY) {
+                        var showSearch by remember { mutableStateOf(false) }
+                        if (showSearch) {
+                            OutlinedTextField(
+                                value = gallerySearchQuery,
+                                onValueChange = { viewModel.setGallerySearchQuery(it) },
+                                modifier = Modifier.width(180.dp).padding(end = 8.dp),
+                                placeholder = { Text("Search...", fontSize = 12.sp) },
+                                singleLine = true,
+                                shape = RoundedCornerShape(12.dp),
+                                trailingIcon = {
+                                    IconButton(onClick = { showSearch = false; viewModel.setGallerySearchQuery("") }) {
+                                        Icon(Icons.Default.Close, null, modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            )
+                        } else {
+                            IconButton(onClick = { showSearch = true }) { Icon(Icons.Default.Search, null, tint = MaterialTheme.colorScheme.primary) }
+                        }
+                        
                         var showSortMenu by remember { mutableStateOf(false) }
                         Box {
                             IconButton(onClick = { showSortMenu = true }) { Icon(Icons.AutoMirrored.Filled.Sort, null, tint = MaterialTheme.colorScheme.primary) }
@@ -448,11 +470,15 @@ fun GalleryScreen(viewModel: HomeViewModel) {
     val selectedUris by viewModel.selectedGalleryUris.collectAsState()
     val selectedFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
     val sortType by viewModel.gallerySortType.collectAsState()
+    val searchQuery by viewModel.gallerySearchQuery.collectAsState()
 
     var selectedImg by remember { mutableStateOf<WallpaperImg?>(null) }
     
-    val grouped = remember(images, sortType) {
-        val groups = images.groupBy { it.folderUriString }
+    val grouped = remember(images, sortType, searchQuery) {
+        val filtered = if (searchQuery.isBlank()) images 
+                       else images.filter { it.displayName.contains(searchQuery, ignoreCase = true) || it.folderUriString.contains(searchQuery, ignoreCase = true) }
+        
+        val groups = filtered.groupBy { it.folderUriString }
         when (sortType) {
             "NAME" -> groups.entries.sortedBy { entry -> 
                 val uri = Uri.parse(entry.key)
@@ -465,6 +491,7 @@ fun GalleryScreen(viewModel: HomeViewModel) {
     }
     
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
+    
     Column(modifier = Modifier.fillMaxSize()) {
         if (isScanning) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -476,9 +503,11 @@ fun GalleryScreen(viewModel: HomeViewModel) {
                 item {
                     val name = remember(uri) { val u = Uri.parse(uri); if (u.scheme == "file") java.io.File(u.path ?: "").name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder" }
                     Card(
-                        onClick = { if (selectedFolderUris.isNotEmpty()) viewModel.toggleGalleryFolderSelection(uri) else expanded[uri] = !isExp },
                         modifier = Modifier.combinedClickable(
-                            onClick = { if (selectedFolderUris.isNotEmpty()) viewModel.toggleGalleryFolderSelection(uri) else expanded[uri] = !isExp },
+                            onClick = { 
+                                if (selectedFolderUris.isNotEmpty()) viewModel.toggleGalleryFolderSelection(uri) 
+                                else expanded[uri] = !(expanded[uri] ?: false)
+                            },
                             onLongClick = { viewModel.toggleGalleryFolderSelection(uri) }
                         ),
                         border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
