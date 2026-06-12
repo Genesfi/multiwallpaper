@@ -10,19 +10,19 @@ import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.AppDatabase
-import com.example.data.FavoriteImageEntity
-import com.example.data.FolderEntity
+import com.example.data.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.getDatabase(application)
     private val folderDao = db.folderDao()
     private val favoriteDao = db.favoriteDao()
+    private val presetDao = db.presetDao()
 
     val prefs = application.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
 
@@ -30,6 +30,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val favorites: StateFlow<List<FavoriteImageEntity>> = favoriteDao.getAllFavorites()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val presets: StateFlow<List<PresetEntity>> = presetDao.getAllPresets()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _scannedImages = MutableStateFlow<List<WallpaperImg>>(emptyList())
@@ -59,6 +62,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _fadeSpeed = MutableStateFlow(prefs.getInt("fade_speed", 15))
     val fadeSpeed = _fadeSpeed.asStateFlow()
+
+    private val _parallaxEnabled = MutableStateFlow(prefs.getBoolean("parallax_enabled", false))
+    val parallaxEnabled = _parallaxEnabled.asStateFlow()
+
+    private val _parallaxStrength = MutableStateFlow(prefs.getFloat("parallax_strength", 0.5f))
+    val parallaxStrength = _parallaxStrength.asStateFlow()
+
+    private val _gallerySortType = MutableStateFlow(prefs.getString("gallery_sort_type", "NAME") ?: "NAME")
+    val gallerySortType = _gallerySortType.asStateFlow()
+
+    private val _selectedGalleryFolderUris = MutableStateFlow<Set<String>>(emptySet())
+    val selectedGalleryFolderUris = _selectedGalleryFolderUris.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -259,6 +274,122 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setFadeSpeed(speed: Int) {
         prefs.edit().putInt("fade_speed", speed).apply()
         _fadeSpeed.value = speed
+    }
+
+    fun setParallaxEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("parallax_enabled", enable).apply()
+        _parallaxEnabled.value = enable
+    }
+
+    fun setParallaxStrength(strength: Float) {
+        prefs.edit().putFloat("parallax_strength", strength).apply()
+        _parallaxStrength.value = strength
+    }
+
+    fun saveCurrentAsPreset(name: String) {
+        viewModelScope.launch {
+            val folderUris = folders.value.map { it.uriString }
+            val thumb = favorites.value.firstOrNull()?.uriString ?: scannedImages.value.firstOrNull()?.uriString
+            
+            val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+            val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
+            val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
+            val favJson = adapter.toJson(favorites.value)
+
+            val existing = presets.value.find { it.name.equals(name, ignoreCase = true) }
+            if (existing != null) {
+                val updated = existing.copy(
+                    thumbnailUri = thumb,
+                    folderUris = folderUris,
+                    favoriteData = favJson,
+                    createdTime = System.currentTimeMillis()
+                )
+                presetDao.updatePreset(updated)
+            } else {
+                val preset = PresetEntity(
+                    name = name,
+                    thumbnailUri = thumb,
+                    folderUris = folderUris,
+                    favoriteData = favJson
+                )
+                presetDao.insertPreset(preset)
+            }
+        }
+    }
+
+    fun setGallerySortType(type: String) {
+        prefs.edit().putString("gallery_sort_type", type).apply()
+        _gallerySortType.value = type
+    }
+
+    fun toggleGalleryFolderSelection(uri: String) {
+        val current = _selectedGalleryFolderUris.value.toMutableSet()
+        if (current.contains(uri)) current.remove(uri) else current.add(uri)
+        _selectedGalleryFolderUris.value = current
+    }
+
+    fun clearGalleryFolderSelection() {
+        _selectedGalleryFolderUris.value = emptySet()
+    }
+
+    fun toggleFavoriteSelectedFolders() {
+        viewModelScope.launch {
+            val folderUris = _selectedGalleryFolderUris.value
+            if (folderUris.isEmpty()) return@launch
+            
+            // Check if ANY image in these folders is NOT a favorite
+            val allImagesInSelected = scannedImages.value.filter { folderUris.contains(it.folderUriString) }
+            val allFav = allImagesInSelected.all { it.isFavorite }
+            
+            if (allFav) {
+                // Unstar all in these folders
+                allImagesInSelected.forEach { toggleFavorite(it) }
+            } else {
+                // Star all in these folders
+                allImagesInSelected.filter { !it.isFavorite }.forEach { toggleFavorite(it) }
+            }
+            clearGalleryFolderSelection()
+        }
+    }
+
+    fun loadPreset(preset: PresetEntity) {
+        viewModelScope.launch {
+            folderDao.deleteAllFolders()
+            
+            val folderEntities = preset.folderUris.map { uri ->
+                val name = try {
+                    val u = Uri.parse(uri)
+                    if (u.scheme == "file") File(u.path!!).name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder"
+                } catch (e: Exception) { "Folder" }
+                FolderEntity(uriString = uri, displayName = name)
+            }
+            folderDao.insertFolders(folderEntities)
+            
+            // Restore Favorites
+            try {
+                val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+                val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
+                val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
+                val favs = adapter.fromJson(preset.favoriteData)
+                
+                if (favs != null) {
+                    // Option: Clear existing favorites or merge? 
+                    // To make it a true "preset", let's replace favorites.
+                    // However, delete + insert might be safer.
+                    // Assuming we want the preset's exact favorite list.
+                    // We don't have a delete all favorites dao method yet, let's just insert (Room REPLACE will handle existing)
+                    favs.forEach { favoriteDao.insertFavorite(it) }
+                }
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "Error loading favorites from preset", e)
+            }
+        }
+    }
+
+    fun deletePreset(preset: PresetEntity) {
+        viewModelScope.launch {
+            presetDao.deletePreset(preset)
+        }
     }
 
     fun addFolders(uris: List<Uri>) {

@@ -50,3 +50,18 @@ interface FavoriteDao {
     @Query("DELETE FROM favorites WHERE uriString = :uriString")
     suspend fun deleteFavoriteByUri(uriString: String)
 }
+
+@Dao
+interface PresetDao {
+    @Query("SELECT * FROM presets ORDER BY createdTime DESC")
+    fun getAllPresets(): Flow<List<PresetEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPreset(preset: PresetEntity)
+
+    @Delete
+    suspend fun deletePreset(preset: PresetEntity)
+
+    @Update
+    suspend fun updatePreset(preset: PresetEntity)
+}

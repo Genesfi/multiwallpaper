@@ -1,7 +1,12 @@
 package com.example
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.*
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -23,7 +28,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         return engine
     }
 
-    inner class MultiWallpaperEngine : Engine() {
+    inner class MultiWallpaperEngine : Engine(), SensorEventListener {
         private val handler = Handler(Looper.getMainLooper())
         private val engineScope = CoroutineScope(Dispatchers.Main + Job())
         private var visible = false
@@ -48,26 +53,121 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var transitionAlpha = 255
         private var isTransitioning = false
 
-        private val drawRunnable = Runnable { drawFrame() }
+        private var isDrawScheduled = false
+        private val drawRunnable = Runnable { 
+            isDrawScheduled = false
+            drawFrame() 
+        }
         private val rotationRunnable = Runnable { rotateWallpapers() }
+
+        // Parallax sensor properties
+        private var sensorManager: SensorManager? = null
+        private var accelerometer: Sensor? = null
+        private var parallaxEnabled = false
+        private var parallaxStrength = 0.5f
+        private var transitionType = "slide"
+        private var fadeSpeed = 15
+        private var currentRoll = 0f
+        private var currentPitch = 0f
+        private val smoothingFactor = 0.05f // Stronger LPF to ignore jitter
+        private val deadZoneThreshold = 0.2f // Ignore very small tremors
+        
+        private val bitmapPaint = Paint().apply { isFilterBitmap = true }
+        private val textPaint = Paint().apply { 
+            color = Color.WHITE
+            textSize = 40f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true 
+        }
+        private val loadingCirclePaint = Paint().apply { 
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+            isAntiAlias = true 
+        }
+
+        private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            updateSettings()
+        }
 
         override fun onCreate(surfaceHolder: SurfaceHolder?) {
             super.onCreate(surfaceHolder)
             setTouchEventsEnabled(true)
             
+            sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+            accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+
             val db = AppDatabase.getDatabase(this@MultiWallpaperLiveService)
             engineScope.launch {
                 db.folderDao().getAllFolders().collectLatest {
                     loadWallpapersForPages()
                 }
             }
+            
+            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            prefs.registerOnSharedPreferenceChangeListener(prefsListener)
+            
+            updateSettings()
         }
+
+        private fun updateSettings() {
+            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
+            parallaxStrength = prefs.getFloat("parallax_strength", 0.5f)
+            transitionType = prefs.getString("transition_type", "slide") ?: "slide"
+            fadeSpeed = prefs.getInt("fade_speed", 15)
+            
+            if (visible && parallaxEnabled) {
+                registerSensor()
+            } else {
+                unregisterSensor()
+            }
+        }
+
+        private fun registerSensor() {
+            accelerometer?.let {
+                sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
+            }
+        }
+
+        private fun unregisterSensor() {
+            sensorManager?.unregisterListener(this)
+        }
+
+        override fun onSensorChanged(event: SensorEvent?) {
+            if (event?.sensor?.type == Sensor.TYPE_ACCELEROMETER) {
+                val x = event.values[0]
+                val y = event.values[1]
+                
+                // Dead-zone check: only update if delta is significant enough
+                val deltaX = x - currentRoll
+                val deltaY = y - currentPitch
+                
+                if (kotlin.math.abs(deltaX) > deadZoneThreshold || kotlin.math.abs(deltaY) > deadZoneThreshold) {
+                    currentRoll += smoothingFactor * deltaX
+                    currentPitch += smoothingFactor * deltaY
+                    if (visible) requestDraw()
+                }
+            }
+        }
+
+        private fun requestDraw() {
+            if (!isDrawScheduled) {
+                isDrawScheduled = true
+                handler.post(drawRunnable)
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
         override fun onDestroy() {
             super.onDestroy()
             engineScope.cancel()
             handler.removeCallbacks(drawRunnable)
             handler.removeCallbacks(rotationRunnable)
+            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+            unregisterSensor()
             recycleBitmaps()
         }
 
@@ -98,7 +198,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                     if (isSwipe && numBitmaps > 1) {
                         if (deltaX > 0) manualPageIndex = if (manualPageIndex > 0) manualPageIndex - 1 else numBitmaps - 1
                         else manualPageIndex = if (manualPageIndex < numBitmaps - 1) manualPageIndex + 1 else 0
-                        drawFrame()
+                        requestDraw()
                     }
                 }
             }
@@ -107,11 +207,14 @@ class MultiWallpaperLiveService : WallpaperService() {
         override fun onVisibilityChanged(visible: Boolean) {
             this.visible = visible
             if (visible) {
+                updateSettings()
                 scheduleRotation()
-                drawFrame()
+                requestDraw()
             } else {
+                isDrawScheduled = false
                 handler.removeCallbacks(drawRunnable)
                 handler.removeCallbacks(rotationRunnable)
+                unregisterSensor()
             }
         }
 
@@ -130,7 +233,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                     val targetIndex = systemPageIndex.coerceIn(0, numBitmaps - 1)
                     if (manualPageIndex != targetIndex) manualPageIndex = targetIndex
                 }
-                if (visible) drawFrame()
+                if (visible) requestDraw()
             }
         }
 
@@ -142,7 +245,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                 val wm = getSystemService(Context.WALLPAPER_SERVICE) as android.app.WallpaperManager
                 wm.suggestDesiredDimensions(width * 5, height)
             } catch (e: Exception) {}
-            drawFrame()
+            requestDraw()
         }
 
         private fun scheduleRotation() {
@@ -154,9 +257,6 @@ class MultiWallpaperLiveService : WallpaperService() {
         private fun rotateWallpapers() {
             if (isTransitioning) return // Avoid overlapping transitions
 
-            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
-            val transitionType = prefs.getString("transition_type", "slide")
-            
             if (transitionType == "fade" && pageBitmaps.isNotEmpty()) {
                 if (preloadedBitmap != null) {
                     // Use preloaded bitmap immediately
@@ -212,9 +312,7 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private fun animateFade() {
             if (!isTransitioning) return
-            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
-            val speed = prefs.getInt("fade_speed", 15)
-            transitionAlpha += speed
+            transitionAlpha += fadeSpeed
             if (transitionAlpha >= 255) {
                 transitionAlpha = 255
                 isTransitioning = false
@@ -222,10 +320,10 @@ class MultiWallpaperLiveService : WallpaperService() {
                 pageBitmaps[manualPageIndex] = nextBitmap!!
                 nextBitmap = null
                 old?.recycle()
-                drawFrame()
+                requestDraw()
                 scheduleRotation()
             } else {
-                drawFrame()
+                requestDraw()
                 handler.postDelayed({ animateFade() }, 30)
             }
         }
@@ -254,11 +352,11 @@ class MultiWallpaperLiveService : WallpaperService() {
                 try {
                     val allUris = getAllAvailableUris()
                     if (allUris.isEmpty()) {
-                        handler.post { recycleBitmaps(); isLoading = false; drawFrame() }
+                        handler.post { recycleBitmaps(); isLoading = false; requestDraw() }
                         return@Thread
                     }
 
-                    handler.post { if (pageBitmaps.isEmpty()) { isLoading = true; drawFrame() } }
+                    handler.post { if (pageBitmaps.isEmpty()) { isLoading = true; requestDraw() } }
 
                     val random = Random(System.currentTimeMillis())
                     val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(allUris[random.nextInt(allUris.size)]), surfaceWidth, surfaceHeight)
@@ -267,7 +365,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                         recycleBitmaps()
                         if (firstBitmap != null) pageBitmaps[0] = firstBitmap
                         isLoading = false
-                        drawFrame()
+                        requestDraw()
                         preloadNextWallpaper() // Preload after initial load
                     }
 
@@ -355,12 +453,10 @@ class MultiWallpaperLiveService : WallpaperService() {
             val w = canvas.width; val h = canvas.height
             if (pageBitmaps.isEmpty() || isLoading) {
                 canvas.drawColor(Color.parseColor("#1A1F2C"))
-                val p = Paint().apply { color = Color.WHITE; textSize = 40f; textAlign = Paint.Align.CENTER; isAntiAlias = true }
                 if (isLoading) {
-                    canvas.drawText("Loading...", w / 2f, h / 2f, p)
-                    p.style = Paint.Style.STROKE; p.strokeWidth = 4f
-                    canvas.drawCircle(w / 2f, h / 2f + 60f, 30f, p)
-                } else canvas.drawText("Select folders in App", w / 2f, h / 2f, p)
+                    canvas.drawText("Loading...", w / 2f, h / 2f, textPaint)
+                    canvas.drawCircle(w / 2f, h / 2f + 60f, 30f, loadingCirclePaint)
+                } else canvas.drawText("Select folders in App", w / 2f, h / 2f, textPaint)
                 return
             }
 
@@ -369,33 +465,55 @@ class MultiWallpaperLiveService : WallpaperService() {
 
             val curr = pageBitmaps[idx]
             if (curr != null) {
-                val transition = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE).getString("transition_type", "slide")
                 if (isTransitioning && nextBitmap != null) {
-                    val paint = Paint().apply { isFilterBitmap = true }
-                    paint.alpha = 255 - transitionAlpha
-                    drawSingleBitmapWithPaint(canvas, curr, w, h, paint)
-                    paint.alpha = transitionAlpha
-                    drawSingleBitmapWithPaint(canvas, nextBitmap!!, w, h, paint)
-                } else if (transition == "fade" && isFluid) {
+                    bitmapPaint.alpha = 255 - transitionAlpha
+                    drawSingleBitmapWithPaint(canvas, curr, w, h, bitmapPaint)
+                    bitmapPaint.alpha = transitionAlpha
+                    drawSingleBitmapWithPaint(canvas, nextBitmap!!, w, h, bitmapPaint)
+                    bitmapPaint.alpha = 255 // Reset alpha
+                } else if (transitionType == "fade" && isFluid) {
                     val pos = xOffset * (pageBitmaps.size - 1); val l = pos.toInt(); val r = (l + 1).coerceAtMost(pageBitmaps.size - 1); val f = pos - l
                     val lb = pageBitmaps[l]; val rb = pageBitmaps[r]
                     if (lb != null && rb != null && l != r) {
-                        val p = Paint().apply { isFilterBitmap = true }
-                        p.alpha = ((1f - f) * 255).toInt(); drawSingleBitmapWithPaint(canvas, lb, w, h, p)
-                        p.alpha = (f * 255).toInt(); drawSingleBitmapWithPaint(canvas, rb, w, h, p)
+                        bitmapPaint.alpha = ((1f - f) * 255).toInt()
+                        drawSingleBitmapWithPaint(canvas, lb, w, h, bitmapPaint)
+                        bitmapPaint.alpha = (f * 255).toInt()
+                        drawSingleBitmapWithPaint(canvas, rb, w, h, bitmapPaint)
+                        bitmapPaint.alpha = 255 // Reset alpha
                     } else if (lb != null) drawSingleBitmap(canvas, lb, w, h)
                 } else drawSingleBitmap(canvas, curr, w, h)
             }
         }
 
         private fun drawSingleBitmap(canvas: Canvas, b: Bitmap, w: Int, h: Int) {
-            drawSingleBitmapWithPaint(canvas, b, w, h, Paint().apply { isFilterBitmap = true })
+            drawSingleBitmapWithPaint(canvas, b, w, h, bitmapPaint)
         }
 
         private fun drawSingleBitmapWithPaint(canvas: Canvas, b: Bitmap, w: Int, h: Int, p: Paint) {
-            val s = maxOf(w.toFloat() / b.width, h.toFloat() / b.height)
+            val sBase = maxOf(w.toFloat() / b.width, h.toFloat() / b.height)
+            
+            // Zoom factor to prevent edges during parallax
+            // Strength of 1.0 means up to 10% zoom (1.1x)
+            val zoomFactor = if (parallaxEnabled) 1.0f + (parallaxStrength * 0.1f) else 1.0f
+            val s = sBase * zoomFactor
+            
             val ow = b.width * s; val oh = b.height * s
-            canvas.drawBitmap(b, Rect(0, 0, b.width, b.height), RectF((w - ow) / 2f, (h - oh) / 2f, (w + ow) / 2f, (h + oh) / 2f), p)
+            
+            var dx = (w - ow) / 2f
+            var dy = (h - oh) / 2f
+            
+            if (parallaxEnabled) {
+                // Max offset is the extra size provided by zoomFactor
+                val maxOffsetX = (ow - w) / 2f
+                val maxOffsetY = (oh - h) / 2f
+                
+                // Roll (side tilt) affects X, Pitch (front/back tilt) affects Y
+                // Accelerometer values are typically -10 to 10
+                dx += (currentRoll / 10f) * maxOffsetX
+                dy -= (currentPitch / 10f) * maxOffsetY
+            }
+            
+            canvas.drawBitmap(b, Rect(0, 0, b.width, b.height), RectF(dx, dy, dx + ow, dy + oh), p)
         }
     }
 }

@@ -17,23 +17,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.*
+import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -108,10 +99,9 @@ fun MainLayout() {
     val viewModel: HomeViewModel = viewModel()
     var currentTab by remember { mutableStateOf(NavigationTab.FOLDERS) }
     var showMultiSelectDialog by remember { mutableStateOf(false) }
-    val scannedImages by viewModel.scannedImages.collectAsState()
-    val isScanning by viewModel.isScanning.collectAsState()
     val selectedFolderIds by viewModel.selectedFolderIds.collectAsState()
     val selectedGalleryUris by viewModel.selectedGalleryUris.collectAsState()
+    val selectedGalleryFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
     val context = LocalContext.current
 
     Scaffold(
@@ -122,8 +112,8 @@ fun MainLayout() {
                 navigationIcon = {
                     if (currentTab == NavigationTab.FOLDERS && selectedFolderIds.isNotEmpty()) {
                         IconButton(onClick = { viewModel.clearFolderIdSelection() }) { Icon(Icons.Default.Close, null) }
-                    } else if (currentTab == NavigationTab.GALLERY && selectedGalleryUris.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.clearGallerySelection() }) { Icon(Icons.Default.Close, null) }
+                    } else if (currentTab == NavigationTab.GALLERY && (selectedGalleryUris.isNotEmpty() || selectedGalleryFolderUris.isNotEmpty())) {
+                        IconButton(onClick = { viewModel.clearGallerySelection(); viewModel.clearGalleryFolderSelection() }) { Icon(Icons.Default.Close, null) }
                     } else {
                         IconButton(onClick = { triggerLiveWallpaperSelection(context) }) { Icon(Icons.Default.Wallpaper, null, tint = MaterialTheme.colorScheme.primary) }
                     }
@@ -133,6 +123,18 @@ fun MainLayout() {
                         IconButton(onClick = { viewModel.deleteSelectedFolders() }) { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
                     } else if (currentTab == NavigationTab.GALLERY && selectedGalleryUris.isNotEmpty()) {
                         IconButton(onClick = { viewModel.addSelectedToFavorites() }) { Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308)) }
+                    } else if (currentTab == NavigationTab.GALLERY && selectedGalleryFolderUris.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.toggleFavoriteSelectedFolders() }) { Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308)) }
+                    } else if (currentTab == NavigationTab.GALLERY) {
+                        var showSortMenu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { showSortMenu = true }) { Icon(Icons.AutoMirrored.Filled.Sort, null, tint = MaterialTheme.colorScheme.primary) }
+                            DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                                listOf("NAME" to "Name", "DATE" to "Date Added", "STAR" to "Star First").forEach { (type, label) ->
+                                    DropdownMenuItem(text = { Text(label) }, onClick = { viewModel.setGallerySortType(type); showSortMenu = false })
+                                }
+                            }
+                        }
                     } else {
                         IconButton(onClick = { viewModel.scanFolders() }) { Icon(Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.primary) }
                     }
@@ -173,7 +175,7 @@ fun MainLayout() {
             AnimatedContent(targetState = currentTab, label = "Tab") { tab ->
                 when (tab) {
                     NavigationTab.FOLDERS -> FolderScreen(viewModel)
-                    NavigationTab.GALLERY -> GalleryScreen(scannedImages, isScanning, selectedGalleryUris, { viewModel.toggleFavorite(it) }, { viewModel.toggleGalleryUriSelection(it) }, { viewModel.toggleFavoriteFolder(it) })
+                    NavigationTab.GALLERY -> GalleryScreen(viewModel)
                     NavigationTab.FAVORITES -> FavoritesScreen(viewModel)
                     NavigationTab.SETTINGS -> SettingsScreen(viewModel) { triggerLiveWallpaperSelection(context) }
                 }
@@ -233,6 +235,11 @@ fun FolderScreen(viewModel: HomeViewModel) {
     val isScanning by viewModel.isScanning.collectAsState()
     val selectedIds by viewModel.selectedFolderIds.collectAsState()
     val scannedImages by viewModel.scannedImages.collectAsState()
+    val presets by viewModel.presets.collectAsState()
+
+    var showPresetDialog by remember { mutableStateOf(false) }
+    var showSavePresetDialog by remember { mutableStateOf(false) }
+    var presetName by remember { mutableStateOf("") }
     
     val grouped = remember(folders) { 
         folders.groupBy { 
@@ -244,13 +251,57 @@ fun FolderScreen(viewModel: HomeViewModel) {
 
     Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("SOURCES (${folders.size})", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column {
+                Text("SOURCES (${folders.size})", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (presets.isNotEmpty()) {
+                    Text("${presets.size} Presets available", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.clickable { showPresetDialog = true })
+                }
+            }
             Row {
+                IconButton(onClick = { showSavePresetDialog = true }, enabled = folders.isNotEmpty()) {
+                    Icon(Icons.Default.Save, contentDescription = "Save Preset", tint = MaterialTheme.colorScheme.primary)
+                }
+                IconButton(onClick = { showPresetDialog = true }) {
+                    Icon(Icons.Default.CollectionsBookmark, contentDescription = "Presets")
+                }
                 if (folders.isNotEmpty()) TextButton(onClick = { viewModel.clearAllFolders() }) { Text("Clear All", color = MaterialTheme.colorScheme.error) }
                 if (isScanning) CircularProgressIndicator(modifier = Modifier.size(16.dp).align(Alignment.CenterVertically))
                 else if (folders.isNotEmpty()) TextButton(onClick = { viewModel.scanFolders() }) { Text("Re-Scan") }
             }
         }
+        
+        if (showSavePresetDialog) {
+            AlertDialog(
+                onDismissRequest = { showSavePresetDialog = false },
+                title = { Text("Save Preset") },
+                text = {
+                    OutlinedTextField(
+                        value = presetName,
+                        onValueChange = { presetName = it },
+                        label = { Text("Preset Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        if (presetName.isNotBlank()) {
+                            viewModel.saveCurrentAsPreset(presetName)
+                            presetName = ""
+                            showSavePresetDialog = false
+                        }
+                    }) { Text("Save") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showSavePresetDialog = false }) { Text("Cancel") }
+                }
+            )
+        }
+
+        if (showPresetDialog) {
+            PresetManagerDialog(viewModel) { showPresetDialog = false }
+        }
+
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             grouped.forEach { (parent, parentFolders) ->
                 val isExp = expanded[parent] ?: true
@@ -293,11 +344,84 @@ fun FolderScreen(viewModel: HomeViewModel) {
     }
 }
 
+@Composable
+fun PresetManagerDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
+    val presets by viewModel.presets.collectAsState()
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Presets") },
+        text = {
+            if (presets.isEmpty()) {
+                Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
+                    Text("No presets saved yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(presets) { preset ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                viewModel.loadPreset(preset)
+                                onDismiss()
+                            }
+                        ) {
+                            Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                                    if (preset.thumbnailUri != null) {
+                                        AsyncImage(
+                                            model = Uri.parse(preset.thumbnailUri),
+                                            contentDescription = null,
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        Icon(Icons.Default.Collections, null, modifier = Modifier.align(Alignment.Center), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                    Text(preset.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                                    Text("${preset.folderUris.size} folders", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                IconButton(onClick = { viewModel.deletePreset(preset) }) {
+                                    Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun GalleryScreen(images: List<WallpaperImg>, isScanning: Boolean, selectedUris: Set<String>, onToggleFavorite: (WallpaperImg) -> Unit, onToggleSelect: (String) -> Unit, onFavoriteFolder: (String) -> Unit) {
+fun GalleryScreen(viewModel: HomeViewModel) {
+    val images by viewModel.scannedImages.collectAsState()
+    val isScanning by viewModel.isScanning.collectAsState()
+    val selectedUris by viewModel.selectedGalleryUris.collectAsState()
+    val selectedFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
+    val sortType by viewModel.gallerySortType.collectAsState()
+
     var selectedImg by remember { mutableStateOf<WallpaperImg?>(null) }
-    val grouped = remember(images) { images.groupBy { it.folderUriString } }
+    
+    val grouped = remember(images, sortType) {
+        val groups = images.groupBy { it.folderUriString }
+        when (sortType) {
+            "NAME" -> groups.entries.sortedBy { entry -> 
+                val uri = Uri.parse(entry.key)
+                if (uri.scheme == "file") java.io.File(uri.path ?: "").name else Uri.decode(entry.key).split("/").lastOrNull() ?: "Folder"
+            }
+            "DATE" -> groups.entries.toList() // Scan order is basically date added
+            "STAR" -> groups.entries.sortedByDescending { it.value.any { img -> img.isFavorite } }
+            else -> groups.entries.toList()
+        }.associate { it.key to it.value }
+    }
+    
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
     Column(modifier = Modifier.fillMaxSize()) {
         if (isScanning) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -305,10 +429,21 @@ fun GalleryScreen(images: List<WallpaperImg>, isScanning: Boolean, selectedUris:
             grouped.forEach { (uri, imgs) ->
                 val isExp = expanded[uri] ?: false
                 val anyFav = imgs.any { it.isFavorite }
+                val isSelected = selectedFolderUris.contains(uri)
+                
                 item {
                     val name = remember(uri) { val u = Uri.parse(uri); if (u.scheme == "file") java.io.File(u.path ?: "").name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder" }
-                    Card(onClick = { expanded[uri] = !isExp }, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
+                    Card(
+                        onClick = { if (selectedFolderUris.isNotEmpty()) viewModel.toggleGalleryFolderSelection(uri) else expanded[uri] = !isExp },
+                        modifier = Modifier.combinedClickable(
+                            onClick = { if (selectedFolderUris.isNotEmpty()) viewModel.toggleGalleryFolderSelection(uri) else expanded[uri] = !isExp },
+                            onLongClick = { viewModel.toggleGalleryFolderSelection(uri) }
+                        ),
+                        border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
+                        colors = CardDefaults.cardColors(containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
+                    ) {
                         Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (selectedFolderUris.isNotEmpty()) Checkbox(isSelected, { viewModel.toggleGalleryFolderSelection(uri) })
                             Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
                                 val firstImg = imgs.firstOrNull()
                                 if (firstImg != null) {
@@ -321,7 +456,7 @@ fun GalleryScreen(images: List<WallpaperImg>, isScanning: Boolean, selectedUris:
                                 Text(name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text("${imgs.size} images", style = MaterialTheme.typography.labelSmall)
                             }
-                            IconButton(onClick = { onFavoriteFolder(uri) }) { Icon(if (anyFav) Icons.Default.Star else Icons.Default.StarOutline, null, tint = if (anyFav) Color(0xFFEAB308) else MaterialTheme.colorScheme.onSurfaceVariant) }
+                            IconButton(onClick = { viewModel.toggleFavoriteFolder(uri) }) { Icon(if (anyFav) Icons.Default.Star else Icons.Default.StarOutline, null, tint = if (anyFav) Color(0xFFEAB308) else MaterialTheme.colorScheme.onSurfaceVariant) }
                             Icon(if (isExp) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
                         }
                     }
@@ -332,7 +467,7 @@ fun GalleryScreen(images: List<WallpaperImg>, isScanning: Boolean, selectedUris:
                         Row(modifier = Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             chunks[i].forEach { img ->
                                 val sel = selectedUris.contains(img.uriString)
-                                Box(modifier = Modifier.weight(1f).aspectRatio(0.85f).clip(RoundedCornerShape(12.dp)).background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant).combinedClickable(onClick = { if (selectedUris.isNotEmpty()) onToggleSelect(img.uriString) else selectedImg = img }, onLongClick = { onToggleSelect(img.uriString) })) {
+                                Box(modifier = Modifier.weight(1f).aspectRatio(0.85f).clip(RoundedCornerShape(12.dp)).background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant).combinedClickable(onClick = { if (selectedUris.isNotEmpty()) viewModel.toggleGalleryUriSelection(img.uriString) else selectedImg = img }, onLongClick = { viewModel.toggleGalleryUriSelection(img.uriString) })) {
                                     AsyncImage(model = Uri.parse(img.uriString), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(if (sel) 0.6f else 1f), contentScale = ContentScale.Crop)
                                     if (img.isFavorite) Icon(Icons.Default.Star, null, tint = Color.Yellow, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(16.dp))
                                     if (sel) Icon(Icons.Default.CheckCircle, null, tint = Color.White, modifier = Modifier.align(Alignment.Center).size(32.dp))
@@ -345,7 +480,7 @@ fun GalleryScreen(images: List<WallpaperImg>, isScanning: Boolean, selectedUris:
             }
         }
     }
-    if (selectedImg != null) ImageDetailDialog(selectedImg!!, { selectedImg = null }, { onToggleFavorite(it) })
+    if (selectedImg != null) ImageDetailDialog(selectedImg!!, { selectedImg = null }, { viewModel.toggleFavorite(it) })
 }
 
 @Composable
@@ -374,6 +509,8 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     val useFav by viewModel.useFavoritesOnly.collectAsState()
     val doubleTap by viewModel.doubleTapEnabled.collectAsState()
     val fadeSpeed by viewModel.fadeSpeed.collectAsState()
+    val parallaxEnabled by viewModel.parallaxEnabled.collectAsState()
+    val parallaxStrength by viewModel.parallaxStrength.collectAsState()
     
     var unit by remember { mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") }
     val displayValue = remember(totalSeconds, unit) {
@@ -397,6 +534,21 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Double Tap to Change", fontWeight = FontWeight.Bold)
             Switch(doubleTap, { viewModel.setDoubleTapEnabled(it) })
+        }
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("React to Motion", fontWeight = FontWeight.Bold)
+            Switch(parallaxEnabled, { viewModel.setParallaxEnabled(it) })
+        }
+        
+        if (parallaxEnabled) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Motion Strength", fontWeight = FontWeight.Bold)
+            Slider(
+                value = parallaxStrength,
+                onValueChange = { viewModel.setParallaxStrength(it) },
+                valueRange = 0.1f..1f,
+                steps = 8
+            )
         }
         
         Spacer(modifier = Modifier.height(24.dp))
