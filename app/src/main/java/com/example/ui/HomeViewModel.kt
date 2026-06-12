@@ -96,7 +96,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             @OptIn(FlowPreview::class)
-            folders.debounce(1000).collect {
+            folders.debounce(3000).collect { // Increased debounce to 3s to reduce boot contention
                 scanFolders()
             }
         }

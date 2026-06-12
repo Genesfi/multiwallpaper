@@ -229,10 +229,20 @@ class MultiWallpaperLiveService : WallpaperService() {
             }
         }
 
+        private var detectedPages = 20 // Default to 20 for launchers that don't report xStep (HyperOS)
+
         override fun onOffsetsChanged(xOffset: Float, yOffset: Float, xStep: Float, yStep: Float, xPixels: Int, yPixels: Int) {
             val validXOffset = if (xOffset.isNaN()) 0f else xOffset
             val validXStep = if (xStep.isNaN()) 0f else xStep
             
+            if (validXStep > 0f) {
+                val newDetectedPages = (1f / validXStep).roundToInt() + 1
+                if (newDetectedPages != detectedPages && newDetectedPages in 1..50) {
+                    detectedPages = newDetectedPages
+                    loadWallpapersForPages() // Re-load if page count changes
+                }
+            }
+
             if (this.xOffset != validXOffset || this.xStep != validXStep) {
                 this.xOffset = validXOffset
                 this.xStep = validXStep
@@ -369,25 +379,42 @@ class MultiWallpaperLiveService : WallpaperService() {
                     withContext(Dispatchers.Main) { if (pageBitmaps.isEmpty()) { isLoading = true; requestDraw() } }
 
                     val random = Random(System.currentTimeMillis())
+                    val shuffledUris = allUris.shuffled(random)
                     
-                    // Optimization: Only load the first few pages initially to reduce boot lag and memory
-                    val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(allUris[random.nextInt(allUris.size)]), surfaceWidth, surfaceHeight)
+                    // Priority 1: Load current visible page immediately to avoid boot freeze/stutter
+                    val visibleUri = shuffledUris[0]
+                    val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight)
                     
                     withContext(Dispatchers.Main) {
+                        // Priority cleanup: keep current page if it exists and we're just adding more, 
+                        // but here we recycle to ensure a clean slate for the new page count.
                         recycleBitmaps()
-                        if (firstBitmap != null) pageBitmaps[0] = firstBitmap
+                        if (firstBitmap != null) {
+                            val safeIdx = manualPageIndex.coerceIn(0, detectedPages - 1)
+                            pageBitmaps[safeIdx] = firstBitmap
+                        }
                         isLoading = false
                         requestDraw()
-                        preloadNextWallpaper()
                     }
 
-                    // Load others lazily
+                    // Priority 2: Load other pages lazily in background
+                    val targetPageCount = detectedPages.coerceAtMost(shuffledUris.size)
                     val temp = mutableMapOf<Int, Bitmap>()
-                    for (p in 1 until 5) { // Reduced initial load from 10 to 5
-                        val b = decodeSampledBitmapFromUri(Uri.parse(allUris[random.nextInt(allUris.size)]), surfaceWidth, surfaceHeight)
+                    for (p in 0 until targetPageCount) {
+                        if (p == manualPageIndex) continue // Already loaded
+                        
+                        val uriIdx = p % shuffledUris.size
+                        val b = decodeSampledBitmapFromUri(Uri.parse(shuffledUris[uriIdx]), surfaceWidth, surfaceHeight)
                         if (b != null) temp[p] = b
+                        
+                        // Yield to prevent blocking IO thread for too long if many pages
+                        if (p % 3 == 0) delay(50) 
                     }
-                    withContext(Dispatchers.Main) { pageBitmaps.putAll(temp) }
+                    
+                    withContext(Dispatchers.Main) { 
+                        pageBitmaps.putAll(temp)
+                        preloadNextWallpaper()
+                    }
                 } catch (e: Exception) { withContext(Dispatchers.Main) { isLoading = false } }
             }
         }
