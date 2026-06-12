@@ -24,25 +24,20 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val folderDao = db.folderDao()
     private val favoriteDao = db.favoriteDao()
 
-    // Preferences
     val prefs = application.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
 
-    // Flow of folders from DB
     val folders: StateFlow<List<FolderEntity>> = folderDao.getAllFolders()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Flow of favorites from DB
     val favorites: StateFlow<List<FavoriteImageEntity>> = favoriteDao.getAllFavorites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // All available images from scanned folders
     private val _scannedImages = MutableStateFlow<List<WallpaperImg>>(emptyList())
     val scannedImages: StateFlow<List<WallpaperImg>> = _scannedImages.asStateFlow()
 
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
-    // Selection States
     private val _selectedFolderIds = MutableStateFlow<Set<Int>>(emptySet())
     val selectedFolderIds = _selectedFolderIds.asStateFlow()
 
@@ -198,10 +193,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val isCurrentlyFavorite = folderImages.any { it.isFavorite }
             
             if (isCurrentlyFavorite) {
-                // UNFAVORITE ALL
                 folderImages.forEach { favoriteDao.deleteFavoriteByUri(it.uriString) }
             } else {
-                // FAVORITE ALL
                 folderImages.forEach { img ->
                     favoriteDao.insertFavorite(
                         FavoriteImageEntity(
@@ -236,8 +229,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setIntervalSeconds(seconds: Float) {
-        prefs.edit().putFloat("interval_seconds", seconds).apply()
-        _intervalSeconds.value = seconds
+        val capped = seconds.coerceAtLeast(10f)
+        prefs.edit().putFloat("interval_seconds", capped).apply()
+        _intervalSeconds.value = capped
     }
 
     fun setUseFavoritesOnly(enable: Boolean) {

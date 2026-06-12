@@ -1,21 +1,32 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Multi Wallpaper Live Changer
 
-# Run and deploy your AI Studio app
+A modern Android Live Wallpaper application that allows users to cycle through multiple images from local storage folders with customizable transitions and intervals.
 
-This contains everything you need to run your app locally.
+## Features
 
-View your app in AI Studio: https://ai.studio/apps/26c4f068-2a2c-447b-9cec-3ca4f594e799
+- **Multi-Folder Support**: Add multiple directories as wallpaper sources.
+- **In-App File Explorer**: Easily navigate and mark multiple folders from internal storage.
+- **Thumbnail Previews**: View folder contents with quick thumbnails in the directory and picker screens.
+- **Smooth Transitions**: Choose between 'Slide' and 'Fade' transition effects.
+- **Customizable Intervals**: Set rotation frequency from seconds to hours using a precise slider and manual input.
+- **Double Tap Action**: Quickly skip to the next wallpaper by double-tapping the home screen (Toggleable).
+- **HyperOS/MIUI Optimized**: Special handling for modern launchers to ensure smooth manual and auto sliding.
+- **Bulk Favorite Management**: Rapidly mark entire folders or multiple selected images as favorites.
 
-## Run Locally
+## How to Use
 
-**Prerequisites:**  [Android Studio](https://developer.android.com/studio)
+1. **Grant Permissions**: Upon first launch, provide the 'All Files Access' permission to allow the app to scan your image folders.
+2. **Add Folders**: Go to the **Directory** tab, tap the **Mark Folders** icon, navigate to your desired folders, and click 'Add'.
+3. **Set Wallpaper**: Click the **Wallpaper** icon in the top bar or use the button in **Settings** to activate 'Multi Wallpaper Live Changer' as your active live wallpaper.
+4. **Configure Settings**:
+   - Adjust the **Rotation Interval** using the slider or dropdown.
+   - Choose your preferred **Transition Effect**.
+   - Enable **Double Tap** to change wallpaper manually.
+5. **Manage Gallery**: Explore your cataloged images in the **Gallery** tab. Use long-press to select multiple items for bulk favorite actions.
 
+## Credits
+- **Developer**: Migi Gustian
+- **GitHub**: [Genesfi/multiwallpaper](https://github.com/Genesfi/multiwallpaper)
 
-1. Open Android Studio
-2. Select **Open** and choose the directory containing this project
-3. Allow Android Studio to fix any incompatibilities as it imports the project.
-4. Create a file named `.env` in the project directory and set `GEMINI_API_KEY` in that file to your Gemini API key (see `.env.example` for an example)
-5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
-6. Run the app on an emulator or physical device
+## License
+Version 1.0.0 - Created with Android Studio.
