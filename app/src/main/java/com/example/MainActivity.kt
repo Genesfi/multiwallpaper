@@ -20,7 +20,6 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -58,6 +57,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.data.FolderEntity
+import kotlin.math.roundToInt
 import com.example.ui.HomeViewModel
 import com.example.ui.WallpaperImg
 import com.example.ui.theme.MyApplicationTheme
@@ -309,7 +309,14 @@ fun GalleryScreen(images: List<WallpaperImg>, isScanning: Boolean, selectedUris:
                     val name = remember(uri) { val u = Uri.parse(uri); if (u.scheme == "file") java.io.File(u.path ?: "").name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder" }
                     Card(onClick = { expanded[uri] = !isExp }, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
                         Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(if (isExp) Icons.Default.FolderOpen else Icons.Default.Folder, null, tint = MaterialTheme.colorScheme.primary)
+                            Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                                val firstImg = imgs.firstOrNull()
+                                if (firstImg != null) {
+                                    AsyncImage(model = Uri.parse(firstImg.uriString), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                } else {
+                                    Icon(if (isExp) Icons.Default.FolderOpen else Icons.Default.Folder, null, modifier = Modifier.align(Alignment.Center), tint = MaterialTheme.colorScheme.primary)
+                                }
+                            }
                             Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
                                 Text(name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text("${imgs.size} images", style = MaterialTheme.typography.labelSmall)
@@ -369,12 +376,13 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     
     var unit by remember { mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") }
     val displayValue = remember(totalSeconds, unit) {
-        when(unit) {
+        val v = when(unit) {
             "Sec" -> totalSeconds
             "Min" -> totalSeconds / 60
             "Hour" -> totalSeconds / 3600
             else -> totalSeconds
         }
+        v.roundToInt()
     }
     
     val scrollState = rememberScrollState()
@@ -395,14 +403,14 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
             OutlinedTextField(
-                value = if (displayValue % 1 == 0f) displayValue.toInt().toString() else "%.1f".format(displayValue),
+                value = displayValue.toString(),
                 onValueChange = { 
-                    val v = it.toFloatOrNull() ?: 0f
+                    val v = it.toIntOrNull() ?: 0
                     val newSec = when(unit) {
-                        "Sec" -> v
-                        "Min" -> v * 60
-                        "Hour" -> v * 3600
-                        else -> v
+                        "Sec" -> v.toFloat()
+                        "Min" -> (v * 60).toFloat()
+                        "Hour" -> (v * 3600).toFloat()
+                        else -> v.toFloat()
                     }
                     viewModel.setIntervalSeconds(newSec)
                 },
@@ -427,13 +435,14 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         }
         
         Slider(
-            value = displayValue.coerceIn(1f, 60f),
+            value = displayValue.toFloat().coerceIn(1f, 60f),
             onValueChange = { 
+                val rounded = it.roundToInt()
                 val newSec = when(unit) {
-                    "Sec" -> it
-                    "Min" -> it * 60
-                    "Hour" -> it * 3600
-                    else -> it
+                    "Sec" -> rounded.toFloat()
+                    "Min" -> (rounded * 60).toFloat()
+                    "Hour" -> (rounded * 3600).toFloat()
+                    else -> rounded.toFloat()
                 }
                 viewModel.setIntervalSeconds(newSec)
             },
@@ -449,7 +458,7 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         }
         
         Spacer(modifier = Modifier.height(32.dp))
-        Divider(color = MaterialTheme.colorScheme.outlineVariant)
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Spacer(modifier = Modifier.height(16.dp))
         Text("ABOUT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Card(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
