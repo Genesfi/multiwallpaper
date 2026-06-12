@@ -395,10 +395,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun addFolders(uris: List<Uri>) {
         viewModelScope.launch(Dispatchers.IO) {
             val contentResolver = getApplication<Application>().contentResolver
+            val currentFolderUris = folders.value.map { it.uriString }.toSet()
             val foldersToInsert = mutableListOf<FolderEntity>()
             
             uris.forEach { uri ->
                 try {
+                    val uriStr = uri.toString()
+                    if (currentFolderUris.contains(uriStr)) return@forEach // Skip duplicates
+
                     var displayName = "Folder"
                     if (uri.scheme == "file") {
                         displayName = java.io.File(uri.path ?: "").name
@@ -432,13 +436,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteFolder(folder: FolderEntity) {
         viewModelScope.launch(Dispatchers.IO) {
             folderDao.deleteFolder(folder)
+            favoriteDao.deleteFavoritesByFolderUri(folder.uriString)
         }
     }
 
     fun deleteSelectedFolders() {
         viewModelScope.launch(Dispatchers.IO) {
-            val ids = _selectedFolderIds.value.toList()
-            ids.forEach { folderDao.deleteFolderById(it) }
+            val selectedIds = _selectedFolderIds.value.toList()
+            val folderUrisToDelete = folders.value.filter { selectedIds.contains(it.id) }.map { it.uriString }
+            
+            selectedIds.forEach { folderDao.deleteFolderById(it) }
+            folderUrisToDelete.forEach { uri -> favoriteDao.deleteFavoritesByFolderUri(uri) }
+            
             withContext(Dispatchers.Main) {
                 clearFolderIdSelection()
             }
@@ -448,6 +457,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun clearAllFolders() {
         viewModelScope.launch(Dispatchers.IO) {
             folderDao.deleteAllFolders()
+            favoriteDao.deleteAllFavorites()
             withContext(Dispatchers.Main) {
                 clearFolderIdSelection()
             }
