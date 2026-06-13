@@ -369,8 +369,13 @@ fun FolderScreen(viewModel: HomeViewModel) {
                     items(parentFolders) { f ->
                         val sel = selectedIds.contains(f.id)
                         val folderPreview = remember(f.uriString, scannedImages) {
-                            scannedImages.firstOrNull { it.folderUriString == f.uriString }?.uriString?.let { Uri.parse(it) }
-                        }
+                            // First try exact match (images directly in this folder)
+                            scannedImages.firstOrNull { it.folderUriString == f.uriString }?.uriString
+                                ?: // Then try recursive match (images in subfolders)
+                                scannedImages.firstOrNull { img -> 
+                                    img.uriString.startsWith(f.uriString) 
+                                }?.uriString
+                        }?.let { Uri.parse(it) }
                         
                         Card(modifier = Modifier.padding(start = 16.dp).combinedClickable(onClick = { if (selectedIds.isNotEmpty()) viewModel.toggleFolderIdSelection(f.id) }, onLongClick = { viewModel.toggleFolderIdSelection(f.id) }), colors = CardDefaults.cardColors(containerColor = if (sel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
                             Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {

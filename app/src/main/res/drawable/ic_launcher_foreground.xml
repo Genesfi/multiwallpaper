@@ -5,10 +5,10 @@
     android:viewportHeight="108">
 
     <group
-        android:scaleX="0.85"
-        android:scaleY="0.85"
-        android:translateX="8.1"
-        android:translateY="8.1">
+        android:scaleX="0.75"
+        android:scaleY="0.75"
+        android:translateX="13.5"
+        android:translateY="13.5">
 
         <group
             android:pivotX="54"
@@ -59,11 +59,9 @@
         <path
             android:fillColor="#FFFFFF"
             android:pathData="M 33,24 H 75 A 6,6 0 0,1 81,30 V 72 A 6,6 0 0,1 75,78 H 33 A 6,6 0 0,1 27,72 V 30 A 6,6 0 0,1 33,24 Z" />
-
         <path
             android:fillColor="#005AC1"
             android:pathData="M 34,26 H 74 A 5,5 0 0,1 79,31 V 71 A 5,5 0 0,1 74,76 H 34 A 5,5 0 0,1 29,71 V 31 A 5,5 0 0,1 34,26 Z" />
-
         <group>
             <clip-path android:pathData="M 34,26 H 74 A 5,5 0 0,1 79,31 V 71 A 5,5 0 0,1 74,76 H 34 A 5,5 0 0,1 29,71 V 31 A 5,5 0 0,1 34,26 Z" />
             <path
