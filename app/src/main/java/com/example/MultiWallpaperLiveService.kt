@@ -52,9 +52,11 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var surfaceHeight = 2400
 
         private val pageBitmaps = mutableMapOf<Int, Bitmap>()
+        private val pageUris = mutableMapOf<Int, String>() // Track URIs to prevent duplicates
         
         private var nextBitmap: Bitmap? = null
         private var preloadedBitmap: Bitmap? = null
+        private var preloadedUri: String? = null
         private var transitionAlpha = 255
         private var isTransitioning = false
         private var transitionStartTime = 0L
@@ -318,22 +320,59 @@ class MultiWallpaperLiveService : WallpaperService() {
 
             if (transitionType == "fade" && pageBitmaps.isNotEmpty()) {
                 // Tighter timing mapping for better feel
-                // fadeSpeed 5 -> ~1200ms (Slow)
-                // fadeSpeed 25 -> ~600ms (Normal)
-                // fadeSpeed 50 -> ~250ms (Fast)
                 transitionDuration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L)
                 
                 if (preloadedBitmap != null) {
                     nextBitmap = preloadedBitmap
+                    if (preloadedUri != null) pageUris[manualPageIndex] = preloadedUri!!
                     preloadedBitmap = null
+                    preloadedUri = null
                     startFade()
                     preloadNextWallpaper()
                 } else {
                     startFadeRotation()
                 }
+                
+                // Silently refresh other pages to keep them fresh
+                refreshOtherPages()
             } else {
                 loadWallpapersForPages()
                 scheduleRotation()
+            }
+        }
+
+        private fun refreshOtherPages() {
+            engineScope.launch(Dispatchers.IO) {
+                val uris = getAllAvailableUris()
+                if (uris.isEmpty() || detectedPages <= 1) return@launch
+                
+                val currentUris = pageUris.values.toSet()
+                val tempBitmaps = mutableMapOf<Int, Bitmap>()
+                val tempUris = mutableMapOf<Int, String>()
+                
+                for (p in 0 until detectedPages) {
+                    if (p == manualPageIndex) continue // Current page is being handled by fade
+                    
+                    // Filter out already chosen URIs to avoid duplicates on different pages
+                    val availableUris = uris.filter { !currentUris.contains(it) && !tempUris.values.contains(it) && it != preloadedUri }
+                    val nextUri = if (availableUris.isNotEmpty()) availableUris.random() else uris.random()
+                    
+                    val b = decodeSampledBitmapFromUri(Uri.parse(nextUri), surfaceWidth, surfaceHeight)
+                    if (b != null) {
+                        tempBitmaps[p] = b
+                        tempUris[p] = nextUri
+                    }
+                    delay(50) // Be gentle on CPU
+                }
+                
+                withContext(Dispatchers.Main) {
+                    tempBitmaps.forEach { (p, b) ->
+                        val old = pageBitmaps[p]
+                        pageBitmaps[p] = b
+                        pageUris[p] = tempUris[p] ?: ""
+                        old?.recycle()
+                    }
+                }
             }
         }
 
@@ -341,13 +380,20 @@ class MultiWallpaperLiveService : WallpaperService() {
             engineScope.launch(Dispatchers.IO) {
                 val uris = getAllAvailableUris()
                 if (uris.isNotEmpty()) {
-                    val rawBmp = decodeSampledBitmapFromUri(Uri.parse(uris[Random.nextInt(uris.size)]), surfaceWidth, surfaceHeight)
+                    // Exclude all current URIs AND any currently preloaded URI
+                    val currentUris = (pageUris.values + listOfNotNull(preloadedUri)).toSet()
+                    val availableUris = uris.filter { !currentUris.contains(it) }
+                    val nextUri = if (availableUris.isNotEmpty()) availableUris.random() else uris.random()
+                    
+                    val rawBmp = decodeSampledBitmapFromUri(Uri.parse(nextUri), surfaceWidth, surfaceHeight)
                     if (rawBmp != null) {
                         // Pre-scale to screen size to eliminate scaling overhead during fade
                         val scaledBmp = createScreenScaledBitmap(rawBmp)
                         withContext(Dispatchers.Main) {
                             preloadedBitmap?.recycle()
                             preloadedBitmap = scaledBmp
+                            preloadedUri = nextUri
+                            // Update pageUris[manualPageIndex] only when actually used in startFadeRotation
                             rawBmp.recycle()
                         }
                     }
@@ -359,10 +405,16 @@ class MultiWallpaperLiveService : WallpaperService() {
             engineScope.launch(Dispatchers.IO) {
                 val uris = getAllAvailableUris()
                 if (uris.isNotEmpty()) {
-                    val rawBmp = decodeSampledBitmapFromUri(Uri.parse(uris[Random.nextInt(uris.size)]), surfaceWidth, surfaceHeight)
+                    // Pick a random URI that is NOT currently displayed on ANY page to maximize variety
+                    val currentUris = pageUris.values.toSet()
+                    val availableUris = uris.filter { !currentUris.contains(it) }
+                    val nextUri = if (availableUris.isNotEmpty()) availableUris.random() else uris.random()
+                    
+                    val rawBmp = decodeSampledBitmapFromUri(Uri.parse(nextUri), surfaceWidth, surfaceHeight)
                     if (rawBmp != null) {
                         val scaledBmp = createScreenScaledBitmap(rawBmp)
                         withContext(Dispatchers.Main) {
+                            pageUris[manualPageIndex] = nextUri
                             nextBitmap = scaledBmp
                             rawBmp.recycle()
                             startFade()
@@ -476,9 +528,11 @@ class MultiWallpaperLiveService : WallpaperService() {
                         // Priority cleanup: keep current page if it exists and we're just adding more, 
                         // but here we recycle to ensure a clean slate for the new page count.
                         recycleBitmaps()
+                        pageUris.clear()
                         if (firstBitmap != null) {
                             val safeIdx = manualPageIndex.coerceIn(0, detectedPages - 1)
                             pageBitmaps[safeIdx] = firstBitmap
+                            pageUris[safeIdx] = visibleUri
                         }
                         isLoading = false
                         requestDraw()
@@ -487,12 +541,17 @@ class MultiWallpaperLiveService : WallpaperService() {
                     // Priority 2: Load other pages lazily in background
                     val targetPageCount = detectedPages.coerceAtMost(shuffledUris.size)
                     val temp = mutableMapOf<Int, Bitmap>()
+                    val tempUris = mutableMapOf<Int, String>()
                     for (p in 0 until targetPageCount) {
                         if (p == manualPageIndex) continue // Already loaded
                         
                         val uriIdx = p % shuffledUris.size
-                        val b = decodeSampledBitmapFromUri(Uri.parse(shuffledUris[uriIdx]), surfaceWidth, surfaceHeight)
-                        if (b != null) temp[p] = b
+                        val uri = shuffledUris[uriIdx]
+                        val b = decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight)
+                        if (b != null) {
+                            temp[p] = b
+                            tempUris[p] = uri
+                        }
                         
                         // Yield to prevent blocking IO thread for too long if many pages
                         if (p % 3 == 0) delay(50) 
@@ -500,6 +559,9 @@ class MultiWallpaperLiveService : WallpaperService() {
                     
                     withContext(Dispatchers.Main) { 
                         pageBitmaps.putAll(temp)
+                        pageUris.putAll(tempUris)
+                        requestDraw()
+                        scheduleRotation() // Ensure timer starts after wallpapers are ready
                         preloadNextWallpaper()
                     }
                 } catch (e: Exception) { withContext(Dispatchers.Main) { isLoading = false } }
