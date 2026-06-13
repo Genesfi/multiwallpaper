@@ -13,8 +13,11 @@ import android.os.Looper
 import android.provider.DocumentsContract
 import android.service.wallpaper.WallpaperService
 import android.util.Log
+import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.SurfaceHolder
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.DecelerateInterpolator
 import com.example.data.AppDatabase
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
@@ -54,6 +57,20 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var preloadedBitmap: Bitmap? = null
         private var transitionAlpha = 255
         private var isTransitioning = false
+        private var transitionStartTime = 0L
+        private var transitionDuration = 600L
+        private val interpolator = DecelerateInterpolator(1.5f) // Cubic-like ease-out for snappier response
+
+        private val frameCallback = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (isTransitioning) {
+                    animateFade()
+                    if (isTransitioning) {
+                        Choreographer.getInstance().postFrameCallback(this)
+                    }
+                }
+            }
+        }
 
         private var isDrawScheduled = false
         private val drawRunnable = Runnable { 
@@ -74,6 +91,8 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var currentPitch = 0f
         private val smoothingFactor = 0.05f // Stronger LPF to ignore jitter
         private val deadZoneThreshold = 0.2f // Ignore very small tremors
+        private var lastSensorDrawTime = 0L
+        private val sensorThrottleMs = 50L // Aggressive throttling (~20fps) to save power
         
         private val bitmapPaint = Paint().apply { isFilterBitmap = true }
         private val textPaint = Paint().apply { 
@@ -118,13 +137,19 @@ class MultiWallpaperLiveService : WallpaperService() {
             val newUseFav = prefs.getBoolean("use_favorites_only", false)
             val useFavChanged = useFavoritesOnly != newUseFav
             
+            // Force reload if requested via a "force_reload" flag
+            val forceReload = prefs.getBoolean("force_reload_trigger", false)
+            if (forceReload) {
+                prefs.edit().putBoolean("force_reload_trigger", false).apply()
+            }
+            
             useFavoritesOnly = newUseFav
             parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
             parallaxStrength = prefs.getFloat("parallax_strength", 0.5f)
             transitionType = prefs.getString("transition_type", "slide") ?: "slide"
             fadeSpeed = prefs.getInt("fade_speed", 15)
             
-            if (useFavChanged) {
+            if (useFavChanged || forceReload) {
                 loadWallpapersForPages()
             }
             
@@ -137,7 +162,7 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private fun registerSensor() {
             accelerometer?.let {
-                sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
+                sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
             }
         }
 
@@ -146,6 +171,9 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         override fun onSensorChanged(event: SensorEvent?) {
+            // Mute parallax during transitions to focus CPU/GPU on alpha blending
+            if (!visible || !parallaxEnabled || isTransitioning) return
+            
             if (event?.sensor?.type == Sensor.TYPE_ACCELEROMETER) {
                 val x = event.values[0]
                 val y = event.values[1]
@@ -157,7 +185,12 @@ class MultiWallpaperLiveService : WallpaperService() {
                 if (kotlin.math.abs(deltaX) > deadZoneThreshold || kotlin.math.abs(deltaY) > deadZoneThreshold) {
                     currentRoll += smoothingFactor * deltaX
                     currentPitch += smoothingFactor * deltaY
-                    if (visible) requestDraw()
+                    
+                    val now = System.currentTimeMillis()
+                    if ((now - lastSensorDrawTime) >= sensorThrottleMs) {
+                        lastSensorDrawTime = now
+                        requestDraw()
+                    }
                 }
             }
         }
@@ -226,6 +259,9 @@ class MultiWallpaperLiveService : WallpaperService() {
                 handler.removeCallbacks(drawRunnable)
                 handler.removeCallbacks(rotationRunnable)
                 unregisterSensor()
+                // Also cancel any ongoing transitions to stop power usage
+                isTransitioning = false
+                nextBitmap = null
             }
         }
 
@@ -243,7 +279,9 @@ class MultiWallpaperLiveService : WallpaperService() {
                 }
             }
 
-            if (this.xOffset != validXOffset || this.xStep != validXStep) {
+            // Only redraw if the offset changed significantly to save power
+            val offsetDelta = kotlin.math.abs(this.xOffset - validXOffset)
+            if (offsetDelta > 0.001f || this.xStep != validXStep) {
                 this.xOffset = validXOffset
                 this.xStep = validXStep
                 
@@ -279,16 +317,18 @@ class MultiWallpaperLiveService : WallpaperService() {
             if (isTransitioning) return // Avoid overlapping transitions
 
             if (transitionType == "fade" && pageBitmaps.isNotEmpty()) {
+                // Tighter timing mapping for better feel
+                // fadeSpeed 5 -> ~1200ms (Slow)
+                // fadeSpeed 25 -> ~600ms (Normal)
+                // fadeSpeed 50 -> ~250ms (Fast)
+                transitionDuration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L)
+                
                 if (preloadedBitmap != null) {
-                    // Use preloaded bitmap immediately
                     nextBitmap = preloadedBitmap
                     preloadedBitmap = null
-                    isTransitioning = true
-                    transitionAlpha = 0
-                    animateFade()
-                    preloadNextWallpaper() // Preload for the next time
+                    startFade()
+                    preloadNextWallpaper()
                 } else {
-                    // Fallback if not preloaded yet
                     startFadeRotation()
                 }
             } else {
@@ -298,43 +338,86 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun preloadNextWallpaper() {
-            Thread {
+            engineScope.launch(Dispatchers.IO) {
                 val uris = getAllAvailableUris()
                 if (uris.isNotEmpty()) {
-                    val bmp = decodeSampledBitmapFromUri(Uri.parse(uris[Random.nextInt(uris.size)]), surfaceWidth, surfaceHeight)
-                    handler.post {
-                        preloadedBitmap?.recycle()
-                        preloadedBitmap = bmp
+                    val rawBmp = decodeSampledBitmapFromUri(Uri.parse(uris[Random.nextInt(uris.size)]), surfaceWidth, surfaceHeight)
+                    if (rawBmp != null) {
+                        // Pre-scale to screen size to eliminate scaling overhead during fade
+                        val scaledBmp = createScreenScaledBitmap(rawBmp)
+                        withContext(Dispatchers.Main) {
+                            preloadedBitmap?.recycle()
+                            preloadedBitmap = scaledBmp
+                            rawBmp.recycle()
+                        }
                     }
                 }
-            }.start()
+            }
         }
 
         private fun startFadeRotation() {
-            Thread {
+            engineScope.launch(Dispatchers.IO) {
                 val uris = getAllAvailableUris()
                 if (uris.isNotEmpty()) {
-                    val newBmp = decodeSampledBitmapFromUri(Uri.parse(uris[Random.nextInt(uris.size)]), surfaceWidth, surfaceHeight)
-                    handler.post {
-                        if (newBmp != null) {
-                            nextBitmap = newBmp
-                            isTransitioning = true
-                            transitionAlpha = 0
-                            animateFade()
-                            preloadNextWallpaper() // Start preloading for future use
-                        } else {
+                    val rawBmp = decodeSampledBitmapFromUri(Uri.parse(uris[Random.nextInt(uris.size)]), surfaceWidth, surfaceHeight)
+                    if (rawBmp != null) {
+                        val scaledBmp = createScreenScaledBitmap(rawBmp)
+                        withContext(Dispatchers.Main) {
+                            nextBitmap = scaledBmp
+                            rawBmp.recycle()
+                            startFade()
+                            preloadNextWallpaper() 
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) {
                             loadWallpapersForPages()
                             scheduleRotation()
                         }
                     }
                 }
-            }.start()
+            }
+        }
+
+        private fun createScreenScaledBitmap(raw: Bitmap): Bitmap? {
+            return try {
+                if (surfaceWidth <= 0 || surfaceHeight <= 0) return raw
+                
+                val result = Bitmap.createBitmap(surfaceWidth, surfaceHeight, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(result)
+                
+                val bW = raw.width.toFloat()
+                val bH = raw.height.toFloat()
+                val s = maxOf(surfaceWidth.toFloat() / bW, surfaceHeight.toFloat() / bH)
+                val ow = bW * s
+                val oh = bH * s
+                val dx = (surfaceWidth - ow) / 2f
+                val dy = (surfaceHeight - oh) / 2f
+                
+                val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+                canvas.drawBitmap(raw, null, RectF(dx, dy, dx + ow, dy + oh), paint)
+                result
+            } catch (e: Exception) { raw }
+        }
+
+        private fun startFade() {
+            isTransitioning = true
+            transitionAlpha = 0
+            transitionStartTime = System.currentTimeMillis()
+            Choreographer.getInstance().postFrameCallback(frameCallback)
         }
 
         private fun animateFade() {
             if (!isTransitioning) return
-            transitionAlpha += fadeSpeed
-            if (transitionAlpha >= 255) {
+            
+            val now = System.currentTimeMillis()
+            val elapsed = now - transitionStartTime
+            val progress = (elapsed.toFloat() / transitionDuration).coerceIn(0f, 1f)
+            
+            // Apply AccelerateDecelerate for cinematic feel
+            val interpolatedProgress = interpolator.getInterpolation(progress)
+            transitionAlpha = (interpolatedProgress * 255).toInt()
+            
+            if (progress >= 1f) {
                 transitionAlpha = 255
                 isTransitioning = false
                 val old = pageBitmaps[manualPageIndex]
@@ -345,7 +428,6 @@ class MultiWallpaperLiveService : WallpaperService() {
                 scheduleRotation()
             } else {
                 requestDraw()
-                handler.postDelayed({ animateFade() }, 30)
             }
         }
 
@@ -453,13 +535,18 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private fun decodeSampledBitmapFromUri(uri: Uri, reqWidth: Int, reqHeight: Int): Bitmap? {
             return try {
-                // Optimization: Cap the requested size to prevent OOM and lag with 4K images
-                val maxWidth = if (reqWidth > 0) reqWidth.coerceAtMost(2048) else 2048
-                val maxHeight = if (reqHeight > 0) reqHeight.coerceAtMost(2048) else 2048
-
                 contentResolver.openInputStream(uri)?.use { input ->
                     val opt = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     BitmapFactory.decodeStream(input, null, opt)
+                    
+                    // Optimization: Detect wide (16:9) images and apply higher sampling for portrait display
+                    val isWide = opt.outWidth > opt.outHeight * 1.5
+                    val targetWidth = if (isWide && reqWidth < reqHeight) reqWidth / 2 else reqWidth
+                    
+                    // Optimization: Cap the requested size to prevent OOM and lag with 4K images
+                    val maxWidth = if (targetWidth > 0) targetWidth.coerceAtMost(2048) else 2048
+                    val maxHeight = if (reqHeight > 0) reqHeight.coerceAtMost(2048) else 2048
+
                     opt.inSampleSize = calculateInSampleSize(opt, maxWidth, maxHeight)
                     opt.inJustDecodeBounds = false
                     opt.inPreferredConfig = Bitmap.Config.RGB_565 // Use 16-bit color for memory efficiency if quality allows
@@ -494,6 +581,11 @@ class MultiWallpaperLiveService : WallpaperService() {
             }
         }
 
+        private val srcRect = Rect()
+        private val dstRect = RectF()
+        private val nextSrcRect = Rect()
+        private val nextDstRect = RectF()
+
         private fun drawCanvas(canvas: Canvas) {
             val w = canvas.width; val h = canvas.height
             if (pageBitmaps.isEmpty() || isLoading) {
@@ -511,54 +603,71 @@ class MultiWallpaperLiveService : WallpaperService() {
             val curr = pageBitmaps[idx]
             if (curr != null) {
                 if (isTransitioning && nextBitmap != null) {
-                    bitmapPaint.alpha = 255 - transitionAlpha
-                    drawSingleBitmapWithPaint(canvas, curr, w, h, bitmapPaint)
+                    // Single-Pass Blending: Draw background solid, draw next on top with alpha
+                    // Since nextBitmap is already pre-scaled, we draw it 1:1
+                    drawSingleBitmap(canvas, curr, w, h)
+                    
                     bitmapPaint.alpha = transitionAlpha
-                    drawSingleBitmapWithPaint(canvas, nextBitmap!!, w, h, bitmapPaint)
-                    bitmapPaint.alpha = 255 // Reset alpha
+                    canvas.drawBitmap(nextBitmap!!, 0f, 0f, bitmapPaint)
+                    bitmapPaint.alpha = 255 // Reset
                 } else if (transitionType == "fade" && isFluid) {
                     val pos = xOffset * (pageBitmaps.size - 1); val l = pos.toInt(); val r = (l + 1).coerceAtMost(pageBitmaps.size - 1); val f = pos - l
                     val lb = pageBitmaps[l]; val rb = pageBitmaps[r]
                     if (lb != null && rb != null && l != r) {
+                        calculateRects(lb, w, h, srcRect, dstRect)
+                        calculateRects(rb, w, h, nextSrcRect, nextDstRect)
+
                         bitmapPaint.alpha = ((1f - f) * 255).toInt()
-                        drawSingleBitmapWithPaint(canvas, lb, w, h, bitmapPaint)
+                        canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
+                        
                         bitmapPaint.alpha = (f * 255).toInt()
-                        drawSingleBitmapWithPaint(canvas, rb, w, h, bitmapPaint)
+                        canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
+                        
                         bitmapPaint.alpha = 255 // Reset alpha
                     } else if (lb != null) drawSingleBitmap(canvas, lb, w, h)
                 } else drawSingleBitmap(canvas, curr, w, h)
             }
         }
 
+        private fun calculateRects(b: Bitmap, w: Int, h: Int, sR: Rect, dR: RectF) {
+            val bW = b.width.toFloat()
+            val bH = b.height.toFloat()
+            val sBase = maxOf(w.toFloat() / bW, h.toFloat() / bH)
+            
+            // Only apply parallax if NOT transitioning (already checked in onSensorChanged, 
+            // but we use current values here)
+            val zoomFactor = if (parallaxEnabled && !isTransitioning) 1.0f + (parallaxStrength * 0.1f) else 1.0f
+            val s = sBase * zoomFactor
+            
+            val ow = bW * s
+            val oh = bH * s
+            
+            var cX = (w - ow) / 2f
+            var cY = (h - oh) / 2f
+            
+            if (parallaxEnabled && !isTransitioning) {
+                cX += (currentRoll / 10f) * ((ow - w) / 2f)
+                cY -= (currentPitch / 10f) * ((oh - h) / 2f)
+            }
+
+            val lOn = maxOf(0f, -cX)
+            val tOn = maxOf(0f, -cY)
+            val rOn = minOf(ow, w - cX)
+            val bOn = minOf(oh, h - cY)
+
+            sR.set((lOn / s).toInt(), (tOn / s).toInt(), (rOn / s).toInt(), (bOn / s).toInt())
+            dR.set(maxOf(0f, cX), maxOf(0f, cY), minOf(w.toFloat(), cX + ow), minOf(h.toFloat(), cY + oh))
+        }
+
         private fun drawSingleBitmap(canvas: Canvas, b: Bitmap, w: Int, h: Int) {
-            drawSingleBitmapWithPaint(canvas, b, w, h, bitmapPaint)
+            calculateRects(b, w, h, srcRect, dstRect)
+            canvas.drawBitmap(b, srcRect, dstRect, bitmapPaint)
         }
 
         private fun drawSingleBitmapWithPaint(canvas: Canvas, b: Bitmap, w: Int, h: Int, p: Paint) {
-            val sBase = maxOf(w.toFloat() / b.width, h.toFloat() / b.height)
-            
-            // Zoom factor to prevent edges during parallax
-            // Strength of 1.0 means up to 10% zoom (1.1x)
-            val zoomFactor = if (parallaxEnabled) 1.0f + (parallaxStrength * 0.1f) else 1.0f
-            val s = sBase * zoomFactor
-            
-            val ow = b.width * s; val oh = b.height * s
-            
-            var dx = (w - ow) / 2f
-            var dy = (h - oh) / 2f
-            
-            if (parallaxEnabled) {
-                // Max offset is the extra size provided by zoomFactor
-                val maxOffsetX = (ow - w) / 2f
-                val maxOffsetY = (oh - h) / 2f
-                
-                // Roll (side tilt) affects X, Pitch (front/back tilt) affects Y
-                // Accelerometer values are typically -10 to 10
-                dx += (currentRoll / 10f) * maxOffsetX
-                dy -= (currentPitch / 10f) * maxOffsetY
-            }
-            
-            canvas.drawBitmap(b, Rect(0, 0, b.width, b.height), RectF(dx, dy, dx + ow, dy + oh), p)
+            // Deprecated by drawCanvas refactor for efficiency
+            calculateRects(b, w, h, srcRect, dstRect)
+            canvas.drawBitmap(b, srcRect, dstRect, p)
         }
     }
 }

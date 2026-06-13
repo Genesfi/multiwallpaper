@@ -280,7 +280,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setUseFavoritesOnly(enable: Boolean) {
-        prefs.edit().putBoolean("use_favorites_only", enable).apply()
+        prefs.edit().putBoolean("use_favorites_only", enable)
+            .putBoolean("force_reload_trigger", true) // Force service to react
+            .apply()
         _useFavoritesOnly.value = enable
     }
 
@@ -304,35 +306,45 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _parallaxStrength.value = strength
     }
 
+    suspend fun saveCurrentAsPresetSuspend(name: String) {
+        val currentFolders = folders.value.map { it.uriString }
+        // Fetch the ACTUAL current favorites from DB instead of relying on StateFlow which might be lagging
+        val currentFavs = withContext(Dispatchers.IO) { favoriteDao.getAllFavoritesSync() }
+        val thumb = currentFavs.firstOrNull()?.uriString ?: scannedImages.value.firstOrNull()?.uriString
+
+        val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+        val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
+        val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
+        val favJson = adapter.toJson(currentFavs)
+
+        val existing = presets.value.find { it.name.equals(name, ignoreCase = true) }
+        if (existing != null) {
+            val updated = existing.copy(
+                thumbnailUri = thumb,
+                folderUris = currentFolders,
+                favoriteData = favJson,
+                createdTime = System.currentTimeMillis()
+            )
+            presetDao.updatePreset(updated)
+        } else {
+            val preset = PresetEntity(
+                name = name,
+                thumbnailUri = thumb,
+                folderUris = currentFolders,
+                favoriteData = favJson
+            )
+            presetDao.insertPreset(preset)
+        }
+        _activePresetName.value = name
+    }
+
     fun saveCurrentAsPreset(name: String) {
         viewModelScope.launch {
-            val folderUris = folders.value.map { it.uriString }
-            val thumb = favorites.value.firstOrNull()?.uriString ?: scannedImages.value.firstOrNull()?.uriString
-
-            val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
-            val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
-            val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
-            val favJson = adapter.toJson(favorites.value)
-
-            val existing = presets.value.find { it.name.equals(name, ignoreCase = true) }
-            if (existing != null) {
-                val updated = existing.copy(
-                    thumbnailUri = thumb,
-                    folderUris = folderUris,
-                    favoriteData = favJson,
-                    createdTime = System.currentTimeMillis()
-                )
-                presetDao.updatePreset(updated)
-            } else {
-                val preset = PresetEntity(
-                    name = name,
-                    thumbnailUri = thumb,
-                    folderUris = folderUris,
-                    favoriteData = favJson
-                )
-                presetDao.insertPreset(preset)
+            saveCurrentAsPresetSuspend(name)
+            triggerReload()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(getApplication(), "Preset '$name' saved", Toast.LENGTH_SHORT).show()
             }
-            _activePresetName.value = name
         }
     }
 
@@ -382,6 +394,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadPreset(preset: PresetEntity) {
         viewModelScope.launch {
+            // Auto-save current state to the PREVIOUS active preset before switching
+            _activePresetName.value?.let { activeName ->
+                saveCurrentAsPresetSuspend(activeName)
+            }
+
             _activePresetName.value = preset.name
             folderDao.deleteAllFolders()
             favoriteDao.deleteAllFavorites() // Fix: Clear previous favorites
@@ -411,7 +428,64 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             
             // Re-scan to update cached images for the new preset folders
             scanFolders()
+            triggerReload()
         }
+    }
+
+    fun exportPresets() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val allPresets = presetDao.getAllPresets().first()
+                val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+                val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, PresetEntity::class.java)
+                val adapter = moshi.adapter<List<PresetEntity>>(type)
+                val json = adapter.toJson(allPresets)
+
+                val file = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "multi_wallpaper_presets.json")
+                file.writeText(json)
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(getApplication(), "Exported to Downloads/multi_wallpaper_presets.json", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "Export fail", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(getApplication(), "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    fun importPresets(json: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+                val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, PresetEntity::class.java)
+                val adapter = moshi.adapter<List<PresetEntity>>(type)
+                val imported = adapter.fromJson(json)
+
+                imported?.forEach {
+                    // Check for duplicate names, maybe append (Imported) if exists
+                    val existing = presets.value.find { p -> p.name == it.name }
+                    val finalPreset = if (existing != null) it.copy(id = 0, name = "${it.name} (Imported)") else it.copy(id = 0)
+                    presetDao.insertPreset(finalPreset)
+                }
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(getApplication(), "Imported ${imported?.size ?: 0} presets", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "Import fail", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(getApplication(), "Import failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    fun triggerReload() {
+        prefs.edit().putBoolean("force_reload_trigger", true).apply()
+        Toast.makeText(getApplication(), "Wallpaper reload triggered", Toast.LENGTH_SHORT).show()
     }
 
     fun deletePreset(preset: PresetEntity) {

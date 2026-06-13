@@ -158,7 +158,10 @@ fun MainLayout() {
                             }
                         }
                     } else {
-                        IconButton(onClick = { viewModel.scanFolders() }) { Icon(Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.primary) }
+                        IconButton(onClick = { 
+                            viewModel.scanFolders()
+                            viewModel.triggerReload()
+                        }) { Icon(Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.primary) }
                     }
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -710,6 +713,42 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
             )
         }
         
+        Spacer(modifier = Modifier.height(32.dp))
+        Text("DATA MANAGEMENT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(modifier = Modifier.height(8.dp))
+        
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val context = LocalContext.current
+            val launcher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                uri?.let {
+                    context.contentResolver.openInputStream(it)?.use { input ->
+                        val json = input.bufferedReader().use { r -> r.readText() }
+                        viewModel.importPresets(json)
+                    }
+                }
+            }
+
+            OutlinedButton(
+                onClick = { viewModel.exportPresets() },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.Upload, null)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Export")
+            }
+            
+            OutlinedButton(
+                onClick = { launcher.launch("application/json") },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.Download, null)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Import")
+            }
+        }
+
         Spacer(modifier = Modifier.height(32.dp))
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Spacer(modifier = Modifier.height(16.dp))
