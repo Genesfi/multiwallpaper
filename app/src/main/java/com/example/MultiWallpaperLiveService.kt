@@ -382,16 +382,21 @@ class MultiWallpaperLiveService : WallpaperService() {
             return try {
                 if (surfaceWidth <= 0 || surfaceHeight <= 0) return raw
                 
-                val result = Bitmap.createBitmap(surfaceWidth, surfaceHeight, Bitmap.Config.ARGB_8888)
+                // Pre-scale including parallax zoom for consistency and to avoid crash
+                val zoomFactor = if (parallaxEnabled) 1.0f + (parallaxStrength * 0.1f) else 1.0f
+                val targetW = (surfaceWidth * zoomFactor).toInt()
+                val targetH = (surfaceHeight * zoomFactor).toInt()
+
+                val result = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(result)
                 
                 val bW = raw.width.toFloat()
                 val bH = raw.height.toFloat()
-                val s = maxOf(surfaceWidth.toFloat() / bW, surfaceHeight.toFloat() / bH)
+                val s = maxOf(targetW.toFloat() / bW, targetH.toFloat() / bH)
                 val ow = bW * s
                 val oh = bH * s
-                val dx = (surfaceWidth - ow) / 2f
-                val dy = (surfaceHeight - oh) / 2f
+                val dx = (targetW - ow) / 2f
+                val dy = (targetH - oh) / 2f
                 
                 val paint = Paint(Paint.FILTER_BITMAP_FLAG)
                 canvas.drawBitmap(raw, null, RectF(dx, dy, dx + ow, dy + oh), paint)
@@ -601,14 +606,15 @@ class MultiWallpaperLiveService : WallpaperService() {
             val idx = if (isFluid) (xOffset * (pageBitmaps.size - 1)).roundToInt().coerceIn(0, pageBitmaps.size - 1) else manualPageIndex.coerceIn(0, pageBitmaps.size - 1)
 
             val curr = pageBitmaps[idx]
-            if (curr != null) {
-                if (isTransitioning && nextBitmap != null) {
-                    // Single-Pass Blending: Draw background solid, draw next on top with alpha
-                    // Since nextBitmap is already pre-scaled, we draw it 1:1
+            if (curr != null && !curr.isRecycled) {
+                if (isTransitioning && nextBitmap != null && !nextBitmap!!.isRecycled) {
                     drawSingleBitmap(canvas, curr, w, h)
                     
                     bitmapPaint.alpha = transitionAlpha
-                    canvas.drawBitmap(nextBitmap!!, 0f, 0f, bitmapPaint)
+                    // Draw nextBitmap centered. Since it's pre-scaled with zoom, we just center it.
+                    val dx = (w - nextBitmap!!.width) / 2f
+                    val dy = (h - nextBitmap!!.height) / 2f
+                    canvas.drawBitmap(nextBitmap!!, dx, dy, bitmapPaint)
                     bitmapPaint.alpha = 255 // Reset
                 } else if (transitionType == "fade" && isFluid) {
                     val pos = xOffset * (pageBitmaps.size - 1); val l = pos.toInt(); val r = (l + 1).coerceAtMost(pageBitmaps.size - 1); val f = pos - l
@@ -636,7 +642,8 @@ class MultiWallpaperLiveService : WallpaperService() {
             
             // Only apply parallax if NOT transitioning (already checked in onSensorChanged, 
             // but we use current values here)
-            val zoomFactor = if (parallaxEnabled && !isTransitioning) 1.0f + (parallaxStrength * 0.1f) else 1.0f
+            // FIX: Always apply zoom if parallax is enabled to prevent "popping" during transition
+            val zoomFactor = if (parallaxEnabled) 1.0f + (parallaxStrength * 0.1f) else 1.0f
             val s = sBase * zoomFactor
             
             val ow = bW * s
