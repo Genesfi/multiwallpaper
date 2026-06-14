@@ -741,7 +741,8 @@ class MultiWallpaperLiveService : WallpaperService() {
                         rotated
                     } else decoded
                 }
-            } catch (e: Exception) { null }
+            } catch (
+                e: Exception) { null }
         }
 
         private fun calculateInSampleSize(opt: BitmapFactory.Options, rw: Int, rh: Int): Int {
