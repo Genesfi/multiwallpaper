@@ -103,6 +103,7 @@ fun MainLayout() {
     val selectedGalleryUris by viewModel.selectedGalleryUris.collectAsState()
     val selectedGalleryFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
     val gallerySearchQuery by viewModel.gallerySearchQuery.collectAsState()
+    val isLoadingPreset by viewModel.isLoadingPreset.collectAsState()
     val context = LocalContext.current
 
     Scaffold(
@@ -206,6 +207,31 @@ fun MainLayout() {
                 }
             }
             if (showMultiSelectDialog) MultiFolderSelectDialog(viewModel, { showMultiSelectDialog = false })
+
+            if (isLoadingPreset) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .clickable(enabled = false) { },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            CircularProgressIndicator()
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text("Switching Preset...", fontWeight = FontWeight.Medium)
+                            Text("Updating wallpaper collection", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -602,6 +628,10 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     val shakeEnabled by viewModel.shakeEnabled.collectAsState()
     val smartCropEnabled by viewModel.smartCropEnabled.collectAsState()
     val lightModeEnabled by viewModel.lightModeEnabled.collectAsState()
+    val aiAdvancedEnabled by viewModel.aiAdvancedEnabled.collectAsState()
+    val aiZoomSlack by viewModel.aiZoomSlack.collectAsState()
+    val aiSensitivityX by viewModel.aiSensitivityX.collectAsState()
+    val aiSensitivityY by viewModel.aiSensitivityY.collectAsState()
     
     var unit by remember { mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") }
     val displayValue = remember(totalSeconds, unit) {
@@ -644,6 +674,53 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Power Saver (Light Mode)", fontWeight = FontWeight.Bold)
             Switch(lightModeEnabled, { viewModel.setLightModeEnabled(it) })
+        }
+
+        if (smartCropEnabled) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text("Advanced AI Settings", fontWeight = FontWeight.Bold)
+                    Text("Unlock fine-tuned crop controls", style = MaterialTheme.typography.labelSmall)
+                }
+                Switch(aiAdvancedEnabled, { viewModel.setAiAdvancedEnabled(it) })
+            }
+
+            if (aiAdvancedEnabled) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("AI Zoom Slack (Max Zoom)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Slider(
+                            value = aiZoomSlack,
+                            onValueChange = { viewModel.setAiZoomSlack(it) },
+                            valueRange = 1.1f..2.0f,
+                            steps = 8
+                        )
+                        Text("${(aiZoomSlack * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Horizontal Centering Sensitivity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Slider(
+                            value = aiSensitivityX,
+                            onValueChange = { viewModel.setAiSensitivityX(it) },
+                            valueRange = 0.1f..1.0f
+                        )
+                        Text("${(aiSensitivityX * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Vertical Centering Sensitivity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Slider(
+                            value = aiSensitivityY,
+                            onValueChange = { viewModel.setAiSensitivityY(it) },
+                            valueRange = 0.1f..1.0f
+                        )
+                        Text("${(aiSensitivityY * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                    }
+                }
+            }
         }
         
         if (parallaxEnabled) {

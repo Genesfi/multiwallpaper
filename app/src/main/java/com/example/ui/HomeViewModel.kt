@@ -79,6 +79,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _lightModeEnabled = MutableStateFlow(prefs.getBoolean("light_mode_enabled", false))
     val lightModeEnabled = _lightModeEnabled.asStateFlow()
 
+    private val _aiAdvancedEnabled = MutableStateFlow(prefs.getBoolean("ai_advanced_enabled", false))
+    val aiAdvancedEnabled = _aiAdvancedEnabled.asStateFlow()
+
+    private val _aiZoomSlack = MutableStateFlow(prefs.getFloat("ai_zoom_slack", 1.45f))
+    val aiZoomSlack = _aiZoomSlack.asStateFlow()
+
+    private val _aiSensitivityX = MutableStateFlow(prefs.getFloat("ai_sensitivity_x", 0.9f))
+    val aiSensitivityX = _aiSensitivityX.asStateFlow()
+
+    private val _aiSensitivityY = MutableStateFlow(prefs.getFloat("ai_sensitivity_y", 0.4f))
+    val aiSensitivityY = _aiSensitivityY.asStateFlow()
+
     private val _gallerySortType = MutableStateFlow(prefs.getString("gallery_sort_type", "NAME") ?: "NAME")
     val gallerySortType = _gallerySortType.asStateFlow()
 
@@ -90,6 +102,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _activePresetName = MutableStateFlow<String?>(null)
     val activePresetName = _activePresetName.asStateFlow()
+
+    private val _isLoadingPreset = MutableStateFlow(false)
+    val isLoadingPreset = _isLoadingPreset.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -330,6 +345,26 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _lightModeEnabled.value = enable
     }
 
+    fun setAiAdvancedEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("ai_advanced_enabled", enable).apply()
+        _aiAdvancedEnabled.value = enable
+    }
+
+    fun setAiZoomSlack(value: Float) {
+        prefs.edit().putFloat("ai_zoom_slack", value).apply()
+        _aiZoomSlack.value = value
+    }
+
+    fun setAiSensitivityX(value: Float) {
+        prefs.edit().putFloat("ai_sensitivity_x", value).apply()
+        _aiSensitivityX.value = value
+    }
+
+    fun setAiSensitivityY(value: Float) {
+        prefs.edit().putFloat("ai_sensitivity_y", value).apply()
+        _aiSensitivityY.value = value
+    }
+
     suspend fun saveCurrentAsPresetSuspend(name: String) {
         val currentFolders = folders.value.map { it.uriString }
         // Fetch the ACTUAL current favorites from DB instead of relying on StateFlow which might be lagging
@@ -418,42 +453,86 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadPreset(preset: PresetEntity) {
         viewModelScope.launch {
-            // Auto-save current state to the PREVIOUS active preset before switching
-            _activePresetName.value?.let { activeName ->
-                saveCurrentAsPresetSuspend(activeName)
-            }
-
-            _activePresetName.value = preset.name
-            folderDao.deleteAllFolders()
-            favoriteDao.deleteAllFavorites() // Fix: Clear previous favorites
-
-            val folderEntities = preset.folderUris.map { uri ->
-                val name = try {
-                    val u = Uri.parse(uri)
-                    if (u.scheme == "file") File(u.path!!).name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder"
-                } catch (e: Exception) { "Folder" }
-                FolderEntity(uriString = uri, displayName = name)
-            }
-            folderDao.insertFolders(folderEntities)
-
-            // Restore Favorites
+            _isLoadingPreset.value = true
             try {
-                val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
-                val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
-                val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
-                val favs = adapter.fromJson(preset.favoriteData)
+                // Auto-save current state to the PREVIOUS active preset before switching
+                _activePresetName.value?.let { activeName ->
+                    saveCurrentAsPresetSuspend(activeName)
+                }
 
-                if (favs != null) {
-                    favoriteDao.insertFavorites(favs)
+                _activePresetName.value = preset.name
+                folderDao.deleteAllFolders()
+                favoriteDao.deleteAllFavorites() // Fix: Clear previous favorites
+
+                val folderEntities = preset.folderUris.map { uri ->
+                    val name = try {
+                        val u = Uri.parse(uri)
+                        if (u.scheme == "file") File(u.path!!).name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder"
+                    } catch (e: Exception) { "Folder" }
+                    FolderEntity(uriString = uri, displayName = name)
+                }
+                folderDao.insertFolders(folderEntities)
+
+                // Restore Favorites
+                var favoriteCount = 0
+                try {
+                    val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+                    val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
+                    val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
+                    val favs = adapter.fromJson(preset.favoriteData)
+
+                    if (favs != null) {
+                        favoriteDao.insertFavorites(favs)
+                        favoriteCount = favs.size
+                    }
+                } catch (e: Exception) {
+                    Log.e("HomeViewModel", "Error loading favorites from preset", e)
+                }
+
+                // Auto-Fallback: If preset has no favorites, disable "Use Favorites Only"
+                if (favoriteCount == 0 && _useFavoritesOnly.value) {
+                    setUseFavoritesOnly(false)
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(getApplication(), "Favorites Only turned OFF (No favorites in preset)", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                
+                // Re-scan to update cached images for the new preset folders
+                // We await scanning to ensure sync with service trigger
+                withContext(Dispatchers.IO) {
+                    scanFoldersSync()
+                }
+                triggerReload()
+            } finally {
+                _isLoadingPreset.value = false
+            }
+        }
+    }
+
+    private suspend fun scanFoldersSync() {
+        val foldersList = folders.value
+        val tempImages = mutableListOf<WallpaperImg>()
+        val favoriteUris = favoriteDao.getAllFavoritesSync().map { it.uriString }.toSet()
+
+        for (folder in foldersList) {
+            try {
+                val uri = Uri.parse(folder.uriString)
+                if (uri.scheme == "file") {
+                    val root = java.io.File(uri.path ?: "")
+                    if (root.exists() && root.isDirectory) scanRecursive(root, folder.uriString, tempImages, favoriteUris)
+                } else {
+                    scanSafRecursive(uri, folder.uriString, tempImages, favoriteUris)
                 }
             } catch (e: Exception) {
-                Log.e("HomeViewModel", "Error loading favorites from preset", e)
+                Log.e("HomeViewModel", "Scan error", e)
             }
-            
-            // Re-scan to update cached images for the new preset folders
-            scanFolders()
-            triggerReload()
         }
+
+        // Sync with Database Cache
+        scannedImageDao.deleteAllImages()
+        scannedImageDao.insertImages(tempImages.map { 
+            ScannedImageEntity(it.uriString, it.folderUriString, it.displayName)
+        })
     }
 
     fun exportPresets() {
@@ -612,30 +691,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         if (_isScanning.value) return
         _isScanning.value = true
         viewModelScope.launch(Dispatchers.IO) {
-            val foldersList = folders.value
-            val tempImages = mutableListOf<WallpaperImg>()
-            val favoriteUris = favoriteDao.getAllFavoritesSync().map { it.uriString }.toSet()
-
-            for (folder in foldersList) {
-                try {
-                    val uri = Uri.parse(folder.uriString)
-                    if (uri.scheme == "file") {
-                        val root = java.io.File(uri.path ?: "")
-                        if (root.exists() && root.isDirectory) scanRecursive(root, folder.uriString, tempImages, favoriteUris)
-                    } else {
-                        scanSafRecursive(uri, folder.uriString, tempImages, favoriteUris)
-                    }
-                } catch (e: Exception) {
-                    Log.e("HomeViewModel", "Scan error", e)
-                }
-            }
-
-            // Sync with Database Cache
-            scannedImageDao.deleteAllImages()
-            scannedImageDao.insertImages(tempImages.map { 
-                ScannedImageEntity(it.uriString, it.folderUriString, it.displayName)
-            })
-
+            scanFoldersSync()
             _isScanning.value = false
         }
     }

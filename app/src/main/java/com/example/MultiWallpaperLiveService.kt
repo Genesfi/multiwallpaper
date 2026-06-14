@@ -9,6 +9,7 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
+import androidx.exifinterface.media.ExifInterface
 import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
@@ -98,6 +99,10 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var shakeEnabled = false
         private var smartCropEnabled = true
         private var lightModeEnabled = false
+        private var aiAdvancedEnabled = false
+        private var aiZoomSlack = 1.45f
+        private var aiSensitivityX = 0.9f
+        private var aiSensitivityY = 0.4f
         private var transitionType = "slide"
         private var fadeSpeed = 15
         private var useFavoritesOnly = false
@@ -159,17 +164,24 @@ class MultiWallpaperLiveService : WallpaperService() {
                 prefs.edit().putBoolean("force_reload_trigger", false).apply()
             }
             
+            val oldSmartCrop = smartCropEnabled
             useFavoritesOnly = newUseFav
             parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
             parallaxStrength = prefs.getFloat("parallax_strength", 0.5f)
             shakeEnabled = prefs.getBoolean("shake_enabled", false)
             smartCropEnabled = prefs.getBoolean("smart_crop_enabled", true)
             lightModeEnabled = prefs.getBoolean("light_mode_enabled", false)
+            aiAdvancedEnabled = prefs.getBoolean("ai_advanced_enabled", false)
+            aiZoomSlack = prefs.getFloat("ai_zoom_slack", 1.45f)
+            aiSensitivityX = prefs.getFloat("ai_sensitivity_x", 0.9f)
+            aiSensitivityY = prefs.getFloat("ai_sensitivity_y", 0.4f)
             transitionType = prefs.getString("transition_type", "slide") ?: "slide"
             fadeSpeed = prefs.getInt("fade_speed", 15)
             
             if (useFavChanged || forceReload) {
                 loadWallpapersForPages()
+            } else if (oldSmartCrop != smartCropEnabled) {
+                requestDraw()
             }
             
             if (visible && (parallaxEnabled || shakeEnabled)) {
@@ -653,10 +665,13 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private suspend fun detectFaceFocalPoint(bitmap: Bitmap): PointF? {
-            if (!smartCropEnabled) return null
             return try {
                 val options = FaceDetectorOptions.Builder()
-                    .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                    .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+                    .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+                    .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+                    .setMinFaceSize(0.05f) // Much more sensitive for diverse compositions
+                    .enableTracking()
                     .build()
                 val detector = FaceDetection.getClient(options)
                 val image = InputImage.fromBitmap(bitmap, 0)
@@ -668,27 +683,33 @@ class MultiWallpaperLiveService : WallpaperService() {
                 }
                 
                 if (faces.isNotEmpty()) {
-                    var avgX = 0f
-                    var avgY = 0f
-                    faces.forEach { face ->
-                        avgX += face.boundingBox.centerX()
-                        avgY += face.boundingBox.centerY()
-                    }
-                    PointF(avgX / (faces.size * bitmap.width), avgY / (faces.size * bitmap.height))
-                } else null
+                    // Pick the LARGEST face (main subject) instead of averaging
+                    // This prevents background "face-like" patterns from shifting the focus
+                    val mainFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }!!
+                    val focal = PointF(mainFace.boundingBox.centerX() / bitmap.width.toFloat(), 
+                                       mainFace.boundingBox.centerY() / bitmap.height.toFloat())
+                    Log.d("MultiWallpaper", "Main face detected at: $focal")
+                    focal
+                } else {
+                    Log.d("MultiWallpaper", "No faces found in image")
+                    null
+                }
             } catch (e: Exception) { null }
         }
 
         private fun decodeSampledBitmapFromUri(uri: Uri, reqWidth: Int, reqHeight: Int): Bitmap? {
             return try {
+                // Get Orientation first
+                val orientation = contentResolver.openInputStream(uri)?.use { input ->
+                    val exif = ExifInterface(input)
+                    exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                } ?: ExifInterface.ORIENTATION_NORMAL
+
                 contentResolver.openInputStream(uri)?.use { input ->
                     val opt = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     BitmapFactory.decodeStream(input, null, opt)
                     
-                    val isWide = opt.outWidth > opt.outHeight * 1.5
-                    val targetWidth = if (isWide && reqWidth < reqHeight) reqWidth / 2 else reqWidth
-                    
-                    var maxWidth = if (targetWidth > 0) targetWidth.coerceAtMost(2048) else 2048
+                    var maxWidth = if (reqWidth > 0) reqWidth.coerceAtMost(2048) else 2048
                     var maxHeight = if (reqHeight > 0) reqHeight.coerceAtMost(2048) else 2048
 
                     if (lightModeEnabled) {
@@ -704,7 +725,21 @@ class MultiWallpaperLiveService : WallpaperService() {
                         opt.inMutable = true
                     }
 
-                    contentResolver.openInputStream(uri)?.use { i2 -> BitmapFactory.decodeStream(i2, null, opt) }
+                    val decoded = contentResolver.openInputStream(uri)?.use { i2 -> BitmapFactory.decodeStream(i2, null, opt) }
+                    
+                    if (decoded != null && orientation != ExifInterface.ORIENTATION_NORMAL) {
+                        val matrix = Matrix()
+                        when (orientation) {
+                            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                        }
+                        val rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+                        decoded.recycle()
+                        rotated
+                    } else decoded
                 }
             } catch (e: Exception) { null }
         }
@@ -802,19 +837,59 @@ class MultiWallpaperLiveService : WallpaperService() {
             // Only apply parallax if NOT transitioning (already checked in onSensorChanged, 
             // but we use current values here)
             // FIX: Always apply zoom if parallax is enabled to prevent "popping" during transition
-            val zoomFactor = if (parallaxEnabled) 1.0f + (parallaxStrength * 0.1f) else 1.0f
+            var zoomFactor = if (parallaxEnabled) 1.0f + (parallaxStrength * 0.1f) else 1.0f
+
+            // AI Smart Crop Adjustment - DYNAMIC SLACK
+            if (smartCropEnabled && focal != null) {
+                // If a face is detected, we ALWAYS apply at least a tiny zoom (1.1x)
+                // to allow the image some "room" to shift even if the face is near center.
+                val dxFromCenter = kotlin.math.abs(focal.x - 0.5f)
+                val dyFromCenter = kotlin.math.abs(focal.y - 0.5f)
+                val maxOffset = maxOf(dxFromCenter, dyFromCenter)
+                
+                // Base AI zoom 1.1x, increasing up to zoomSlack (default 1.45x) for extreme offsets
+                val maxSlack = if (aiAdvancedEnabled) aiZoomSlack else 1.45f
+                val slackRange = (maxSlack - 1.1f).coerceAtLeast(0.0f)
+                
+                val extraZoom = 1.1f + (maxOffset * (slackRange * 2f)).coerceIn(0.0f, slackRange)
+                zoomFactor *= extraZoom
+            }
+
             val s = sBase * zoomFactor
             
             val ow = bW * s
             val oh = bH * s
             
-            var cX = (w - ow) / 2f
-            var cY = (h - oh) / 2f
+            val standardCX = (w - ow) / 2f
+            val standardCY = (h - oh) / 2f
+            
+            var cX = standardCX
+            var cY = standardCY
 
-            // AI Smart Crop Adjustment
             if (smartCropEnabled && focal != null) {
-                cX = (w / 2f) - (focal.x * ow)
-                cY = (h / 2f) - (focal.y * oh)
+                val aiCX = (w / 2f) - (focal.x * ow)
+                val aiCY = (h / 2f) - (focal.y * oh)
+                
+                // REFINED SAFE ZONE:
+                // Only keep standard center if the face is within the central 10%.
+                // Otherwise, start nudging it towards the center to ensure visibility.
+                val dx = kotlin.math.abs(focal.x - 0.5f)
+                val dy = kotlin.math.abs(focal.y - 0.5f)
+                
+                val sensitivityX = if (aiAdvancedEnabled) aiSensitivityX else 0.9f
+                val sensitivityY = if (aiAdvancedEnabled) aiSensitivityY else 0.4f
+                
+                // Horizontal shift is more restricted in portrait, so we use a 
+                // tight safe zone and highly aggressive weight for X.
+                if (dx > 0.01f) {
+                    val weight = ((dx - 0.01f) * (sensitivityX * 11f)).coerceIn(0f, 1f)
+                    cX = standardCX * (1f - weight) + aiCX * weight
+                }
+                
+                if (dy > 0.05f) {
+                    val weightY = ((dy - 0.05f) * (sensitivityY * 10f)).coerceIn(0f, 1f)
+                    cY = standardCY * (1f - weightY) + aiCY * weightY
+                }
             }
             
             if (parallaxEnabled && !isTransitioning) {
