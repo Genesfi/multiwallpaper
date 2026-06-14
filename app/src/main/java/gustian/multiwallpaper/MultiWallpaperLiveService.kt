@@ -642,7 +642,8 @@ class MultiWallpaperLiveService : WallpaperService() {
                     .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
                     .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
                     .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
-                    .setMinFaceSize(0.1f) 
+                    .setMinFaceSize(0.05f) // 2x more sensitive for small or distant faces
+                    .enableTracking()      // Helps robustness for angled/profile faces
                     .build()
                 val detector = FaceDetection.getClient(options)
                 val image = InputImage.fromBitmap(bitmap, 0)
@@ -661,8 +662,10 @@ class MultiWallpaperLiveService : WallpaperService() {
                     Log.d("MultiWallpaper", "Main face detected at: $focal")
                     focal
                 } else {
-                    Log.d("MultiWallpaper", "No faces found in image")
-                    null
+                    // SMART FALLBACK: If no face, estimate subject position (usually upper 1/3 for humans)
+                    val fallbackFocal = PointF(0.5f, 0.35f) 
+                    Log.d("MultiWallpaper", "No faces found. Using smart fallback subject position.")
+                    fallbackFocal
                 }
             } catch (e: Exception) { null }
         }
