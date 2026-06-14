@@ -12,13 +12,10 @@ import android.os.Build
 import androidx.exifinterface.media.ExifInterface
 import android.os.Handler
 import android.os.Looper
-import android.provider.DocumentsContract
 import android.service.wallpaper.WallpaperService
 import android.util.Log
 import android.view.Choreographer
-import android.view.MotionEvent
 import android.view.SurfaceHolder
-import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import com.example.data.AppDatabase
 import com.google.mlkit.vision.common.InputImage
@@ -26,7 +23,6 @@ import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
-import java.io.InputStream
 import kotlin.coroutines.resume
 import kotlin.math.sqrt
 import kotlin.math.roundToInt
@@ -109,6 +105,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var currentRoll = 0f
         private var currentPitch = 0f
         private val smoothingFactor = 0.05f // Stronger LPF to ignore jitter
+        private var detectedPages = 20 // Default to 20 for launchers that don't report xStep (HyperOS)
         private val deadZoneThreshold = 0.2f // Ignore very small tremors
         private var lastSensorDrawTime = 0L
         private val sensorThrottleMs = 50L // Aggressive throttling (~20fps) to save power
@@ -297,9 +294,12 @@ class MultiWallpaperLiveService : WallpaperService() {
                         lastTapTime = currTime
                     }
 
-                    if (isSwipe && numBitmaps > 1) {
-                        if (deltaX > 0) manualPageIndex = if (manualPageIndex > 0) manualPageIndex - 1 else numBitmaps - 1
-                        else manualPageIndex = if (manualPageIndex < numBitmaps - 1) manualPageIndex + 1 else 0
+                    if (isSwipe && detectedPages > 1) {
+                        manualPageIndex = if (deltaX > 0) {
+                            if (manualPageIndex > 0) manualPageIndex - 1 else detectedPages - 1
+                        } else {
+                            if (manualPageIndex < detectedPages - 1) manualPageIndex + 1 else 0
+                        }
                         requestDraw()
                     }
                 }
@@ -322,8 +322,6 @@ class MultiWallpaperLiveService : WallpaperService() {
                 nextBitmap = null
             }
         }
-
-        private var detectedPages = 20 // Default to 20 for launchers that don't report xStep (HyperOS)
 
         override fun onOffsetsChanged(xOffset: Float, yOffset: Float, xStep: Float, yStep: Float, xPixels: Int, yPixels: Int) {
             val validXOffset = if (xOffset.isNaN()) 0f else xOffset
@@ -412,34 +410,25 @@ class MultiWallpaperLiveService : WallpaperService() {
                 if (uris.isEmpty() || detectedPages <= 1) return@launch
                 
                 val currentUris = pageUris.values.toSet()
-                val tempBitmaps = mutableMapOf<Int, Bitmap>()
-                val tempUris = mutableMapOf<Int, String>()
-                val tempFocalPoints = mutableMapOf<Int, PointF?>()
                 
-                for (p in 0 until detectedPages) {
-                    if (p == manualPageIndex) continue // Current page is being handled by fade
-                    
+                (0 until detectedPages).filter { it != manualPageIndex }.forEach { p ->
                     // Filter out already chosen URIs to avoid duplicates on different pages
-                    val availableUris = uris.filter { !currentUris.contains(it) && !tempUris.values.contains(it) && it != preloadedUri }
+                    val availableUris = uris.filter { !currentUris.contains(it) && !pageUris.values.contains(it) && it != preloadedUri }
                     val nextUri = if (availableUris.isNotEmpty()) availableUris.random() else uris.random()
                     
                     val b = decodeSampledBitmapFromUri(Uri.parse(nextUri), surfaceWidth, surfaceHeight)
                     if (b != null) {
-                        tempBitmaps[p] = b
-                        tempUris[p] = nextUri
-                        if (smartCropEnabled) tempFocalPoints[p] = detectFaceFocalPoint(b)
+                        val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
+                        withContext(Dispatchers.Main) {
+                            val old = pageBitmaps[p]
+                            pageBitmaps[p] = b
+                            pageUris[p] = nextUri
+                            pageFocalPoints[p] = focal
+                            old?.recycle()
+                            requestDraw()
+                        }
                     }
-                    delay(50) // Be gentle on CPU
-                }
-                
-                withContext(Dispatchers.Main) {
-                    tempBitmaps.forEach { (p, b) ->
-                        val old = pageBitmaps[p]
-                        pageBitmaps[p] = b
-                        pageUris[p] = tempUris[p] ?: ""
-                        pageFocalPoints[p] = tempFocalPoints[p]
-                        old?.recycle()
-                    }
+                    delay(100) // Yield to prevent CPU spikes and keep UI smooth
                 }
             }
         }
@@ -597,34 +586,36 @@ class MultiWallpaperLiveService : WallpaperService() {
                     val visibleIdx = manualPageIndex.coerceIn(0, shuffledUris.size - 1)
                     val visibleUri = shuffledUris[visibleIdx]
                     val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight)
-                    val firstFocal = if (firstBitmap != null) detectFaceFocalPoint(firstBitmap) else null
+                    val firstFocal = if (firstBitmap != null && smartCropEnabled) detectFaceFocalPoint(firstBitmap) else null
                     
                     withContext(Dispatchers.Main) {
+                        // CRITICAL: Clear stale data immediately after first bitmap is ready
+                        // This prevents showing old wallpapers on other pages during transitions
+                        pageBitmaps.forEach { (idx, bitmap) -> if (idx != manualPageIndex) bitmap.recycle() }
+                        val currentBitmap = pageBitmaps[manualPageIndex]
+                        pageBitmaps.clear()
                         pageUris.clear()
                         pageFocalPoints.clear()
                         
                         if (firstBitmap != null) {
-                            val old = pageBitmaps[manualPageIndex]
                             pageBitmaps[manualPageIndex] = firstBitmap
                             pageUris[manualPageIndex] = visibleUri
                             pageFocalPoints[manualPageIndex] = firstFocal
-                            old?.recycle()
+                            if (currentBitmap != firstBitmap) currentBitmap?.recycle()
                         }
                         isLoading = false
                         requestDraw()
                     }
 
-                    // Priority 2: Load other pages lazily in background
+                    // Priority 2: Load other pages sequentially with delay in background
                     val targetPageCount = detectedPages.coerceAtMost(shuffledUris.size)
-                    for (p in 0 until targetPageCount) {
-                        if (p == manualPageIndex) continue 
-                        
+                    (0 until targetPageCount).filter { it != manualPageIndex }.forEach { p ->
                         val uriIdx = p % shuffledUris.size
                         val uri = shuffledUris[uriIdx]
                         
                         val b = decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight)
                         if (b != null) {
-                            val focal = detectFaceFocalPoint(b)
+                            val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
                             withContext(Dispatchers.Main) {
                                 val old = pageBitmaps[p]
                                 pageBitmaps[p] = b
@@ -634,7 +625,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                                 requestDraw()
                             }
                         }
-                        if (p % 2 == 0) delay(10) // Small yield
+                        delay(100) // yield
                     }
                     
                     withContext(Dispatchers.Main) { 
@@ -645,46 +636,13 @@ class MultiWallpaperLiveService : WallpaperService() {
             }
         }
 
-        private fun scanFolderForImages(uri: Uri): List<String> {
-            val list = mutableListOf<String>()
-            if (uri.scheme == "file") {
-                val root = java.io.File(uri.path ?: "")
-                if (root.exists() && root.isDirectory) {
-                    fun scan(file: java.io.File) {
-                        file.listFiles()?.forEach { f ->
-                            if (f.isFile && (f.name.endsWith(".jpg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true))) list.add(Uri.fromFile(f).toString())
-                            else if (f.isDirectory && !f.name.startsWith(".")) scan(f)
-                        }
-                    }
-                    scan(root)
-                }
-                return list
-            }
-            val q = java.util.ArrayDeque<Uri>(); q.add(uri)
-            while (q.isNotEmpty()) {
-                val curr = q.poll() ?: continue
-                try {
-                    val id = if (curr == uri) DocumentsContract.getTreeDocumentId(curr) else DocumentsContract.getDocumentId(curr)
-                    contentResolver.query(DocumentsContract.buildChildDocumentsUriUsingTree(uri, id), arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_MIME_TYPE), null, null, null)?.use { c ->
-                        while (c.moveToNext()) {
-                            val dId = c.getString(0); val mime = c.getString(1)
-                            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) q.add(DocumentsContract.buildDocumentUriUsingTree(uri, dId))
-                            else if (mime != null && mime.startsWith("image/")) list.add(DocumentsContract.buildDocumentUriUsingTree(uri, dId).toString())
-                        }
-                    }
-                } catch (e: Exception) {}
-            }
-            return list
-        }
-
         private suspend fun detectFaceFocalPoint(bitmap: Bitmap): PointF? {
             return try {
                 val options = FaceDetectorOptions.Builder()
-                    .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
-                    .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-                    .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-                    .setMinFaceSize(0.05f) // Much more sensitive for diverse compositions
-                    .enableTracking()
+                    .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                    .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
+                    .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+                    .setMinFaceSize(0.1f) 
                     .build()
                 val detector = FaceDetection.getClient(options)
                 val image = InputImage.fromBitmap(bitmap, 0)
@@ -693,11 +651,10 @@ class MultiWallpaperLiveService : WallpaperService() {
                     detector.process(image)
                         .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
                         .addOnFailureListener { if (cont.isActive) cont.resume(emptyList()) }
+                        .addOnCompleteListener { detector.close() }
                 }
                 
                 if (faces.isNotEmpty()) {
-                    // Pick the LARGEST face (main subject) instead of averaging
-                    // This prevents background "face-like" patterns from shifting the focus
                     val mainFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }!!
                     val focal = PointF(mainFace.boundingBox.centerX() / bitmap.width.toFloat(), 
                                        mainFace.boundingBox.centerY() / bitmap.height.toFloat())
@@ -805,7 +762,8 @@ class MultiWallpaperLiveService : WallpaperService() {
 
             val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
             val pos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
-            val idx = if (isFluid) pos.roundToInt().coerceIn(0, pageBitmaps.size - 1) else manualPageIndex.coerceIn(0, pageBitmaps.size - 1)
+            val maxIdx = (detectedPages - 1).coerceAtLeast(0)
+            val idx = if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
 
             val curr = pageBitmaps[idx]
             if (curr != null && !curr.isRecycled) {
@@ -820,8 +778,8 @@ class MultiWallpaperLiveService : WallpaperService() {
                     bitmapPaint.alpha = 255 // Reset
                 } else if (transitionType == "fade" && isFluid) {
                     val floatPos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
-                    val l = floatPos.toInt().coerceIn(0, pageBitmaps.size - 1)
-                    val r = (l + 1).coerceAtMost(pageBitmaps.size - 1)
+                    val l = floatPos.toInt().coerceIn(0, maxIdx)
+                    val r = (l + 1).coerceAtMost(maxIdx)
                     val f = floatPos - l
                     
                     val lb = pageBitmaps[l]; val rb = pageBitmaps[r]
@@ -839,11 +797,14 @@ class MultiWallpaperLiveService : WallpaperService() {
                         
                         bitmapPaint.alpha = 255 // Reset alpha
                     } else if (lb != null) drawSingleBitmap(canvas, lb, w, h)
+                    else canvas.drawColor(Color.parseColor("#1A1F2C"))
                 } else drawSingleBitmap(canvas, curr, w, h)
+            } else {
+                canvas.drawColor(Color.parseColor("#1A1F2C"))
             }
         }
 
-        private fun calculateRects(b: Bitmap, w: Int, h: Int, sR: Rect, dR: RectF, focal: PointF? = null) {
+        private fun calculateRects(b: Bitmap, w: Int, h: Int, sR: Rect, dR: RectF, fP: PointF? = null) {
             val bW = b.width.toFloat()
             val bH = b.height.toFloat()
             val sBase = maxOf(w.toFloat() / bW, h.toFloat() / bH)
@@ -854,11 +815,11 @@ class MultiWallpaperLiveService : WallpaperService() {
             var zoomFactor = if (parallaxEnabled) 1.0f + (parallaxStrength * 0.1f) else 1.0f
 
             // AI Smart Crop Adjustment - DYNAMIC SLACK
-            if (smartCropEnabled && focal != null) {
+            if (smartCropEnabled && fP != null) {
                 // If a face is detected, we ALWAYS apply at least a tiny zoom (1.1x)
                 // to allow the image some "room" to shift even if the face is near center.
-                val dxFromCenter = kotlin.math.abs(focal.x - 0.5f)
-                val dyFromCenter = kotlin.math.abs(focal.y - 0.5f)
+                val dxFromCenter = kotlin.math.abs(fP.x - 0.5f)
+                val dyFromCenter = kotlin.math.abs(fP.y - 0.5f)
                 val maxOffset = maxOf(dxFromCenter, dyFromCenter)
                 
                 // Base AI zoom 1.1x, increasing up to zoomSlack (default 1.45x) for extreme offsets
@@ -880,15 +841,15 @@ class MultiWallpaperLiveService : WallpaperService() {
             var cX = standardCX
             var cY = standardCY
 
-            if (smartCropEnabled && focal != null) {
-                val aiCX = (w / 2f) - (focal.x * ow)
-                val aiCY = (h / 2f) - (focal.y * oh)
+            if (smartCropEnabled && fP != null) {
+                val aiCX = (w / 2f) - (fP.x * ow)
+                val aiCY = (h / 2f) - (fP.y * oh)
                 
                 // REFINED SAFE ZONE:
                 // Only keep standard center if the face is within the central 10%.
                 // Otherwise, start nudging it towards the center to ensure visibility.
-                val dx = kotlin.math.abs(focal.x - 0.5f)
-                val dy = kotlin.math.abs(focal.y - 0.5f)
+                val dx = kotlin.math.abs(fP.x - 0.5f)
+                val dy = kotlin.math.abs(fP.y - 0.5f)
                 
                 val sensitivityX = if (aiAdvancedEnabled) aiSensitivityX else 0.9f
                 val sensitivityY = if (aiAdvancedEnabled) aiSensitivityY else 0.4f
@@ -934,17 +895,12 @@ class MultiWallpaperLiveService : WallpaperService() {
         private fun drawSingleBitmap(canvas: Canvas, b: Bitmap, w: Int, h: Int) {
             val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
             val pos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
-            val idx = if (isFluid) pos.roundToInt().coerceIn(0, pageBitmaps.size - 1) else manualPageIndex.coerceIn(0, pageBitmaps.size - 1)
+            val maxIdx = (detectedPages - 1).coerceAtLeast(0)
+            val idx = if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
             
             val focal = if (smartCropEnabled) pageFocalPoints[idx] else null
             calculateRects(b, w, h, srcRect, dstRect, focal)
             canvas.drawBitmap(b, srcRect, dstRect, bitmapPaint)
-        }
-
-        private fun drawSingleBitmapWithPaint(canvas: Canvas, b: Bitmap, w: Int, h: Int, p: Paint) {
-            // Deprecated by drawCanvas refactor for efficiency
-            calculateRects(b, w, h, srcRect, dstRect)
-            canvas.drawBitmap(b, srcRect, dstRect, p)
         }
     }
 }
