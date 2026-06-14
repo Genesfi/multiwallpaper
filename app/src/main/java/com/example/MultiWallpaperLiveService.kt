@@ -860,8 +860,19 @@ class MultiWallpaperLiveService : WallpaperService() {
             var cY = standardCY
 
             if (smartCropEnabled && fP != null) {
-                val aiCX = (w / 2f) - (fP.x * ow)
-                val aiCY = (h / 2f) - (fP.y * oh)
+                var aiCX = (w / 2f) - (fP.x * ow)
+                var aiCY = (h / 2f) - (fP.y * oh)
+
+                // 3D DEPTH EFFECT:
+                // If parallax is enabled, we nudge the AI focus point slightly in the OPPOSITE 
+                // direction of the background tilt. This makes the subject feel like they 
+                // are in a different layer than the background.
+                if (parallaxEnabled) {
+                    val subjectTiltX = (currentRoll / 12f) * (w * 0.08f) 
+                    val subjectTiltY = (currentPitch / 12f) * (h * 0.08f)
+                    aiCX -= subjectTiltX // Opposite nudge for depth illusion
+                    aiCY += subjectTiltY
+                }
                 
                 // REFINED SAFE ZONE:
                 // Only keep standard center if the face is within the central 10%.
@@ -886,10 +897,9 @@ class MultiWallpaperLiveService : WallpaperService() {
             }
             
             if (parallaxEnabled) {
-                // ASPECT-AWARE PARALLAX:
+                // ASPECT-AWARE PARALLAX (BACKGROUND LAYER):
                 // We scale the motion intensity based on how much "extra room" (ow - w) 
-                // the image actually has. Landscape images have huge horizontal room,
-                // so we use a higher multiplier for a smoother, longer slide.
+                // the image actually has.
                 val slackX = (ow - w) / 2f
                 val slackY = (oh - h) / 2f
                 
