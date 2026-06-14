@@ -48,6 +48,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.data.FolderEntity
+import com.example.data.PresetEntity
 import kotlin.math.roundToInt
 import com.example.ui.HomeViewModel
 import com.example.ui.WallpaperImg
@@ -289,6 +290,44 @@ fun FolderScreen(viewModel: HomeViewModel) {
     val presets by viewModel.presets.collectAsState()
     val activePresetName by viewModel.activePresetName.collectAsState()
 
+    FolderScreen(
+        folders = folders,
+        isScanning = isScanning,
+        selectedIds = selectedIds,
+        scannedImages = scannedImages,
+        presets = presets,
+        activePresetName = activePresetName,
+        onDeleteFolder = { viewModel.deleteFolder(it) },
+        onScan = { viewModel.scanFolders() },
+        onClearAllFolders = { viewModel.clearAllFolders() },
+        onToggleFolderIdSelection = { viewModel.toggleFolderIdSelection(it) },
+        onUpdateActivePreset = { viewModel.updateActivePreset() },
+        onSavePreset = { viewModel.saveCurrentAsPreset(it) },
+        onLoadPreset = { viewModel.loadPreset(it) },
+        onDeletePreset = { viewModel.deletePreset(it) },
+        onAddClick = null
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun FolderScreen(
+    folders: List<FolderEntity>,
+    isScanning: Boolean = false,
+    onDeleteFolder: (FolderEntity) -> Unit = {},
+    onScan: () -> Unit = {},
+    onAddClick: (() -> Unit)? = null,
+    selectedIds: Set<Int> = emptySet(),
+    scannedImages: List<WallpaperImg> = emptyList(),
+    presets: List<PresetEntity> = emptyList(),
+    activePresetName: String? = null,
+    onClearAllFolders: () -> Unit = {},
+    onToggleFolderIdSelection: (Int) -> Unit = {},
+    onUpdateActivePreset: () -> Unit = {},
+    onSavePreset: (String) -> Unit = {},
+    onLoadPreset: (PresetEntity) -> Unit = {},
+    onDeletePreset: (PresetEntity) -> Unit = {}
+) {
     var showPresetDialog by remember { mutableStateOf(false) }
     var showSavePresetDialog by remember { mutableStateOf(false) }
     var presetName by remember { mutableStateOf("") }
@@ -313,7 +352,7 @@ fun FolderScreen(viewModel: HomeViewModel) {
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (activePresetName != null) {
-                    IconButton(onClick = { viewModel.updateActivePreset() }, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = onUpdateActivePreset, modifier = Modifier.size(32.dp)) {
                         Icon(Icons.Default.CloudSync, contentDescription = "Update Preset", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                     }
                 }
@@ -326,7 +365,7 @@ fun FolderScreen(viewModel: HomeViewModel) {
                 Spacer(modifier = Modifier.width(4.dp))
                 if (folders.isNotEmpty()) {
                     TextButton(
-                        onClick = { viewModel.clearAllFolders() },
+                        onClick = onClearAllFolders,
                         contentPadding = PaddingValues(horizontal = 8.dp),
                         modifier = Modifier.height(32.dp)
                     ) {
@@ -337,11 +376,16 @@ fun FolderScreen(viewModel: HomeViewModel) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp).align(Alignment.CenterVertically))
                 } else if (folders.isNotEmpty()) {
                     TextButton(
-                        onClick = { viewModel.scanFolders() },
+                        onClick = onScan,
                         contentPadding = PaddingValues(horizontal = 8.dp),
                         modifier = Modifier.height(32.dp)
                     ) {
                         Text("Re-Scan", fontSize = 12.sp)
+                    }
+                }
+                onAddClick?.let {
+                    IconButton(onClick = it, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Add, contentDescription = "Add Folder", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                     }
                 }
             }
@@ -363,7 +407,7 @@ fun FolderScreen(viewModel: HomeViewModel) {
                 confirmButton = {
                     Button(onClick = {
                         if (presetName.isNotBlank()) {
-                            viewModel.saveCurrentAsPreset(presetName)
+                            onSavePreset(presetName)
                             presetName = ""
                             showSavePresetDialog = false
                         }
@@ -376,7 +420,13 @@ fun FolderScreen(viewModel: HomeViewModel) {
         }
 
         if (showPresetDialog) {
-            PresetManagerDialog(viewModel) { showPresetDialog = false }
+            PresetManagerDialog(
+                presets = presets,
+                onLoadPreset = onLoadPreset,
+                onDeletePreset = onDeletePreset,
+                onClearAllFolders = onClearAllFolders,
+                onDismiss = { showPresetDialog = false }
+            )
         }
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -403,9 +453,9 @@ fun FolderScreen(viewModel: HomeViewModel) {
                                 }?.uriString
                         }?.let { Uri.parse(it) }
                         
-                        Card(modifier = Modifier.padding(start = 16.dp).combinedClickable(onClick = { if (selectedIds.isNotEmpty()) viewModel.toggleFolderIdSelection(f.id) }, onLongClick = { viewModel.toggleFolderIdSelection(f.id) }), colors = CardDefaults.cardColors(containerColor = if (sel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
+                        Card(modifier = Modifier.padding(start = 16.dp).combinedClickable(onClick = { if (selectedIds.isNotEmpty()) onToggleFolderIdSelection(f.id) }, onLongClick = { onToggleFolderIdSelection(f.id) }), colors = CardDefaults.cardColors(containerColor = if (sel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
                             Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                if (selectedIds.isNotEmpty()) Checkbox(sel, { viewModel.toggleFolderIdSelection(f.id) }) 
+                                if (selectedIds.isNotEmpty()) Checkbox(sel, { onToggleFolderIdSelection(f.id) }) 
                                 else {
                                     Box(modifier = Modifier.size(36.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
                                         if (folderPreview != null) {
@@ -416,7 +466,7 @@ fun FolderScreen(viewModel: HomeViewModel) {
                                     }
                                 }
                                 Text(f.displayName, modifier = Modifier.weight(1f).padding(horizontal = 12.dp), style = MaterialTheme.typography.bodyMedium)
-                                if (selectedIds.isEmpty()) IconButton(onClick = { viewModel.deleteFolder(f) }) { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
+                                if (selectedIds.isEmpty()) IconButton(onClick = { onDeleteFolder(f) }) { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
                             }
                         }
                     }
@@ -429,7 +479,23 @@ fun FolderScreen(viewModel: HomeViewModel) {
 @Composable
 fun PresetManagerDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
     val presets by viewModel.presets.collectAsState()
-    
+    PresetManagerDialog(
+        presets = presets,
+        onLoadPreset = { viewModel.loadPreset(it) },
+        onDeletePreset = { viewModel.deletePreset(it) },
+        onClearAllFolders = { viewModel.clearAllFolders() },
+        onDismiss = onDismiss
+    )
+}
+
+@Composable
+fun PresetManagerDialog(
+    presets: List<PresetEntity>,
+    onLoadPreset: (PresetEntity) -> Unit,
+    onDeletePreset: (PresetEntity) -> Unit,
+    onClearAllFolders: () -> Unit,
+    onDismiss: () -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -440,7 +506,7 @@ fun PresetManagerDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
             ) {
                 Text("Presets")
                 TextButton(onClick = { 
-                    viewModel.clearAllFolders()
+                    onClearAllFolders()
                     onDismiss()
                 }) {
                     Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
@@ -460,7 +526,7 @@ fun PresetManagerDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {
-                                viewModel.loadPreset(preset)
+                                onLoadPreset(preset)
                                 onDismiss()
                             }
                         ) {
@@ -481,7 +547,7 @@ fun PresetManagerDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
                                     Text(preset.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
                                     Text("${preset.folderUris.size} folders", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                IconButton(onClick = { viewModel.deletePreset(preset) }) {
+                                IconButton(onClick = { onDeletePreset(preset) }) {
                                     Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
                                 }
                             }
@@ -495,6 +561,7 @@ fun PresetManagerDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
         }
     )
 }
+
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

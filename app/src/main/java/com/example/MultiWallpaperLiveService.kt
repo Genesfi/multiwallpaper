@@ -748,15 +748,33 @@ class MultiWallpaperLiveService : WallpaperService() {
         private val dstRect = RectF()
         private val nextSrcRect = Rect()
         private val nextDstRect = RectF()
+        private val loadingRect = RectF()
+
+        private fun drawLoadingState(canvas: Canvas, w: Int, h: Int) {
+            canvas.drawColor(Color.parseColor("#1A1F2C"))
+            val centerX = w / 2f
+            val centerY = h / 2f
+            val radius = 40f
+            
+            // Calculate rotation based on time (360 degrees per second)
+            val angle = (System.currentTimeMillis() % 1000) / 1000f * 360f
+            
+            loadingRect.set(centerX - radius, centerY - radius, centerX + radius, centerY + radius)
+            canvas.drawArc(loadingRect, angle, 270f, false, loadingCirclePaint)
+            
+            // Keep requesting draw while in loading state to animate the circle
+            requestDraw()
+        }
 
         private fun drawCanvas(canvas: Canvas) {
             val w = canvas.width; val h = canvas.height
             if (pageBitmaps.isEmpty() || isLoading) {
-                canvas.drawColor(Color.parseColor("#1A1F2C"))
                 if (isLoading) {
-                    canvas.drawText("Loading...", w / 2f, h / 2f, textPaint)
-                    canvas.drawCircle(w / 2f, h / 2f + 60f, 30f, loadingCirclePaint)
-                } else canvas.drawText("Select folders in App", w / 2f, h / 2f, textPaint)
+                    drawLoadingState(canvas, w, h)
+                } else {
+                    canvas.drawColor(Color.parseColor("#1A1F2C"))
+                    canvas.drawText("Select folders in App", w / 2f, h / 2f, textPaint)
+                }
                 return
             }
 
@@ -797,10 +815,10 @@ class MultiWallpaperLiveService : WallpaperService() {
                         
                         bitmapPaint.alpha = 255 // Reset alpha
                     } else if (lb != null) drawSingleBitmap(canvas, lb, w, h)
-                    else canvas.drawColor(Color.parseColor("#1A1F2C"))
+                    else drawLoadingState(canvas, w, h)
                 } else drawSingleBitmap(canvas, curr, w, h)
             } else {
-                canvas.drawColor(Color.parseColor("#1A1F2C"))
+                drawLoadingState(canvas, w, h)
             }
         }
 
@@ -893,6 +911,10 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun drawSingleBitmap(canvas: Canvas, b: Bitmap, w: Int, h: Int) {
+            if (b.isRecycled) {
+                drawLoadingState(canvas, w, h)
+                return
+            }
             val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
             val pos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
             val maxIdx = (detectedPages - 1).coerceAtLeast(0)
