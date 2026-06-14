@@ -110,6 +110,13 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var currentPitch = 0f
         private val smoothingFactor = 0.05f // Stronger LPF to ignore jitter
         private var detectedPages = 20 // Default to 20 for launchers that don't report xStep (HyperOS)
+        
+        // Job tracking for concurrency safety
+        private var mainLoadJob: Job? = null
+        private var backgroundRefreshJob: Job? = null
+        private var preloadJob: Job? = null
+        private var rotationJob: Job? = null
+        
         private val deadZoneThreshold = 0.2f // Ignore very small tremors
         private var lastSensorDrawTime = 0L
         private val sensorThrottleMs = 50L // Aggressive throttling (~20fps) to save power
@@ -255,7 +262,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun requestDraw() {
-            if (visible && !isDrawScheduled) {
+            if (visible && !isDrawScheduled && engineScope.isActive) {
                 isDrawScheduled = true
                 handler.post(drawRunnable)
             }
@@ -421,13 +428,15 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun refreshOtherPages() {
-            engineScope.launch(Dispatchers.IO) {
+            backgroundRefreshJob?.cancel()
+            backgroundRefreshJob = engineScope.launch(Dispatchers.IO) {
                 val uris = getAllAvailableUris()
                 if (uris.isEmpty() || detectedPages <= 1) return@launch
                 
                 val currentUris = pageUris.values.toSet()
                 
                 (0 until detectedPages).filter { it != manualPageIndex }.forEach { p ->
+                    if (!isActive) return@launch
                     // Filter out already chosen URIs to avoid duplicates on different pages
                     val availableUris = uris.filter { !currentUris.contains(it) && !pageUris.values.contains(it) && it != preloadedUri }
                     val nextUri = if (availableUris.isNotEmpty()) availableUris.random() else uris.random()
@@ -450,9 +459,11 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun preloadNextWallpaper() {
-            engineScope.launch(Dispatchers.IO) {
+            preloadJob?.cancel()
+            preloadJob = engineScope.launch(Dispatchers.IO) {
                 val uris = getAllAvailableUris()
                 if (uris.isNotEmpty()) {
+                    if (!isActive) return@launch
                     // Exclude all current URIs AND any currently preloaded URI
                     val currentUris = (pageUris.values + listOfNotNull(preloadedUri)).toSet()
                     val availableUris = uris.filter { !currentUris.contains(it) }
@@ -476,9 +487,11 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun startFadeRotation() {
-            engineScope.launch(Dispatchers.IO) {
+            rotationJob?.cancel()
+            rotationJob = engineScope.launch(Dispatchers.IO) {
                 val uris = getAllAvailableUris()
                 if (uris.isNotEmpty()) {
+                    if (!isActive) return@launch
                     // Pick a random URI that is NOT currently displayed on ANY page to maximize variety
                     val currentUris = pageUris.values.toSet()
                     val availableUris = uris.filter { !currentUris.contains(it) }
@@ -585,7 +598,9 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun loadWallpapersForPages() {
-            engineScope.launch(Dispatchers.IO) {
+            mainLoadJob?.cancel()
+            backgroundRefreshJob?.cancel()
+            mainLoadJob = engineScope.launch(Dispatchers.IO) {
                 try {
                     val allUris = getAllAvailableUris()
                     if (allUris.isEmpty()) {
@@ -593,6 +608,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                         return@launch
                     }
 
+                    if (!isActive) return@launch
                     withContext(Dispatchers.Main) { if (pageBitmaps.isEmpty()) { isLoading = true; requestDraw() } }
 
                     val random = Random(System.currentTimeMillis())
@@ -602,6 +618,8 @@ class MultiWallpaperLiveService : WallpaperService() {
                     val visibleIdx = manualPageIndex.coerceIn(0, shuffledUris.size - 1)
                     val visibleUri = shuffledUris[visibleIdx]
                     val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight)
+                    if (!isActive) { firstBitmap?.recycle(); return@launch }
+                    
                     val firstFocal = if (firstBitmap != null && smartCropEnabled) detectFaceFocalPoint(firstBitmap) else null
                     
                     withContext(Dispatchers.Main) {
@@ -623,14 +641,18 @@ class MultiWallpaperLiveService : WallpaperService() {
                         requestDraw()
                     }
 
+                    if (!isActive) return@launch
+
                     // Priority 2: Load other pages sequentially with delay in background
                     val targetPageCount = detectedPages.coerceAtMost(shuffledUris.size)
                     (0 until targetPageCount).filter { it != manualPageIndex }.forEach { p ->
+                        if (!isActive) return@launch
                         val uriIdx = p % shuffledUris.size
                         val uri = shuffledUris[uriIdx]
                         
                         val b = decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight)
                         if (b != null) {
+                            if (!isActive) { b.recycle(); return@launch }
                             val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
                             withContext(Dispatchers.Main) {
                                 val old = pageBitmaps[p]
@@ -644,9 +666,11 @@ class MultiWallpaperLiveService : WallpaperService() {
                         delay(100) // yield
                     }
                     
-                    withContext(Dispatchers.Main) { 
-                        scheduleRotation()
-                        preloadNextWallpaper()
+                    if (isActive) {
+                        withContext(Dispatchers.Main) { 
+                            scheduleRotation()
+                            preloadNextWallpaper()
+                        }
                     }
                 } catch (e: Exception) { withContext(Dispatchers.Main) { isLoading = false } }
             }

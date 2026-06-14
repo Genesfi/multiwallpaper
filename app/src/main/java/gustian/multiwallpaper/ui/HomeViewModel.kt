@@ -13,7 +13,9 @@ import androidx.lifecycle.viewModelScope
 import gustian.multiwallpaper.data.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -105,6 +107,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isLoadingPreset = MutableStateFlow(false)
     val isLoadingPreset = _isLoadingPreset.asStateFlow()
+    
+    private var scanJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -515,6 +519,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val favoriteUris = favoriteDao.getAllFavoritesSync().map { it.uriString }.toSet()
 
         for (folder in foldersList) {
+            yield()
             try {
                 val uri = Uri.parse(folder.uriString)
                 if (uri.scheme == "file") {
@@ -528,6 +533,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        yield()
         // Sync with Database Cache
         scannedImageDao.deleteAllImages()
         scannedImageDao.insertImages(tempImages.map { 
@@ -688,11 +694,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun scanFolders() {
-        if (_isScanning.value) return
-        _isScanning.value = true
-        viewModelScope.launch(Dispatchers.IO) {
-            scanFoldersSync()
-            _isScanning.value = false
+        scanJob?.cancel()
+        scanJob = viewModelScope.launch(Dispatchers.IO) {
+            _isScanning.value = true
+            try {
+                scanFoldersSync()
+            } finally {
+                _isScanning.value = false
+            }
         }
     }
 
