@@ -165,6 +165,11 @@ class MultiWallpaperLiveService : WallpaperService() {
             }
             
             val oldSmartCrop = smartCropEnabled
+            val oldAiAdv = aiAdvancedEnabled
+            val oldZoom = aiZoomSlack
+            val oldSensX = aiSensitivityX
+            val oldSensY = aiSensitivityY
+            
             useFavoritesOnly = newUseFav
             parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
             parallaxStrength = prefs.getFloat("parallax_strength", 0.5f)
@@ -180,7 +185,11 @@ class MultiWallpaperLiveService : WallpaperService() {
             
             if (useFavChanged || forceReload) {
                 loadWallpapersForPages()
-            } else if (oldSmartCrop != smartCropEnabled) {
+            } else if (oldSmartCrop != smartCropEnabled || 
+                       oldAiAdv != aiAdvancedEnabled || 
+                       oldZoom != aiZoomSlack || 
+                       oldSensX != aiSensitivityX || 
+                       oldSensY != aiSensitivityY) {
                 requestDraw()
             }
             
@@ -220,8 +229,9 @@ class MultiWallpaperLiveService : WallpaperService() {
                 }
             }
 
-            // Mute parallax during transitions
-            if (!parallaxEnabled || isTransitioning) return
+            // Mute parallax redraw during transitions, but KEEP updating values
+            // so they don't "jump" when the transition ends.
+            if (!parallaxEnabled) return
             
             // Dead-zone check: only update if delta is significant enough
             val deltaX = x - currentRoll
@@ -231,11 +241,14 @@ class MultiWallpaperLiveService : WallpaperService() {
                 currentRoll += smoothingFactor * deltaX
                 currentPitch += smoothingFactor * deltaY
                 
-                val now = System.currentTimeMillis()
-                val throttle = if (lightModeEnabled) 100L else sensorThrottleMs
-                if ((now - lastSensorDrawTime) >= throttle) {
-                    lastSensorDrawTime = now
-                    requestDraw()
+                // Only request draw if NOT transitioning
+                if (!isTransitioning) {
+                    val now = System.currentTimeMillis()
+                    val throttle = if (lightModeEnabled) 100L else sensorThrottleMs
+                    if ((now - lastSensorDrawTime) >= throttle) {
+                        lastSensorDrawTime = now
+                        requestDraw()
+                    }
                 }
             }
         }
@@ -893,7 +906,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                 }
             }
             
-            if (parallaxEnabled && !isTransitioning) {
+            if (parallaxEnabled) {
                 // ASPECT-AWARE PARALLAX:
                 // We scale the motion intensity based on how much "extra room" (ow - w) 
                 // the image actually has. Landscape images have huge horizontal room,
