@@ -70,6 +70,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _parallaxStrength = MutableStateFlow(prefs.getFloat("parallax_strength", 0.5f))
     val parallaxStrength = _parallaxStrength.asStateFlow()
 
+    private val _shakeEnabled = MutableStateFlow(prefs.getBoolean("shake_enabled", false))
+    val shakeEnabled = _shakeEnabled.asStateFlow()
+
+    private val _smartCropEnabled = MutableStateFlow(prefs.getBoolean("smart_crop_enabled", true))
+    val smartCropEnabled = _smartCropEnabled.asStateFlow()
+
+    private val _lightModeEnabled = MutableStateFlow(prefs.getBoolean("light_mode_enabled", false))
+    val lightModeEnabled = _lightModeEnabled.asStateFlow()
+
     private val _gallerySortType = MutableStateFlow(prefs.getString("gallery_sort_type", "NAME") ?: "NAME")
     val gallerySortType = _gallerySortType.asStateFlow()
 
@@ -304,6 +313,21 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setParallaxStrength(strength: Float) {
         prefs.edit().putFloat("parallax_strength", strength).apply()
         _parallaxStrength.value = strength
+    }
+
+    fun setShakeEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("shake_enabled", enable).apply()
+        _shakeEnabled.value = enable
+    }
+
+    fun setSmartCropEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("smart_crop_enabled", enable).apply()
+        _smartCropEnabled.value = enable
+    }
+
+    fun setLightModeEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("light_mode_enabled", enable).apply()
+        _lightModeEnabled.value = enable
     }
 
     suspend fun saveCurrentAsPresetSuspend(name: String) {

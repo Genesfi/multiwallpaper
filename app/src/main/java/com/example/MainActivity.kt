@@ -599,6 +599,9 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     val fadeSpeed by viewModel.fadeSpeed.collectAsState()
     val parallaxEnabled by viewModel.parallaxEnabled.collectAsState()
     val parallaxStrength by viewModel.parallaxStrength.collectAsState()
+    val shakeEnabled by viewModel.shakeEnabled.collectAsState()
+    val smartCropEnabled by viewModel.smartCropEnabled.collectAsState()
+    val lightModeEnabled by viewModel.lightModeEnabled.collectAsState()
     
     var unit by remember { mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") }
     val displayValue = remember(totalSeconds, unit) {
@@ -626,6 +629,21 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("React to Motion", fontWeight = FontWeight.Bold)
             Switch(parallaxEnabled, { viewModel.setParallaxEnabled(it) })
+        }
+
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("Shake to Change", fontWeight = FontWeight.Bold)
+            Switch(shakeEnabled, { viewModel.setShakeEnabled(it) })
+        }
+
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("AI Smart Crop Face", fontWeight = FontWeight.Bold)
+            Switch(smartCropEnabled, { viewModel.setSmartCropEnabled(it) })
+        }
+
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("Power Saver (Light Mode)", fontWeight = FontWeight.Bold)
+            Switch(lightModeEnabled, { viewModel.setLightModeEnabled(it) })
         }
         
         if (parallaxEnabled) {
