@@ -1180,32 +1180,34 @@ fun ImageDetailDialog(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(16.dp)
+                    .padding(horizontal = 16.dp, vertical = 24.dp)
                     .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(28.dp))
                     .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(28.dp))
-                    .padding(20.dp),
+                    .padding(16.dp)
+                    .navigationBarsPadding(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
                     text = img.displayName,
                     color = Color.White,
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(16.dp))
                 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Smart Preview Toggle
                     IconButton(
                         onClick = { isSmartPreview = !isSmartPreview },
                         modifier = Modifier
-                            .size(50.dp)
+                            .size(48.dp)
                             .background(
                                 if (isSmartPreview) MaterialTheme.colorScheme.primary 
                                 else Color.White.copy(alpha = 0.1f), 
@@ -1215,35 +1217,70 @@ fun ImageDetailDialog(
                         Icon(
                             if (isSmartPreview) Icons.Default.Visibility else Icons.Default.VisibilityOff,
                             null,
+                            modifier = Modifier.size(20.dp),
                             tint = if (isSmartPreview) Color.White else Color.White.copy(alpha = 0.7f)
                         )
                     }
 
                     Button(
                         onClick = { onToggleFavorite(img) },
-                        modifier = Modifier.weight(1f).height(50.dp),
+                        modifier = Modifier.weight(1f).height(48.dp),
                         shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (img.isFavorite) Color(0xFFEAB308) else MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
                         )
                     ) {
-                        Icon(if (img.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (img.isFavorite) "Starred" else "Star", fontWeight = FontWeight.Bold)
+                        Icon(
+                            if (img.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder, 
+                            null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = if (img.isFavorite) "Starred" else "Star", 
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
                     
                     Button(
                         onClick = { saveImageToGallery(context, Uri.parse(img.uriString), img.displayName) },
-                        modifier = Modifier.weight(1f).height(50.dp),
+                        modifier = Modifier.weight(1f).height(48.dp),
                         shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color.White.copy(alpha = 0.1f)
                         )
                     ) {
-                        Icon(Icons.Default.Download, null, tint = Color.White)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Export", fontWeight = FontWeight.Bold, color = Color.White)
+                        Icon(
+                            Icons.Default.Download, 
+                            null, 
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "Export", 
+                            fontWeight = FontWeight.Bold, 
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
+                }
+                
+                TextButton(
+                    onClick = { 
+                        isVisible = false
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ onDismiss() }, 300)
+                    },
+                    modifier = Modifier.padding(top = 8.dp)
+                ) {
+                    Text("CLOSE", color = Color.White.copy(alpha = 0.5f), letterSpacing = 1.sp, fontSize = 11.sp)
                 }
             }
         }
