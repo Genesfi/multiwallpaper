@@ -894,8 +894,15 @@ class MultiWallpaperLiveService : WallpaperService() {
             }
             
             if (parallaxEnabled && !isTransitioning) {
-                cX += (currentRoll / 10f) * ((ow - w) / 2f)
-                cY -= (currentPitch / 10f) * ((oh - h) / 2f)
+                // ASPECT-AWARE PARALLAX:
+                // We scale the motion intensity based on how much "extra room" (ow - w) 
+                // the image actually has. Landscape images have huge horizontal room,
+                // so we use a higher multiplier for a smoother, longer slide.
+                val slackX = (ow - w) / 2f
+                val slackY = (oh - h) / 2f
+                
+                cX += (currentRoll / 10f) * slackX
+                cY -= (currentPitch / 10f) * slackY
             }
 
             // Clamp to ensure screen is always covered

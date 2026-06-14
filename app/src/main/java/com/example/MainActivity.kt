@@ -646,98 +646,123 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     
     val scrollState = rememberScrollState()
     Column(modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(scrollState)) {
-        Text("SETTINGS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("GENERAL SETTINGS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
         Spacer(modifier = Modifier.height(16.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Use Favorites Only", fontWeight = FontWeight.Bold)
-            Switch(useFav, { viewModel.setUseFavoritesOnly(it) })
-        }
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Double Tap to Change", fontWeight = FontWeight.Bold)
-            Switch(doubleTap, { viewModel.setDoubleTapEnabled(it) })
-        }
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("React to Motion", fontWeight = FontWeight.Bold)
-            Switch(parallaxEnabled, { viewModel.setParallaxEnabled(it) })
-        }
 
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Shake to Change", fontWeight = FontWeight.Bold)
-            Switch(shakeEnabled, { viewModel.setShakeEnabled(it) })
-        }
-
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("AI Smart Crop Face", fontWeight = FontWeight.Bold)
-            Switch(smartCropEnabled, { viewModel.setSmartCropEnabled(it) })
-        }
-
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Power Saver (Light Mode)", fontWeight = FontWeight.Bold)
-            Switch(lightModeEnabled, { viewModel.setLightModeEnabled(it) })
-        }
-
-        if (smartCropEnabled) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column {
-                    Text("Advanced AI Settings", fontWeight = FontWeight.Bold)
-                    Text("Unlock fine-tuned crop controls", style = MaterialTheme.typography.labelSmall)
-                }
-                Switch(aiAdvancedEnabled, { viewModel.setAiAdvancedEnabled(it) })
+        // --- Interaction Group ---
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                SettingRow(title = "Use Favorites Only", checked = useFav, onCheckedChange = { viewModel.setUseFavoritesOnly(it) })
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                SettingRow(title = "Double Tap to Change", checked = doubleTap, onCheckedChange = { viewModel.setDoubleTapEnabled(it) })
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                SettingRow(title = "Shake to Change", checked = shakeEnabled, onCheckedChange = { viewModel.setShakeEnabled(it) })
             }
+        }
 
-            if (aiAdvancedEnabled) {
-                Card(
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text("AI Zoom Slack (Max Zoom)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                        Slider(
-                            value = aiZoomSlack,
-                            onValueChange = { viewModel.setAiZoomSlack(it) },
-                            valueRange = 1.1f..2.0f,
-                            steps = 8
-                        )
-                        Text("${(aiZoomSlack * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+        Spacer(modifier = Modifier.height(24.dp))
+        Text("MOTION & PARALLAX", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.height(12.dp))
 
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Horizontal Centering Sensitivity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                        Slider(
-                            value = aiSensitivityX,
-                            onValueChange = { viewModel.setAiSensitivityX(it) },
-                            valueRange = 0.1f..1.0f
-                        )
-                        Text("${(aiSensitivityX * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+        // --- Motion Group ---
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                SettingRow(title = "React to Motion (Parallax)", checked = parallaxEnabled, onCheckedChange = { viewModel.setParallaxEnabled(it) })
+                
+                if (parallaxEnabled) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Motion Strength", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Slider(
+                        value = parallaxStrength,
+                        onValueChange = { viewModel.setParallaxStrength(it) },
+                        valueRange = 0.1f..1f,
+                        steps = 8
+                    )
+                    Text("${(parallaxStrength * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                }
+            }
+        }
 
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Vertical Centering Sensitivity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                        Slider(
-                            value = aiSensitivityY,
-                            onValueChange = { viewModel.setAiSensitivityY(it) },
-                            valueRange = 0.1f..1.0f
-                        )
-                        Text("${(aiSensitivityY * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+        Spacer(modifier = Modifier.height(24.dp))
+        Text("AI SMART CONTROLS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // --- AI Group ---
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                SettingRow(title = "AI Smart Crop Face", checked = smartCropEnabled, onCheckedChange = { viewModel.setSmartCropEnabled(it) })
+                
+                if (smartCropEnabled) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    SettingRow(
+                        title = "Advanced AI Controls", 
+                        subtitle = "Unlock fine-tuned crop limits",
+                        checked = aiAdvancedEnabled, 
+                        onCheckedChange = { viewModel.setAiAdvancedEnabled(it) }
+                    )
+
+                    if (aiAdvancedEnabled) {
+                        Column(modifier = Modifier.padding(top = 8.dp)) {
+                            Text("AI Zoom Slack (Max Zoom)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            Slider(
+                                value = aiZoomSlack,
+                                onValueChange = { viewModel.setAiZoomSlack(it) },
+                                valueRange = 1.1f..2.0f,
+                                steps = 8
+                            )
+                            Text("${(aiZoomSlack * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Horizontal Sensitivity", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            Slider(
+                                value = aiSensitivityX,
+                                onValueChange = { viewModel.setAiSensitivityX(it) },
+                                valueRange = 0.1f..1.0f
+                            )
+                            Text("${(aiSensitivityX * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Vertical Sensitivity", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            Slider(
+                                value = aiSensitivityY,
+                                onValueChange = { viewModel.setAiSensitivityY(it) },
+                                valueRange = 0.1f..1.0f
+                            )
+                            Text("${(aiSensitivityY * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                        }
                     }
                 }
             }
         }
-        
-        if (parallaxEnabled) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Text("Motion Strength", fontWeight = FontWeight.Bold)
-            Slider(
-                value = parallaxStrength,
-                onValueChange = { viewModel.setParallaxStrength(it) },
-                valueRange = 0.1f..1f,
-                steps = 8
-            )
-        }
-        
+
         Spacer(modifier = Modifier.height(24.dp))
-        Text("Rotation Interval", fontWeight = FontWeight.Bold)
+        Text("PERFORMANCE", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // --- Performance Group ---
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                SettingRow(title = "Power Saver (Light Mode)", subtitle = "Saves battery & RAM", checked = lightModeEnabled, onCheckedChange = { viewModel.setLightModeEnabled(it) })
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+        Text("TIMING & EFFECTS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
         
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 12.dp)) {
+            Text("Rotation Interval", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
             OutlinedTextField(
                 value = displayValue.toString(),
                 onValueChange = { 
@@ -750,7 +775,7 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
                     }
                     viewModel.setIntervalSeconds(newSec)
                 },
-                modifier = Modifier.width(110.dp),
+                modifier = Modifier.width(90.dp),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp)
@@ -758,9 +783,8 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
             Spacer(modifier = Modifier.width(8.dp))
             var expanded by remember { mutableStateOf(false) }
             Box {
-                Button(onClick = { expanded = true }, shape = RoundedCornerShape(12.dp)) { 
-                    Text(unit)
-                    Icon(Icons.Default.ArrowDropDown, null)
+                Button(onClick = { expanded = true }, shape = RoundedCornerShape(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) { 
+                    Text(unit, fontSize = 12.sp)
                 }
                 DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                     listOf("Sec", "Min", "Hour").forEach { u ->
@@ -786,8 +810,8 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
             steps = 59
         )
         
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("Transition Effect", fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Transition Effect", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
         Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { viewModel.setTransitionType("slide") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "slide") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Slide") }
             Button(onClick = { viewModel.setTransitionType("fade") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "fade") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Fade") }
@@ -795,27 +819,18 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         
         if (transition == "fade") {
             Spacer(modifier = Modifier.height(16.dp))
-            Text("Fade Speed", fontWeight = FontWeight.Bold)
+            Text("Fade Speed", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
             Slider(
                 value = fadeSpeed.toFloat(),
                 onValueChange = { viewModel.setFadeSpeed(it.roundToInt()) },
                 valueRange = 5f..50f,
                 steps = 9
             )
-            Text(
-                text = when {
-                    fadeSpeed < 15 -> "Slow"
-                    fadeSpeed < 35 -> "Normal"
-                    else -> "Fast"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
         
         Spacer(modifier = Modifier.height(32.dp))
         Text("DATA MANAGEMENT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val context = LocalContext.current
@@ -833,8 +848,8 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Icon(Icons.Default.Upload, null)
-                Spacer(modifier = Modifier.width(4.dp))
+                Icon(Icons.Default.Upload, null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Text("Export")
             }
             
@@ -843,8 +858,8 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Icon(Icons.Default.Download, null)
-                Spacer(modifier = Modifier.width(4.dp))
+                Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Text("Import")
             }
         }
@@ -853,9 +868,9 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Spacer(modifier = Modifier.height(16.dp))
         Text("ABOUT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Card(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
+        Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("Multi Wallpaper Live Changer", fontWeight = FontWeight.Bold)
+                Text("Multi Wallpaper Live", fontWeight = FontWeight.Bold)
                 Text("Version 1.0.0", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("Developer: Migi Gustian", style = MaterialTheme.typography.bodyMedium)
@@ -864,7 +879,29 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
             }
         }
         Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = onSetWallpaperClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) { Text("Activate Live Wallpaper") }
+        Button(onClick = onSetWallpaperClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), contentPadding = PaddingValues(16.dp)) { 
+            Icon(Icons.Default.Wallpaper, null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Set Live Wallpaper") 
+        }
+        Spacer(modifier = Modifier.height(40.dp))
+    }
+}
+
+@Composable
+fun SettingRow(title: String, subtitle: String? = null, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyLarge)
+            if (subtitle != null) {
+                Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Switch(checked, onCheckedChange)
     }
 }
 
