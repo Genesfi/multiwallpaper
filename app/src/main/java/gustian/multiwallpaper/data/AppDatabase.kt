@@ -1,4 +1,4 @@
-package com.example.data
+package gustian.multiwallpaper.data
 
 import android.content.Context
 import androidx.room.*
@@ -49,3 +49,4 @@ abstract class AppDatabase : RoomDatabase() {
         }
     }
 }
+

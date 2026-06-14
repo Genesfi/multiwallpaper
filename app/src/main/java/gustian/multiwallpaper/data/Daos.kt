@@ -1,4 +1,4 @@
-package com.example.data
+package gustian.multiwallpaper.data
 
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
@@ -92,3 +92,4 @@ interface PresetDao {
     @Update
     suspend fun updatePreset(preset: PresetEntity)
 }
+

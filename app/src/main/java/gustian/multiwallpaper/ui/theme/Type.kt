@@ -1,4 +1,4 @@
-package com.example.ui.theme
+package gustian.multiwallpaper.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
@@ -34,3 +34,4 @@ val Typography =
     )
     */
   )
+

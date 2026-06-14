@@ -1,4 +1,4 @@
-package com.example.ui
+package gustian.multiwallpaper.ui
 
 import android.app.Application
 import android.content.Context
@@ -10,7 +10,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.*
+import gustian.multiwallpaper.data.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.*

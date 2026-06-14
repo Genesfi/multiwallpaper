@@ -1,4 +1,4 @@
-package com.example
+package gustian.multiwallpaper
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -17,7 +17,7 @@ import android.util.Log
 import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.animation.DecelerateInterpolator
-import com.example.data.AppDatabase
+import gustian.multiwallpaper.data.AppDatabase
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -251,7 +251,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun requestDraw() {
-            if (!isDrawScheduled) {
+            if (visible && !isDrawScheduled) {
                 isDrawScheduled = true
                 handler.post(drawRunnable)
             }
@@ -315,7 +315,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             } else {
                 isDrawScheduled = false
                 handler.removeCallbacks(drawRunnable)
-                handler.removeCallbacks(rotationRunnable)
+                // We KEEP rotationRunnable so it can change wallpapers in background
                 unregisterSensor()
                 // Also cancel any ongoing transitions to stop power usage
                 isTransitioning = false
@@ -936,3 +936,4 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
     }
 }
+

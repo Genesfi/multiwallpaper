@@ -1,4 +1,4 @@
-package com.example.data
+package gustian.multiwallpaper.data
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
@@ -36,3 +36,4 @@ data class PresetEntity(
     val favoriteData: String, // Store full FavoriteImageEntity list as JSON string
     val createdTime: Long = System.currentTimeMillis()
 )
+

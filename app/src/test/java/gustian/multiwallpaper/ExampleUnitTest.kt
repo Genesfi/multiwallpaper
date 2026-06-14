@@ -1,4 +1,4 @@
-package com.example
+package gustian.multiwallpaper
 
 import org.junit.Assert.*
 import org.junit.Test
@@ -14,3 +14,4 @@ class ExampleUnitTest {
     assertEquals(4, 2 + 2)
   }
 }
+

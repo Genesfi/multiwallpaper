@@ -1,4 +1,4 @@
-package com.example
+package gustian.multiwallpaper
 
 import android.app.WallpaperManager
 import android.content.ComponentName
@@ -47,12 +47,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import com.example.data.FolderEntity
-import com.example.data.PresetEntity
+import gustian.multiwallpaper.data.FolderEntity
+import gustian.multiwallpaper.data.PresetEntity
 import kotlin.math.roundToInt
-import com.example.ui.HomeViewModel
-import com.example.ui.WallpaperImg
-import com.example.ui.theme.MyApplicationTheme
+import gustian.multiwallpaper.ui.HomeViewModel
+import gustian.multiwallpaper.ui.WallpaperImg
+import gustian.multiwallpaper.ui.theme.MyApplicationTheme
 
 import android.provider.Settings
 
@@ -667,7 +667,7 @@ fun GalleryScreen(viewModel: HomeViewModel) {
 @Composable
 fun FavoritesScreen(viewModel: HomeViewModel) {
     val favorites by viewModel.favorites.collectAsState()
-    var selectedImg by remember { mutableStateOf<com.example.data.FavoriteImageEntity?>(null) }
+    var selectedImg by remember { mutableStateOf<gustian.multiwallpaper.data.FavoriteImageEntity?>(null) }
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("FAVORITES (${favorites.size})", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (favorites.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No Favorites yet", color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -1020,3 +1020,4 @@ private fun saveImageToGallery(context: Context, imageUri: Uri, displayName: Str
         }
     } catch (e: Exception) {}
 }
+

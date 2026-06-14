@@ -1,4 +1,4 @@
-package com.example
+package gustian.multiwallpaper
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
@@ -19,3 +19,4 @@ class ExampleRobolectricTest {
     assertEquals("Multi Wallpaper", appName)
   }
 }
+

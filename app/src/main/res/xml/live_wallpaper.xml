@@ -2,4 +2,5 @@
 <wallpaper xmlns:android="http://schemas.android.com/apk/res/android"
     android:thumbnail="@mipmap/ic_launcher"
     android:description="@string/live_wallpaper_description"
-    android:settingsActivity="com.example.MainActivity" />
+    android:settingsActivity="gustian.multiwallpaper.MainActivity" />
+

@@ -1,4 +1,4 @@
-package com.example.ui.theme
+package gustian.multiwallpaper.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
@@ -34,3 +34,4 @@ val ProfessionalOutlineVariantDark = Color(0xFF43474E)
 
 val HardNavy = Color(0xFF0F172A)
 val CardSlate = Color(0xFF1E293B)
+

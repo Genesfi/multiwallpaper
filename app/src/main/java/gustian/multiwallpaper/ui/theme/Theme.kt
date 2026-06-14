@@ -1,4 +1,4 @@
-package com.example.ui.theme
+package gustian.multiwallpaper.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -64,3 +64,4 @@ fun MyApplicationTheme(
 
   MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
 }
+
