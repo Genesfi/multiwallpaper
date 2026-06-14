@@ -18,9 +18,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -35,6 +37,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -45,6 +48,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import gustian.multiwallpaper.data.FolderEntity
@@ -573,7 +577,8 @@ fun GalleryScreen(viewModel: HomeViewModel) {
     val sortType by viewModel.gallerySortType.collectAsState()
     val searchQuery by viewModel.gallerySearchQuery.collectAsState()
 
-    var selectedImg by remember { mutableStateOf<WallpaperImg?>(null) }
+    var selectedImgUri by remember { mutableStateOf<String?>(null) }
+    var activeFolderUri by remember { mutableStateOf<String?>(null) }
     
     val grouped = remember(images, sortType, searchQuery) {
         val filtered = if (searchQuery.isBlank()) images 
@@ -648,7 +653,16 @@ fun GalleryScreen(viewModel: HomeViewModel) {
                         Row(modifier = Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             chunks[i].forEach { img ->
                                 val sel = selectedUris.contains(img.uriString)
-                                Box(modifier = Modifier.weight(1f).aspectRatio(0.85f).clip(RoundedCornerShape(12.dp)).background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant).combinedClickable(onClick = { if (selectedUris.isNotEmpty()) viewModel.toggleGalleryUriSelection(img.uriString) else selectedImg = img }, onLongClick = { viewModel.toggleGalleryUriSelection(img.uriString) })) {
+                                Box(modifier = Modifier.weight(1f).aspectRatio(0.85f).clip(RoundedCornerShape(12.dp)).background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant).combinedClickable(
+                                    onClick = { 
+                                        if (selectedUris.isNotEmpty()) viewModel.toggleGalleryUriSelection(img.uriString) 
+                                        else {
+                                            selectedImgUri = img.uriString
+                                            activeFolderUri = uri
+                                        }
+                                    }, 
+                                    onLongClick = { viewModel.toggleGalleryUriSelection(img.uriString) }
+                                )) {
                                     AsyncImage(model = Uri.parse(img.uriString), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(if (sel) 0.6f else 1f), contentScale = ContentScale.Crop)
                                     if (img.isFavorite) Icon(Icons.Default.Star, null, tint = Color.Yellow, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(16.dp))
                                     if (sel) Icon(Icons.Default.CheckCircle, null, tint = Color.White, modifier = Modifier.align(Alignment.Center).size(32.dp))
@@ -661,26 +675,47 @@ fun GalleryScreen(viewModel: HomeViewModel) {
             }
         }
     }
-    if (selectedImg != null) ImageDetailDialog(selectedImg!!, { selectedImg = null }, { viewModel.toggleFavorite(it) })
+    
+    val activeImgs = grouped[activeFolderUri] ?: emptyList()
+    val activeIndex = activeImgs.indexOfFirst { it.uriString == selectedImgUri }
+    
+    if (selectedImgUri != null && activeIndex != -1) {
+        ImageDetailDialog(
+            images = activeImgs,
+            initialIndex = activeIndex,
+            onDismiss = { selectedImgUri = null },
+            onToggleFavorite = { viewModel.toggleFavorite(it) }
+        )
+    }
 }
 
 @Composable
 fun FavoritesScreen(viewModel: HomeViewModel) {
     val favorites by viewModel.favorites.collectAsState()
-    var selectedImg by remember { mutableStateOf<gustian.multiwallpaper.data.FavoriteImageEntity?>(null) }
+    var selectedFavIndex by remember { mutableIntStateOf(-1) }
+    
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("FAVORITES (${favorites.size})", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (favorites.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No Favorites yet", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         else LazyVerticalGrid(columns = GridCells.Adaptive(100.dp), modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(favorites) { f ->
-                Box(modifier = Modifier.aspectRatio(0.85f).clip(RoundedCornerShape(16.dp)).clickable { selectedImg = f }) {
+            itemsIndexed(favorites) { index, f ->
+                Box(modifier = Modifier.aspectRatio(0.85f).clip(RoundedCornerShape(16.dp)).clickable { selectedFavIndex = index }) {
                     AsyncImage(model = Uri.parse(f.uriString), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                     IconButton(onClick = { viewModel.toggleFavorite(WallpaperImg(f.uriString, f.folderUriString, f.displayName, true)) }, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f), RoundedCornerShape(8.dp)).size(32.dp)) { Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308), modifier = Modifier.size(18.dp)) }
                 }
             }
         }
     }
-    if (selectedImg != null) ImageDetailDialog(WallpaperImg(selectedImg!!.uriString, selectedImg!!.folderUriString, selectedImg!!.displayName, true), { selectedImg = null }, { viewModel.toggleFavorite(it) })
+    
+    if (selectedFavIndex != -1) {
+        val favImgs = favorites.map { WallpaperImg(it.uriString, it.folderUriString, it.displayName, true) }
+        ImageDetailDialog(
+            images = favImgs,
+            initialIndex = selectedFavIndex,
+            onDismiss = { selectedFavIndex = -1 },
+            onToggleFavorite = { viewModel.toggleFavorite(it) }
+        )
+    }
 }
 
 @Composable
@@ -973,19 +1008,163 @@ fun SettingRow(title: String, subtitle: String? = null, checked: Boolean, onChec
 }
 
 @Composable
-fun ImageDetailDialog(img: WallpaperImg, onDismiss: () -> Unit, onToggleFavorite: (WallpaperImg) -> Unit) {
+fun ImageDetailDialog(
+    images: List<WallpaperImg>,
+    initialIndex: Int,
+    onDismiss: () -> Unit,
+    onToggleFavorite: (WallpaperImg) -> Unit
+) {
     val context = LocalContext.current
-    Dialog(onDismissRequest = onDismiss) {
-        Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(modifier = Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(img.displayName, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Spacer(modifier = Modifier.height(12.dp))
-                AsyncImage(model = Uri.parse(img.uriString), contentDescription = null, modifier = Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentScale = ContentScale.Fit)
-                Row(modifier = Modifier.fillMaxWidth().padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = { onToggleFavorite(img) }, modifier = Modifier.weight(1f)) { Icon(if (img.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder, null); Spacer(Modifier.width(4.dp)); Text(if (img.isFavorite) "Starred" else "Star") }
-                    Button(onClick = { saveImageToGallery(context, Uri.parse(img.uriString), img.displayName) }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.SaveAlt, null); Spacer(Modifier.width(4.dp)); Text("Export") }
+    var currentIndex by remember { mutableIntStateOf(initialIndex) }
+    val img = images.getOrNull(currentIndex) ?: run { onDismiss(); return }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures { change, dragAmount ->
+                        if (dragAmount > 50) {
+                            if (currentIndex > 0) currentIndex--
+                            change.consume()
+                        } else if (dragAmount < -50) {
+                            if (currentIndex < images.size - 1) currentIndex++
+                            change.consume()
+                        }
+                    }
                 }
-                TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Close") }
+        ) {
+            // Main Image View
+            AsyncImage(
+                model = Uri.parse(img.uriString),
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(bottom = 120.dp), // Space for bottom controls
+                contentScale = ContentScale.Fit
+            )
+
+            // Navigation Overlays (Arrows)
+            if (currentIndex > 0) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .width(60.dp)
+                        .align(Alignment.CenterStart)
+                        .clickable { currentIndex-- },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.ChevronLeft,
+                        null,
+                        tint = Color.White.copy(alpha = 0.7f),
+                        modifier = Modifier.size(48.dp)
+                    )
+                }
+            }
+            if (currentIndex < images.size - 1) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .width(60.dp)
+                        .align(Alignment.CenterEnd)
+                        .clickable { currentIndex++ },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.ChevronRight,
+                        null,
+                        tint = Color.White.copy(alpha = 0.7f),
+                        modifier = Modifier.size(48.dp)
+                    )
+                }
+            }
+
+            // Top Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 40.dp, start = 16.dp, end = 16.dp)
+                    .align(Alignment.TopCenter),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${currentIndex + 1} of ${images.size}",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.background(Color.Black.copy(alpha = 0.3f), CircleShape)
+                ) {
+                    Icon(Icons.Default.Close, null, tint = Color.White)
+                }
+            }
+
+            // Bottom Control Panel
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(24.dp))
+                    .padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = img.displayName,
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                
+                Spacer(modifier = Modifier.height(20.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(
+                        onClick = { onToggleFavorite(img) },
+                        modifier = Modifier.weight(1f).height(50.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (img.isFavorite) Color(0xFFEAB308) else MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                        )
+                    ) {
+                        Icon(if (img.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (img.isFavorite) "Starred" else "Star", fontWeight = FontWeight.Bold)
+                    }
+                    
+                    Button(
+                        onClick = { saveImageToGallery(context, Uri.parse(img.uriString), img.displayName) },
+                        modifier = Modifier.weight(1f).height(50.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f)
+                        )
+                    ) {
+                        Icon(Icons.Default.Download, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Export", fontWeight = FontWeight.Bold)
+                    }
+                }
+                
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.padding(top = 8.dp)
+                ) {
+                    Text("CLOSE", color = Color.White.copy(alpha = 0.7f), letterSpacing = 2.sp)
+                }
             }
         }
     }
