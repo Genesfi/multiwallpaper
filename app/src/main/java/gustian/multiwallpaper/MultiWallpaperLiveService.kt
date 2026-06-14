@@ -85,7 +85,11 @@ class MultiWallpaperLiveService : WallpaperService() {
             isDrawScheduled = false
             drawFrame() 
         }
-        private val rotationRunnable = Runnable { rotateWallpapers() }
+        private val rotationRunnable = Runnable { 
+            rotateWallpapers()
+            // Always ensure the next rotation is scheduled
+            scheduleRotation()
+        }
 
         // Parallax sensor properties
         private var sensorManager: SensorManager? = null
@@ -390,7 +394,20 @@ class MultiWallpaperLiveService : WallpaperService() {
                     preloadedBitmap = null
                     preloadedUri = null
                     preloadedFocalPoint = null
-                    startFade()
+                    
+                    if (visible) {
+                        startFade()
+                    } else {
+                        // If screen is off, apply instantly without animation to save power
+                        val old = pageBitmaps[manualPageIndex]
+                        nextBitmap?.let { 
+                            pageBitmaps[manualPageIndex] = it
+                            pageFocalPoints[manualPageIndex] = nextFocalPoint
+                            if (old != it) old?.recycle()
+                        }
+                        nextBitmap = null
+                        nextFocalPoint = null
+                    }
                     preloadNextWallpaper()
                 } else {
                     startFadeRotation()
@@ -400,7 +417,6 @@ class MultiWallpaperLiveService : WallpaperService() {
                 refreshOtherPages()
             } else {
                 loadWallpapersForPages()
-                scheduleRotation()
             }
         }
 
