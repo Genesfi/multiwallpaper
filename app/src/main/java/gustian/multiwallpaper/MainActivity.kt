@@ -17,8 +17,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
@@ -35,8 +38,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -1018,69 +1023,120 @@ fun ImageDetailDialog(
     var currentIndex by remember { mutableIntStateOf(initialIndex) }
     val img = images.getOrNull(currentIndex) ?: run { onDismiss(); return }
 
+    // Animation states for opening/closing
+    var isVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { isVisible = true }
+    
+    val dialogAlpha by animateFloatAsState(if (isVisible) 1f else 0f, tween(300))
+    val dialogScale by animateFloatAsState(if (isVisible) 1f else 0.9f, tween(300))
+
+    // Zoom & Pan states
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    
+    // Smart Preview state
+    var isSmartPreview by remember { mutableStateOf(false) }
+
+    // Reset zoom when image changes
+    LaunchedEffect(currentIndex) {
+        scale = 1f
+        offset = Offset.Zero
+    }
+
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { 
+            isVisible = false
+            // Small delay before actual dismiss to allow animation to play
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ onDismiss() }, 300)
+        },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .alpha(dialogAlpha)
                 .background(Color.Black)
                 .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        scale = (scale * zoom).coerceIn(1f, 5f)
+                        if (scale > 1f) {
+                            offset += pan
+                        } else {
+                            offset = Offset.Zero
+                        }
+                    }
+                }
+                .pointerInput(Unit) {
                     detectHorizontalDragGestures { change, dragAmount ->
-                        if (dragAmount > 50) {
-                            if (currentIndex > 0) currentIndex--
-                            change.consume()
-                        } else if (dragAmount < -50) {
-                            if (currentIndex < images.size - 1) currentIndex++
-                            change.consume()
+                        // Only allow swipe if not zoomed in
+                        if (scale <= 1.05f) {
+                            if (dragAmount > 50) {
+                                if (currentIndex > 0) currentIndex--
+                                change.consume()
+                            } else if (dragAmount < -50) {
+                                if (currentIndex < images.size - 1) currentIndex++
+                                change.consume()
+                            }
                         }
                     }
                 }
         ) {
             // Main Image View
-            AsyncImage(
-                model = Uri.parse(img.uriString),
-                contentDescription = null,
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(bottom = 120.dp), // Space for bottom controls
-                contentScale = ContentScale.Fit
-            )
-
-            // Navigation Overlays (Arrows)
-            if (currentIndex > 0) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .width(60.dp)
-                        .align(Alignment.CenterStart)
-                        .clickable { currentIndex-- },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.ChevronLeft,
-                        null,
-                        tint = Color.White.copy(alpha = 0.7f),
-                        modifier = Modifier.size(48.dp)
-                    )
-                }
+                    .padding(bottom = 120.dp)
+                    .graphicsLayer {
+                        scaleX = dialogScale * scale
+                        scaleY = dialogScale * scale
+                        translationX = offset.x
+                        translationY = offset.y
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                AsyncImage(
+                    model = Uri.parse(img.uriString),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = if (isSmartPreview) ContentScale.Crop else ContentScale.Fit
+                )
             }
-            if (currentIndex < images.size - 1) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .width(60.dp)
-                        .align(Alignment.CenterEnd)
-                        .clickable { currentIndex++ },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.ChevronRight,
-                        null,
-                        tint = Color.White.copy(alpha = 0.7f),
-                        modifier = Modifier.size(48.dp)
-                    )
+
+            // Navigation Overlays (Arrows) - Only show if not zoomed
+            if (scale <= 1.05f) {
+                if (currentIndex > 0) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .width(60.dp)
+                            .align(Alignment.CenterStart)
+                            .clickable { currentIndex-- },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.ChevronLeft,
+                            null,
+                            tint = Color.White.copy(alpha = 0.5f),
+                            modifier = Modifier.size(48.dp)
+                        )
+                    }
+                }
+                if (currentIndex < images.size - 1) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .width(60.dp)
+                            .align(Alignment.CenterEnd)
+                            .clickable { currentIndex++ },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.ChevronRight,
+                            null,
+                            tint = Color.White.copy(alpha = 0.5f),
+                            modifier = Modifier.size(48.dp)
+                        )
+                    }
                 }
             }
 
@@ -1088,20 +1144,32 @@ fun ImageDetailDialog(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 40.dp, start = 16.dp, end = 16.dp)
+                    .padding(top = 48.dp, start = 20.dp, end = 20.dp)
                     .align(Alignment.TopCenter),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "${currentIndex + 1} of ${images.size}",
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                Column {
+                    Text(
+                        text = "${currentIndex + 1} / ${images.size}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (isSmartPreview) {
+                        Text(
+                            "Wallpaper Preview Mode",
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
                 IconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.background(Color.Black.copy(alpha = 0.3f), CircleShape)
+                    onClick = { 
+                        isVisible = false
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ onDismiss() }, 300)
+                    },
+                    modifier = Modifier.background(Color.White.copy(alpha = 0.1f), CircleShape)
                 ) {
                     Icon(Icons.Default.Close, null, tint = Color.White)
                 }
@@ -1113,7 +1181,8 @@ fun ImageDetailDialog(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .padding(16.dp)
-                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(24.dp))
+                    .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(28.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(28.dp))
                     .padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -1121,7 +1190,7 @@ fun ImageDetailDialog(
                     text = img.displayName,
                     color = Color.White,
                     style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1132,12 +1201,30 @@ fun ImageDetailDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    // Smart Preview Toggle
+                    IconButton(
+                        onClick = { isSmartPreview = !isSmartPreview },
+                        modifier = Modifier
+                            .size(50.dp)
+                            .background(
+                                if (isSmartPreview) MaterialTheme.colorScheme.primary 
+                                else Color.White.copy(alpha = 0.1f), 
+                                RoundedCornerShape(12.dp)
+                            )
+                    ) {
+                        Icon(
+                            if (isSmartPreview) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                            null,
+                            tint = if (isSmartPreview) Color.White else Color.White.copy(alpha = 0.7f)
+                        )
+                    }
+
                     Button(
                         onClick = { onToggleFavorite(img) },
                         modifier = Modifier.weight(1f).height(50.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (img.isFavorite) Color(0xFFEAB308) else MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                            containerColor = if (img.isFavorite) Color(0xFFEAB308) else MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
                         )
                     ) {
                         Icon(if (img.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder, null)
@@ -1150,20 +1237,13 @@ fun ImageDetailDialog(
                         modifier = Modifier.weight(1f).height(50.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f)
+                            containerColor = Color.White.copy(alpha = 0.1f)
                         )
                     ) {
-                        Icon(Icons.Default.Download, null)
+                        Icon(Icons.Default.Download, null, tint = Color.White)
                         Spacer(Modifier.width(8.dp))
-                        Text("Export", fontWeight = FontWeight.Bold)
+                        Text("Export", fontWeight = FontWeight.Bold, color = Color.White)
                     }
-                }
-                
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.padding(top = 8.dp)
-                ) {
-                    Text("CLOSE", color = Color.White.copy(alpha = 0.7f), letterSpacing = 2.sp)
                 }
             }
         }
