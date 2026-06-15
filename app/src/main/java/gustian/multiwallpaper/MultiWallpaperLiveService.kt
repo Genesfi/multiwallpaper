@@ -111,7 +111,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private val smoothingFactor = 0.05f // Stronger LPF to ignore jitter
         private var detectedPages = 20 // Default to 20 for launchers that don't report xStep (HyperOS)
         private val recentHistory = LinkedHashSet<String>()
-        private val MAX_HISTORY = 50
+        private val MAX_HISTORY = 150
         
         // Job tracking for concurrency safety
         private var mainLoadJob: Job? = null
