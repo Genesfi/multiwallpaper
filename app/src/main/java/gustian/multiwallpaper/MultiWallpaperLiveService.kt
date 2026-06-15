@@ -119,6 +119,9 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var preloadJob: Job? = null
         private var rotationJob: Job? = null
         
+        // Lock for thread-safety during bitmap operations
+        private val bitmapLock = Any()
+        
         private val deadZoneThreshold = 0.2f // Ignore very small tremors
         private var lastSensorDrawTime = 0L
         private val sensorThrottleMs = 50L // Aggressive throttling (~20fps) to save power
@@ -138,6 +141,9 @@ class MultiWallpaperLiveService : WallpaperService() {
             strokeWidth = 4f
             isAntiAlias = true 
         }
+
+        // Persistent Face Detector to avoid reloading models (saves massive RAM/CPU)
+        private var faceDetector: com.google.mlkit.vision.face.FaceDetector? = null
 
         private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             updateSettings()
@@ -280,6 +286,8 @@ class MultiWallpaperLiveService : WallpaperService() {
             val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
             prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
             unregisterSensor()
+            faceDetector?.close()
+            faceDetector = null
             recycleBitmaps()
         }
 
@@ -326,13 +334,27 @@ class MultiWallpaperLiveService : WallpaperService() {
                 scheduleRotation()
                 requestDraw()
             } else {
+                // NUCLEAR CLEANUP: Stop all active background processes immediately
+                mainLoadJob?.cancel()
+                backgroundRefreshJob?.cancel()
+                preloadJob?.cancel()
+                rotationJob?.cancel()
+                
                 isDrawScheduled = false
                 handler.removeCallbacks(drawRunnable)
-                // We KEEP rotationRunnable so it can change wallpapers in background
+                
+                // Clear high-RAM transient bitmaps
+                nextBitmap?.recycle(); nextBitmap = null
+                preloadedBitmap?.recycle(); preloadedBitmap = null
+                
+                // Unregister sensor to stop redraw loops
                 unregisterSensor()
+                
                 // Also cancel any ongoing transitions to stop power usage
                 isTransitioning = false
-                nextBitmap = null
+                
+                // Force memory reclamation
+                System.gc()
             }
         }
 
@@ -391,7 +413,8 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private suspend fun getSingleRandomUri(): String? {
             return try {
-                val db = AppDatabase.getDatabase(this@MultiWallpaperLiveService)
+                // Use the application-wide database instance to avoid connection leaks
+                val db = AppDatabase.getDatabase(applicationContext)
                 val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
                 val useFavorites = prefs.getBoolean("use_favorites_only", false)
                 
@@ -401,7 +424,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                 if (total <= 0) return null
                 
                 var finalUri: String? = null
-                // Try to find one not in recent history
+                // Try to find one not in recent history (fair randomness)
                 repeat(5) {
                     val randomIndex = Random.nextInt(total)
                     val candidate = if (useFavorites) db.favoriteDao().getUriAtPosition(randomIndex)
@@ -419,61 +442,75 @@ class MultiWallpaperLiveService : WallpaperService() {
                 finalUri?.let {
                     recentHistory.add(it)
                     if (recentHistory.size > MAX_HISTORY) {
-                        val itArr = recentHistory.iterator()
-                        if (itArr.hasNext()) {
-                            itArr.next()
-                            itArr.remove()
+                        val iterator = recentHistory.iterator()
+                        if (iterator.hasNext()) {
+                            iterator.next()
+                            iterator.remove()
                         }
                     }
                 }
                 finalUri
-            } catch (e: Exception) { null }
+            } catch (e: Exception) { 
+                Log.e("MultiWallpaper", "Database error in getSingleRandomUri", e)
+                null 
+            }
         }
 
         private fun rotateWallpapers() {
-            if (isTransitioning) return // Avoid overlapping transitions
+            synchronized(bitmapLock) {
+                if (isTransitioning) return // Avoid overlapping transitions
 
-            if (transitionType == "fade" && pageBitmaps.isNotEmpty()) {
-                // Tighter timing mapping for better feel
-                transitionDuration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L)
-                
-                if (preloadedBitmap != null) {
-                    if (visible) {
-                        nextBitmap?.recycle()
-                        nextBitmap = preloadedBitmap
-                        nextFocalPoint = preloadedFocalPoint
-                        if (preloadedUri != null) pageUris[manualPageIndex] = preloadedUri!!
-                        
-                        preloadedBitmap = null
-                        preloadedUri = null
-                        preloadedFocalPoint = null
-                        
-                        startFade()
+                if (transitionType == "fade" && pageBitmaps.isNotEmpty()) {
+                    // Tighter timing mapping for better feel
+                    transitionDuration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L)
+                    
+                    if (preloadedBitmap != null) {
+                        if (visible) {
+                            nextBitmap?.recycle()
+                            nextBitmap = preloadedBitmap
+                            nextFocalPoint = preloadedFocalPoint
+                            if (preloadedUri != null) pageUris[manualPageIndex] = preloadedUri!!
+                            
+                            preloadedBitmap = null
+                            preloadedUri = null
+                            preloadedFocalPoint = null
+                            
+                            startFade()
+                        } else {
+                            // SCREEN OFF: Respect timer, but swap instantly to free memory
+                            val old = pageBitmaps[manualPageIndex]
+                            pageBitmaps[manualPageIndex] = preloadedBitmap!!
+                            pageFocalPoints[manualPageIndex] = preloadedFocalPoint
+                            if (preloadedUri != null) pageUris[manualPageIndex] = preloadedUri!!
+                            
+                            if (old != preloadedBitmap) old?.recycle()
+                            
+                            preloadedBitmap = null
+                            preloadedUri = null
+                            preloadedFocalPoint = null
+                            
+                            // CLEANUP: Ensure no hidden indices exist beyond detectedPages
+                            val keysToRemove = pageBitmaps.keys.filter { it >= detectedPages }
+                            keysToRemove.forEach { k ->
+                                pageBitmaps[k]?.recycle()
+                                pageBitmaps.remove(k)
+                                pageUris.remove(k)
+                                pageFocalPoints.remove(k)
+                            }
+                            
+                            scheduleRotation()
+                            preloadNextWallpaper()
+                            System.gc()
+                        }
                     } else {
-                        // SCREEN OFF: Respect timer, but swap instantly to free memory
-                        val old = pageBitmaps[manualPageIndex]
-                        pageBitmaps[manualPageIndex] = preloadedBitmap!!
-                        pageFocalPoints[manualPageIndex] = preloadedFocalPoint
-                        if (preloadedUri != null) pageUris[manualPageIndex] = preloadedUri!!
-                        
-                        if (old != preloadedBitmap) old?.recycle()
-                        
-                        preloadedBitmap = null
-                        preloadedUri = null
-                        preloadedFocalPoint = null
-                        
-                        scheduleRotation()
-                        preloadNextWallpaper()
-                        System.gc()
+                        startFadeRotation()
                     }
+                    
+                    // Silently refresh other pages to keep them fresh
+                    refreshOtherPages()
                 } else {
-                    startFadeRotation()
+                    loadWallpapersForPages()
                 }
-                
-                // Silently refresh other pages to keep them fresh
-                refreshOtherPages()
-            } else {
-                loadWallpapersForPages()
             }
         }
 
@@ -688,22 +725,24 @@ class MultiWallpaperLiveService : WallpaperService() {
                     val firstFocal = if (firstBitmap != null && smartCropEnabled) detectFaceFocalPoint(firstBitmap) else null
                     
                     withContext(Dispatchers.Main) {
-                        // CRITICAL: Clear stale data immediately after first bitmap is ready
-                        // This prevents showing old wallpapers on other pages during transitions
-                        pageBitmaps.forEach { (idx, bitmap) -> if (idx != manualPageIndex) bitmap.recycle() }
-                        val currentBitmap = pageBitmaps[manualPageIndex]
-                        pageBitmaps.clear()
-                        pageUris.clear()
-                        pageFocalPoints.clear()
-                        
-                        if (firstBitmap != null) {
-                            pageBitmaps[manualPageIndex] = firstBitmap
-                            pageUris[manualPageIndex] = visibleUri
-                            pageFocalPoints[manualPageIndex] = firstFocal
-                            if (currentBitmap != firstBitmap) currentBitmap?.recycle()
+                        synchronized(bitmapLock) {
+                            // CRITICAL: Clear stale data immediately after first bitmap is ready
+                            // This prevents showing old wallpapers on other pages during transitions
+                            pageBitmaps.forEach { (idx, bitmap) -> if (idx != manualPageIndex) bitmap.recycle() }
+                            val currentBitmap = pageBitmaps[manualPageIndex]
+                            pageBitmaps.clear()
+                            pageUris.clear()
+                            pageFocalPoints.clear()
+                            
+                            if (firstBitmap != null) {
+                                pageBitmaps[manualPageIndex] = firstBitmap
+                                pageUris[manualPageIndex] = visibleUri
+                                pageFocalPoints[manualPageIndex] = firstFocal
+                                if (currentBitmap != firstBitmap) currentBitmap?.recycle()
+                            }
+                            isLoading = false
+                            requestDraw()
                         }
-                        isLoading = false
-                        requestDraw()
                     }
 
                     if (!isActive) return@launch
@@ -720,12 +759,14 @@ class MultiWallpaperLiveService : WallpaperService() {
                             if (!isActive) { b.recycle(); return@launch }
                             val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
                             withContext(Dispatchers.Main) {
-                                val old = pageBitmaps[p]
-                                pageBitmaps[p] = b
-                                pageUris[p] = uri
-                                pageFocalPoints[p] = focal
-                                old?.recycle()
-                                requestDraw()
+                                synchronized(bitmapLock) {
+                                    val old = pageBitmaps[p]
+                                    pageBitmaps[p] = b
+                                    pageUris[p] = uri
+                                    pageFocalPoints[p] = focal
+                                    old?.recycle()
+                                    requestDraw()
+                                }
                             }
                         }
                         delay(100) // yield
@@ -759,14 +800,18 @@ class MultiWallpaperLiveService : WallpaperService() {
                 bitmap
             }
 
-            val options = FaceDetectorOptions.Builder()
-                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-                .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
-                .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
-                .setMinFaceSize(0.05f) // 2x more sensitive for small or distant faces
-                .enableTracking()      // Helps robustness for angled/profile faces
-                .build()
-            val detector = FaceDetection.getClient(options)
+            // Reuse or initialize the detector ONCE
+            if (faceDetector == null) {
+                val options = FaceDetectorOptions.Builder()
+                    .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                    .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
+                    .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+                    .setMinFaceSize(0.1f) // Slightly higher for reliability
+                    .build()
+                faceDetector = FaceDetection.getClient(options)
+            }
+            
+            val detector = faceDetector ?: return null
 
             return try {
                 val image = InputImage.fromBitmap(detectionBitmap, 0)
@@ -792,8 +837,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             } catch (e: Exception) { 
                 null 
             } finally {
-                // CRITICAL: Always release native memory
-                detector.close()
+                // CRITICAL: Recycle the proxy bitmap, but KEEP the detector open for reuse
                 if (detectionBitmap != bitmap) detectionBitmap.recycle()
             }
         }
@@ -871,10 +915,26 @@ class MultiWallpaperLiveService : WallpaperService() {
             val holder = surfaceHolder ?: return
             var canvas: Canvas? = null
             try {
-                canvas = holder.lockCanvas()
-                if (canvas != null) drawCanvas(canvas)
+                // STRENGTHENED CANVAS LOCKING
+                canvas = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    holder.lockHardwareCanvas()
+                } else {
+                    holder.lockCanvas()
+                }
+                
+                if (canvas != null) {
+                    drawCanvas(canvas)
+                }
+            } catch (e: Exception) {
+                Log.e("MultiWallpaper", "Canvas lock error: ${e.message}")
             } finally {
-                if (canvas != null) holder.unlockCanvasAndPost(canvas)
+                if (canvas != null) {
+                    try {
+                        holder.unlockCanvasAndPost(canvas)
+                    } catch (e: Exception) {
+                        Log.e("MultiWallpaper", "Canvas unlock error: ${e.message}")
+                    }
+                }
             }
         }
 
@@ -891,13 +951,15 @@ class MultiWallpaperLiveService : WallpaperService() {
             val radius = 40f
             
             // Calculate rotation based on time (360 degrees per second)
-            val angle = (System.currentTimeMillis() % 1000) / 1000f * 360f
+            val now = System.currentTimeMillis()
+            val angle = (now % 1000) / 1000f * 360f
             
             loadingRect.set(centerX - radius, centerY - radius, centerX + radius, centerY + radius)
             canvas.drawArc(loadingRect, angle, 270f, false, loadingCirclePaint)
             
-            // Keep requesting draw while in loading state to animate the circle
-            requestDraw()
+            // THROTTELED REDRAW: Limit loading animation to ~30 FPS to save CPU and RAM for cleanup
+            handler.removeCallbacks(drawRunnable)
+            handler.postDelayed(drawRunnable, 33)
         }
 
         private fun drawCanvas(canvas: Canvas) {
