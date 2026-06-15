@@ -213,7 +213,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
             accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
-            val db = AppDatabase.getDatabase(this@MultiWallpaperLiveService)
+            val db = AppDatabase.getDatabase(applicationContext)
             engineScope.launch {
                 db.folderDao().getAllFolders().collectLatest {
                     loadWallpapersForPages()
@@ -781,7 +781,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun getAllAvailableUris(): List<String> {
-            val db = AppDatabase.getDatabase(this@MultiWallpaperLiveService)
+            val db = AppDatabase.getDatabase(applicationContext)
             val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
             
             return if (prefs.getBoolean("use_favorites_only", false)) {
@@ -795,16 +795,30 @@ class MultiWallpaperLiveService : WallpaperService() {
         private fun loadWallpapersForPages() {
             mainLoadJob?.cancel()
             backgroundRefreshJob?.cancel()
+            
+            // Set loading state on main thread before starting the background work
+            synchronized(bitmapLock) {
+                if (pageBitmaps.isEmpty()) {
+                    isLoading = true
+                    requestDraw()
+                }
+            }
+
             mainLoadJob = engineScope.launch(Dispatchers.IO) {
                 try {
                     val allUris = getAllAvailableUris()
                     if (allUris.isEmpty()) {
-                        withContext(Dispatchers.Main) { recycleBitmaps(); isLoading = false; requestDraw() }
+                        withContext(Dispatchers.Main) { 
+                            synchronized(bitmapLock) {
+                                recycleBitmaps()
+                                isLoading = false
+                                requestDraw()
+                            }
+                        }
                         return@launch
                     }
 
                     if (!isActive) return@launch
-                    withContext(Dispatchers.Main) { if (pageBitmaps.isEmpty()) { isLoading = true; requestDraw() } }
 
                     val random = Random(System.currentTimeMillis())
                     val shuffledUris = allUris.shuffled(random)
@@ -813,6 +827,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                     val visibleIdx = manualPageIndex.coerceIn(0, shuffledUris.size - 1)
                     val visibleUri = shuffledUris[visibleIdx]
                     val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight)
+                    
                     if (!isActive) { firstBitmap?.recycle(); return@launch }
                     
                     val firstFocal = if (firstBitmap != null && smartCropEnabled) detectFaceFocalPoint(firstBitmap) else null
@@ -820,7 +835,6 @@ class MultiWallpaperLiveService : WallpaperService() {
                     withContext(Dispatchers.Main) {
                         synchronized(bitmapLock) {
                             // CRITICAL: Clear stale data immediately after first bitmap is ready
-                            // This prevents showing old wallpapers on other pages during transitions
                             pageBitmaps.forEach { (idx, bitmap) -> if (idx != manualPageIndex) bitmap.recycle() }
                             val currentBitmap = pageBitmaps[manualPageIndex]
                             pageBitmaps.clear()
@@ -871,7 +885,16 @@ class MultiWallpaperLiveService : WallpaperService() {
                             preloadNextWallpaper()
                         }
                     }
-                } catch (e: Exception) { withContext(Dispatchers.Main) { isLoading = false } }
+                } catch (t: Throwable) { 
+                    Log.e("MultiWallpaper", "Loading failed", t)
+                } finally {
+                    withContext(Dispatchers.Main) {
+                        synchronized(bitmapLock) {
+                            isLoading = false
+                            requestDraw()
+                        }
+                    }
+                }
             }
         }
 
@@ -909,11 +932,14 @@ class MultiWallpaperLiveService : WallpaperService() {
             return try {
                 val image = InputImage.fromBitmap(detectionBitmap, 0)
                 
-                val faces = suspendCancellableCoroutine<List<com.google.mlkit.vision.face.Face>> { cont ->
-                    detector.process(image)
-                        .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
-                        .addOnFailureListener { if (cont.isActive) cont.resume(emptyList()) }
-                }
+                // Add timeout to prevent infinite loading if ML Kit is waiting for downloads
+                val faces = withTimeoutOrNull(5000L) {
+                    suspendCancellableCoroutine<List<com.google.mlkit.vision.face.Face>> { cont ->
+                        detector.process(image)
+                            .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
+                            .addOnFailureListener { if (cont.isActive) cont.resume(emptyList()) }
+                    }
+                } ?: emptyList()
                 
                 if (faces.isNotEmpty()) {
                     val mainFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }!!
