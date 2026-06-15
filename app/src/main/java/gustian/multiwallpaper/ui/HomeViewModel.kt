@@ -135,6 +135,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isCheckingUpdate = MutableStateFlow(false)
     val isCheckingUpdate = _isCheckingUpdate.asStateFlow()
+
+    private val _updateMessage = MutableStateFlow<String?>(null)
+    val updateMessage = _updateMessage.asStateFlow()
     
     private var scanJob: Job? = null
 
@@ -430,6 +433,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun checkForUpdates() {
         viewModelScope.launch(Dispatchers.IO) {
             _isCheckingUpdate.value = true
+            _updateMessage.value = null
             try {
                 val url = java.net.URL("https://api.github.com/repos/Genesfi/multiwallpaper/releases/latest")
                 val connection = url.openConnection() as java.net.HttpURLConnection
@@ -443,12 +447,26 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     val body = json.getString("body")
                     val htmlUrl = json.getString("html_url")
                     
+                    val currentVersion = "v1.1.0" // Standardize with 'v' prefix for comparison
+                    val latestVersion = if (tagName.startsWith("v")) tagName else "v$tagName"
+
                     withContext(Dispatchers.Main) {
-                        _latestVersionInfo.value = UpdateInfo(tagName, body, htmlUrl)
+                        if (currentVersion.equals(latestVersion, ignoreCase = true)) {
+                            _updateMessage.value = "Your version is up to date ($currentVersion)"
+                        } else {
+                            _latestVersionInfo.value = UpdateInfo(tagName, body, htmlUrl)
+                        }
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        _updateMessage.value = "Unable to check updates (Server error)"
                     }
                 }
             } catch (e: Exception) {
                 Log.e("HomeViewModel", "Failed to check for updates", e)
+                withContext(Dispatchers.Main) {
+                    _updateMessage.value = "Network error: ${e.message}"
+                }
             } finally {
                 _isCheckingUpdate.value = false
             }
@@ -457,6 +475,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissUpdateDialog() {
         _latestVersionInfo.value = null
+        _updateMessage.value = null
     }
 
     fun blacklistCurrentUri(uri: String, folderUri: String, displayName: String) {

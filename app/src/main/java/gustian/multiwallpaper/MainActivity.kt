@@ -115,6 +115,7 @@ fun MainLayout() {
     val gallerySearchQuery by viewModel.gallerySearchQuery.collectAsState()
     val isLoadingPreset by viewModel.isLoadingPreset.collectAsState()
     val latestVersionInfo by viewModel.latestVersionInfo.collectAsState()
+    val updateMessage by viewModel.updateMessage.collectAsState()
     val context = LocalContext.current
 
     Scaffold(
@@ -265,6 +266,21 @@ fun MainLayout() {
                     dismissButton = {
                         TextButton(onClick = { viewModel.dismissUpdateDialog() }) {
                             Text("Later")
+                        }
+                    },
+                    shape = RoundedCornerShape(16.dp)
+                )
+            }
+
+            // Up-to-date or Info Dialog
+            updateMessage?.let { msg ->
+                AlertDialog(
+                    onDismissRequest = { viewModel.dismissUpdateDialog() },
+                    title = { Text("Update Check") },
+                    text = { Text(msg) },
+                    confirmButton = {
+                        TextButton(onClick = { viewModel.dismissUpdateDialog() }) {
+                            Text("OK")
                         }
                     },
                     shape = RoundedCornerShape(16.dp)
@@ -810,6 +826,7 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     val subjectFocusSmoothing by viewModel.subjectFocusSmoothing.collectAsState()
     val latestVersionInfo by viewModel.latestVersionInfo.collectAsState()
     val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
+    val updateMessage by viewModel.updateMessage.collectAsState()
     
     var unit by remember { mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") }
     val displayValue = remember(totalSeconds, unit) {
