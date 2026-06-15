@@ -35,6 +35,12 @@ interface FavoriteDao {
     @Query("SELECT * FROM favorites")
     fun getAllFavoritesSync(): List<FavoriteImageEntity>
 
+    @Query("SELECT COUNT(*) FROM favorites")
+    suspend fun getFavoriteCount(): Int
+
+    @Query("SELECT uriString FROM favorites LIMIT 1 OFFSET :position")
+    suspend fun getUriAtPosition(position: Int): String?
+
     @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE uriString = :uriString)")
     suspend fun isFavoriteSync(uriString: String): Boolean
 
@@ -67,6 +73,12 @@ interface ScannedImageDao {
 
     @Query("SELECT * FROM scanned_images")
     fun getAllImagesSync(): List<ScannedImageEntity>
+
+    @Query("SELECT COUNT(*) FROM scanned_images")
+    suspend fun getImageCount(): Int
+
+    @Query("SELECT uriString FROM scanned_images LIMIT 1 OFFSET :position")
+    suspend fun getUriAtPosition(position: Int): String?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertImages(images: List<ScannedImageEntity>)
