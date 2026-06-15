@@ -447,14 +447,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     val body = json.getString("body")
                     val htmlUrl = json.getString("html_url")
                     
-                    // Normalize versions by removing non-numeric characters except dots
-                    fun normalize(v: String): String = v.lowercase().replace(Regex("[^0-9.]"), "").trim('.')
+                    // Normalize versions by removing EVERYTHING except numbers and dots
+                    // This makes "v.1.1.0", "v1.1.0", and "1.1.0" all become "1.1.0"
+                    fun normalize(v: String): String = v.replace(Regex("[^0-9.]"), "").trim('.')
                     
                     val currentVersion = normalize(gustian.multiwallpaper.BuildConfig.VERSION_NAME)
-                    val latestVersion = normalize(tagName)
+                    val latestVersionFromGit = normalize(tagName)
 
                     withContext(Dispatchers.Main) {
-                        if (currentVersion == latestVersion) {
+                        if (currentVersion == latestVersionFromGit) {
                             _updateMessage.value = "Your version is up to date (v${gustian.multiwallpaper.BuildConfig.VERSION_NAME})"
                         } else {
                             _latestVersionInfo.value = UpdateInfo(tagName, body, htmlUrl)
