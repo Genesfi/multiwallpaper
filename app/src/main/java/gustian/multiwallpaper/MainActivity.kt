@@ -114,6 +114,7 @@ fun MainLayout() {
     val selectedGalleryFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
     val gallerySearchQuery by viewModel.gallerySearchQuery.collectAsState()
     val isLoadingPreset by viewModel.isLoadingPreset.collectAsState()
+    val latestVersionInfo by viewModel.latestVersionInfo.collectAsState()
     val context = LocalContext.current
 
     Scaffold(
@@ -136,6 +137,7 @@ fun MainLayout() {
                     if (currentTab == NavigationTab.FOLDERS && selectedFolderIds.isNotEmpty()) {
                         IconButton(onClick = { viewModel.deleteSelectedFolders() }) { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
                     } else if (currentTab == NavigationTab.GALLERY && selectedGalleryUris.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.blacklistSelectedImages() }) { Icon(Icons.Default.Block, null, tint = MaterialTheme.colorScheme.error) }
                         IconButton(onClick = { viewModel.addSelectedToFavorites() }) { Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308)) }
                     } else if (currentTab == NavigationTab.GALLERY && selectedGalleryFolderUris.isNotEmpty()) {
                         IconButton(onClick = { viewModel.toggleFavoriteSelectedFolders() }) { Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308)) }
@@ -231,9 +233,7 @@ fun MainLayout() {
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                     ) {
                         Column(
-                            modifier = Modifier.padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
+                                     ) {
                             CircularProgressIndicator()
                             Spacer(modifier = Modifier.height(16.dp))
                             Text("Switching Preset...", fontWeight = FontWeight.Medium)
@@ -241,6 +241,34 @@ fun MainLayout() {
                         }
                     }
                 }
+            }
+
+            // Update Available Dialog
+            latestVersionInfo?.let { info ->
+                AlertDialog(
+                    onDismissRequest = { viewModel.dismissUpdateDialog() },
+                    title = { Text("What's New in ${info.tagName}") },
+                    text = { 
+                        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                            Text(info.changelog, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    },
+                    confirmButton = {
+                        val currentContext = LocalContext.current
+                        Button(onClick = { 
+                            currentContext.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.downloadUrl)))
+                            viewModel.dismissUpdateDialog()
+                        }) {
+                            Text("Download Update")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { viewModel.dismissUpdateDialog() }) {
+                            Text("Later")
+                        }
+                    },
+                    shape = RoundedCornerShape(16.dp)
+                )
             }
         }
     }
@@ -576,6 +604,7 @@ fun PresetManagerDialog(
 @Composable
 fun GalleryScreen(viewModel: HomeViewModel) {
     val images by viewModel.scannedImages.collectAsState()
+    val blacklisted by viewModel.blacklisted.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
     val selectedUris by viewModel.selectedGalleryUris.collectAsState()
     val selectedFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
@@ -611,9 +640,35 @@ fun GalleryScreen(viewModel: HomeViewModel) {
     }
     
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
+    var showBlacklistSection by remember { mutableStateOf(false) }
     
     Column(modifier = Modifier.fillMaxSize()) {
         if (isScanning) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+
+        // Header for toggling Blacklist view
+        if (blacklisted.isNotEmpty()) {
+            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Blacklisted Images (${blacklisted.size})", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.weight(1f))
+                TextButton(onClick = { showBlacklistSection = !showBlacklistSection }) {
+                    Text(if (showBlacklistSection) "Hide" else "Show")
+                }
+            }
+            if (showBlacklistSection) {
+                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(100.dp)) {
+                    items(blacklisted, key = { it.uriString }) { item ->
+                        Box(modifier = Modifier.width(80.dp).fillMaxHeight().clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.errorContainer)) {
+                            AsyncImage(model = Uri.parse(item.uriString), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(0.6f), contentScale = ContentScale.Crop)
+                            IconButton(onClick = { viewModel.restoreBlacklistedImage(item) }, modifier = Modifier.align(Alignment.Center)) {
+                                Icon(Icons.Default.RestoreFromTrash, null, tint = MaterialTheme.colorScheme.onErrorContainer)
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            }
+        }
+
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             grouped.forEach { (uri, imgs) ->
                 val isExp = expanded[uri] ?: false
@@ -689,7 +744,11 @@ fun GalleryScreen(viewModel: HomeViewModel) {
             images = activeImgs,
             initialIndex = activeIndex,
             onDismiss = { selectedImgUri = null },
-            onToggleFavorite = { viewModel.toggleFavorite(it) }
+            onToggleFavorite = { viewModel.toggleFavorite(it) },
+            onBlacklist = { img ->
+                viewModel.blacklistCurrentUri(img.uriString, img.folderUriString, img.displayName)
+                selectedImgUri = null
+            }
         )
     }
 }
@@ -718,7 +777,11 @@ fun FavoritesScreen(viewModel: HomeViewModel) {
             images = favImgs,
             initialIndex = selectedFavIndex,
             onDismiss = { selectedFavIndex = -1 },
-            onToggleFavorite = { viewModel.toggleFavorite(it) }
+            onToggleFavorite = { viewModel.toggleFavorite(it) },
+            onBlacklist = { img ->
+                viewModel.blacklistCurrentUri(img.uriString, img.folderUriString, img.displayName)
+                selectedFavIndex = -1
+            }
         )
     }
 }
@@ -739,6 +802,14 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     val aiZoomSlack by viewModel.aiZoomSlack.collectAsState()
     val aiSensitivityX by viewModel.aiSensitivityX.collectAsState()
     val aiSensitivityY by viewModel.aiSensitivityY.collectAsState()
+    val blurRadius by viewModel.blurRadius.collectAsState()
+    val dimIntensity by viewModel.dimIntensity.collectAsState()
+    val blurEnabled by viewModel.blurEnabled.collectAsState()
+    val dimEnabled by viewModel.dimEnabled.collectAsState()
+    val subjectFocusEnabled by viewModel.subjectFocusEnabled.collectAsState()
+    val subjectFocusSmoothing by viewModel.subjectFocusSmoothing.collectAsState()
+    val latestVersionInfo by viewModel.latestVersionInfo.collectAsState()
+    val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
     
     var unit by remember { mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") }
     val displayValue = remember(totalSeconds, unit) {
@@ -866,6 +937,95 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         }
 
         Spacer(modifier = Modifier.height(24.dp))
+        Text("VISUAL EFFECTS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // --- Visual Group ---
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                SettingRow(
+                    title = "AI Subject Focus",
+                    subtitle = "Effects follow the subject's face",
+                    checked = subjectFocusEnabled,
+                    onCheckedChange = { viewModel.setSubjectFocusEnabled(it) }
+                )
+                
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                SettingRow(
+                    title = "Enable Dimming",
+                    subtitle = if (subjectFocusEnabled) "Vignette spotlight on face" else "Full screen darkening",
+                    checked = dimEnabled,
+                    onCheckedChange = { viewModel.setDimEnabled(it) }
+                )
+                
+                if (dimEnabled) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Dim Intensity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Slider(
+                        value = dimIntensity,
+                        onValueChange = { viewModel.setDimIntensity(it) },
+                        valueRange = 0f..1.0f
+                    )
+                    Text("${(dimIntensity * 100).toInt()}% Intensity", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                }
+
+                if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    SettingRow(
+                        title = "Enable Blur",
+                        subtitle = if (subjectFocusEnabled) "Portrait bokeh (sharp face)" else "Full screen blur",
+                        checked = blurEnabled,
+                        onCheckedChange = { viewModel.setBlurEnabled(it) }
+                    )
+                    
+                    if (blurEnabled) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Blur Intensity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Slider(
+                            value = blurRadius,
+                            onValueChange = { viewModel.setBlurRadius(it) },
+                            valueRange = 0f..100f
+                        )
+                        Text("${blurRadius.toInt()}px Radius", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                    }
+                }
+
+                if (subjectFocusEnabled) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Text("Focus Smoothing", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Slider(
+                        value = subjectFocusSmoothing,
+                        onValueChange = { viewModel.setSubjectFocusSmoothing(it) },
+                        valueRange = 0.1f..0.9f
+                    )
+                    Text("${(subjectFocusSmoothing * 100).toInt()}% Softness", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+        Text("GESTURE GUIDE", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.2f))
+        ) {
+            Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.DeleteSweep, null, tint = MaterialTheme.colorScheme.tertiary)
+                Spacer(modifier = Modifier.width(16.dp))
+                Column {
+                    Text("Instant Blacklist", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                    Text("Double Tap & Hold for 1s on Home Screen to remove current wallpaper from rotation.", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
         Text("TIMING & EFFECTS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
         
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 12.dp)) {
@@ -978,8 +1138,54 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
         Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Multi Wallpaper Live", fontWeight = FontWeight.Bold)
-                Text("Version 1.0.0", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Version 1.1.0", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(modifier = Modifier.height(8.dp))
+                
+                Button(
+                    onClick = { viewModel.checkForUpdates() },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    enabled = !isCheckingUpdate,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                ) {
+                    if (isCheckingUpdate) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Default.Update, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Check for Update", fontSize = 12.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                var showHistoryDialog by remember { mutableStateOf(false) }
+                Text(
+                    "Release History", 
+                    color = MaterialTheme.colorScheme.primary, 
+                    fontSize = 12.sp, 
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clickable { showHistoryDialog = true }
+                )
+                
+                if (showHistoryDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showHistoryDialog = false },
+                        title = { Text("Release History") },
+                        text = {
+                            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                HistoryItem("v1.1.0", "• Blacklist System (Gesture & Gallery)\n• AI Portrait Mode (Background Blur)\n• GitHub Update Sync\n• Focus Smoothing Control")
+                                Spacer(modifier = Modifier.height(12.dp))
+                                HistoryItem("v1.0.1", "• Critical Memory Leak Fix\n• AI 480px Downscaling Optimization\n• Scalable Database Indexing\n• Hardware Canvas Acceleration")
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { showHistoryDialog = false }) { Text("Close") }
+                        },
+                        shape = RoundedCornerShape(16.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
                 Text("Developer: Migi Gustian", style = MaterialTheme.typography.bodyMedium)
                 val context = LocalContext.current
                 Text("GitHub: Genesfi/multiwallpaper", color = MaterialTheme.colorScheme.primary, modifier = Modifier.clickable { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Genesfi/multiwallpaper"))) })
@@ -1013,11 +1219,20 @@ fun SettingRow(title: String, subtitle: String? = null, checked: Boolean, onChec
 }
 
 @Composable
+fun HistoryItem(version: String, details: String) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Text(version, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontSize = 14.sp)
+        Text(details, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp)
+    }
+}
+
+@Composable
 fun ImageDetailDialog(
     images: List<WallpaperImg>,
     initialIndex: Int,
     onDismiss: () -> Unit,
-    onToggleFavorite: (WallpaperImg) -> Unit
+    onToggleFavorite: (WallpaperImg) -> Unit,
+    onBlacklist: (WallpaperImg) -> Unit
 ) {
     val context = LocalContext.current
     var currentIndex by remember { mutableIntStateOf(initialIndex) }
@@ -1269,6 +1484,21 @@ fun ImageDetailDialog(
                             fontSize = 12.sp,
                             maxLines = 1,
                             softWrap = false
+                        )
+                    }
+
+                    // Blacklist Button
+                    IconButton(
+                        onClick = { onBlacklist(img) },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(MaterialTheme.colorScheme.error.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
+                    ) {
+                        Icon(
+                            Icons.Default.Block,
+                            null,
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.error
                         )
                     }
                 }

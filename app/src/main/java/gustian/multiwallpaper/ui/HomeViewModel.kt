@@ -26,6 +26,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val favoriteDao = db.favoriteDao()
     private val presetDao = db.presetDao()
     private val scannedImageDao = db.scannedImageDao()
+    private val blacklistedDao = db.blacklistedDao()
 
     val prefs = application.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
 
@@ -36,6 +37,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val presets: StateFlow<List<PresetEntity>> = presetDao.getAllPresets()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val blacklisted: StateFlow<List<BlacklistedImageEntity>> = blacklistedDao.getAllBlacklisted()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _scannedImages = MutableStateFlow<List<WallpaperImg>>(emptyList())
@@ -107,6 +111,30 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isLoadingPreset = MutableStateFlow(false)
     val isLoadingPreset = _isLoadingPreset.asStateFlow()
+
+    private val _blurRadius = MutableStateFlow(prefs.getFloat("blur_radius", 0f))
+    val blurRadius = _blurRadius.asStateFlow()
+
+    private val _dimIntensity = MutableStateFlow(prefs.getFloat("dim_intensity", 0f))
+    val dimIntensity = _dimIntensity.asStateFlow()
+
+    private val _blurEnabled = MutableStateFlow(prefs.getBoolean("blur_enabled", false))
+    val blurEnabled = _blurEnabled.asStateFlow()
+
+    private val _dimEnabled = MutableStateFlow(prefs.getBoolean("dim_enabled", false))
+    val dimEnabled = _dimEnabled.asStateFlow()
+
+    private val _subjectFocusEnabled = MutableStateFlow(prefs.getBoolean("subject_focus_enabled", false))
+    val subjectFocusEnabled = _subjectFocusEnabled.asStateFlow()
+
+    private val _subjectFocusSmoothing = MutableStateFlow(prefs.getFloat("subject_focus_smoothing", 0.5f))
+    val subjectFocusSmoothing = _subjectFocusSmoothing.asStateFlow()
+
+    private val _latestVersionInfo = MutableStateFlow<UpdateInfo?>(null)
+    val latestVersionInfo = _latestVersionInfo.asStateFlow()
+
+    private val _isCheckingUpdate = MutableStateFlow(false)
+    val isCheckingUpdate = _isCheckingUpdate.asStateFlow()
     
     private var scanJob: Job? = null
 
@@ -369,6 +397,108 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _aiSensitivityY.value = value
     }
 
+    fun setBlurRadius(value: Float) {
+        prefs.edit().putFloat("blur_radius", value).apply()
+        _blurRadius.value = value
+    }
+
+    fun setDimIntensity(value: Float) {
+        prefs.edit().putFloat("dim_intensity", value).apply()
+        _dimIntensity.value = value
+    }
+
+    fun setBlurEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("blur_enabled", enable).apply()
+        _blurEnabled.value = enable
+    }
+
+    fun setDimEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("dim_enabled", enable).apply()
+        _dimEnabled.value = enable
+    }
+
+    fun setSubjectFocusEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("subject_focus_enabled", enable).apply()
+        _subjectFocusEnabled.value = enable
+    }
+
+    fun setSubjectFocusSmoothing(value: Float) {
+        prefs.edit().putFloat("subject_focus_smoothing", value).apply()
+        _subjectFocusSmoothing.value = value
+    }
+
+    fun checkForUpdates() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _isCheckingUpdate.value = true
+            try {
+                val url = java.net.URL("https://api.github.com/repos/Genesfi/multiwallpaper/releases/latest")
+                val connection = url.openConnection() as java.net.HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("Accept", "application/vnd.github.v3+json")
+                
+                if (connection.responseCode == 200) {
+                    val response = connection.inputStream.bufferedReader().use { it.readText() }
+                    val json = org.json.JSONObject(response)
+                    val tagName = json.getString("tag_name")
+                    val body = json.getString("body")
+                    val htmlUrl = json.getString("html_url")
+                    
+                    withContext(Dispatchers.Main) {
+                        _latestVersionInfo.value = UpdateInfo(tagName, body, htmlUrl)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "Failed to check for updates", e)
+            } finally {
+                _isCheckingUpdate.value = false
+            }
+        }
+    }
+
+    fun dismissUpdateDialog() {
+        _latestVersionInfo.value = null
+    }
+
+    fun blacklistCurrentUri(uri: String, folderUri: String, displayName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            blacklistedDao.insertBlacklist(BlacklistedImageEntity(uri, folderUri, displayName))
+            favoriteDao.deleteFavoriteByUriSync(uri)
+            scannedImageDao.deleteImageByUriSync(uri)
+        }
+    }
+
+    fun blacklistSelectedImages() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val uris = _selectedGalleryUris.value
+            val images = _scannedImages.value.filter { uris.contains(it.uriString) }
+
+            images.forEach { img ->
+                blacklistedDao.insertBlacklist(
+                    BlacklistedImageEntity(
+                        uriString = img.uriString,
+                        folderUriString = img.folderUriString,
+                        displayName = img.displayName
+                    )
+                )
+                favoriteDao.deleteFavoriteByUriSync(img.uriString)
+                scannedImageDao.deleteImageByUriSync(img.uriString)
+            }
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(getApplication(), "${images.size} items blacklisted", Toast.LENGTH_SHORT).show()
+                clearGallerySelection()
+            }
+        }
+    }
+
+    fun restoreBlacklistedImage(entity: BlacklistedImageEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            blacklistedDao.deleteBlacklist(entity)
+            // Trigger a re-scan in background but don't force a heavy service reload immediately
+            scanFolders()
+        }
+    }
+
     suspend fun saveCurrentAsPresetSuspend(name: String) {
         val currentFolders = folders.value.map { it.uriString }
         // Fetch the ACTUAL current favorites from DB instead of relying on StateFlow which might be lagging
@@ -517,6 +647,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val foldersList = folders.value
         val tempImages = mutableListOf<WallpaperImg>()
         val favoriteUris = favoriteDao.getAllFavoritesSync().map { it.uriString }.toSet()
+        val blacklistedUris = blacklistedDao.getAllBlacklistedSync().map { it.uriString }.toSet()
 
         for (folder in foldersList) {
             yield()
@@ -524,9 +655,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 val uri = Uri.parse(folder.uriString)
                 if (uri.scheme == "file") {
                     val root = java.io.File(uri.path ?: "")
-                    if (root.exists() && root.isDirectory) scanRecursive(root, folder.uriString, tempImages, favoriteUris)
+                    if (root.exists() && root.isDirectory) scanRecursive(root, folder.uriString, tempImages, favoriteUris, blacklistedUris)
                 } else {
-                    scanSafRecursive(uri, folder.uriString, tempImages, favoriteUris)
+                    scanSafRecursive(uri, folder.uriString, tempImages, favoriteUris, blacklistedUris)
                 }
             } catch (e: Exception) {
                 Log.e("HomeViewModel", "Scan error", e)
@@ -705,21 +836,23 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun scanRecursive(file: java.io.File, rootUri: String, list: MutableList<WallpaperImg>, favoriteUris: Set<String>) {
+    private fun scanRecursive(file: java.io.File, rootUri: String, list: MutableList<WallpaperImg>, favoriteUris: Set<String>, blacklistedUris: Set<String>) {
         val files = file.listFiles()
         files?.forEach { f ->
             if (f.isFile && (f.name.endsWith(".jpg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true))) {
                 val fileUriStr = Uri.fromFile(f).toString()
-                // Use immediate parent as folderUriString for better search/grouping
-                val parentUriStr = Uri.fromFile(f.parentFile).toString()
-                list.add(WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr)))
+                if (!blacklistedUris.contains(fileUriStr)) {
+                    // Use immediate parent as folderUriString for better search/grouping
+                    val parentUriStr = Uri.fromFile(f.parentFile).toString()
+                    list.add(WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr)))
+                }
             } else if (f.isDirectory && !f.name.startsWith(".")) {
-                scanRecursive(f, rootUri, list, favoriteUris)
+                scanRecursive(f, rootUri, list, favoriteUris, blacklistedUris)
             }
         }
     }
 
-    private fun scanSafRecursive(treeUri: Uri, rootUriStr: String, list: MutableList<WallpaperImg>, favoriteUris: Set<String>) {
+    private fun scanSafRecursive(treeUri: Uri, rootUriStr: String, list: MutableList<WallpaperImg>, favoriteUris: Set<String>, blacklistedUris: Set<String>) {
         val folderQueue = java.util.ArrayDeque<Uri>()
         folderQueue.add(treeUri)
         while (folderQueue.isNotEmpty()) {
@@ -740,8 +873,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                 folderQueue.add(DocumentsContract.buildDocumentUriUsingTree(treeUri, docId))
                             } else if (mimeType.startsWith("image/")) {
                                 val childUriStr = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId).toString()
-                                // For SAF, the currentUri is the immediate parent
-                                list.add(WallpaperImg(childUriStr, currentUri.toString(), name, favoriteUris.contains(childUriStr)))
+                                if (!blacklistedUris.contains(childUriStr)) {
+                                    // For SAF, the currentUri is the immediate parent
+                                    list.add(WallpaperImg(childUriStr, currentUri.toString(), name, favoriteUris.contains(childUriStr)))
+                                }
                             }
                         }
                     }
@@ -763,4 +898,10 @@ data class FileItem(
     val uri: Uri,
     val isDirectory: Boolean,
     val previewUri: Uri? = null
+)
+
+data class UpdateInfo(
+    val tagName: String,
+    val changelog: String,
+    val downloadUrl: String
 )

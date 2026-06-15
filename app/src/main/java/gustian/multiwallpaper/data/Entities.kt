@@ -37,3 +37,11 @@ data class PresetEntity(
     val createdTime: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "blacklisted_images")
+data class BlacklistedImageEntity(
+    @PrimaryKey val uriString: String,
+    val folderUriString: String,
+    val displayName: String,
+    val addedTime: Long = System.currentTimeMillis()
+)
+

@@ -18,6 +18,7 @@ import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.animation.DecelerateInterpolator
 import gustian.multiwallpaper.data.AppDatabase
+import gustian.multiwallpaper.data.BlacklistedImageEntity
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -49,6 +50,48 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private var lastTapTime: Long = 0
         private val doubleTapThreshold = 500L
+        private var isLongPressing = false
+        private val longPressThreshold = 800L // 0.8s for blacklist
+        private val longPressRunnable = Runnable {
+            performBlacklist()
+        }
+
+        private fun performBlacklist() {
+            synchronized(bitmapLock) {
+                val currentUri = pageUris[manualPageIndex]
+                if (currentUri != null) {
+                    isLongPressing = true
+                    // Delete from DB in background
+                    val db = AppDatabase.getDatabase(applicationContext)
+                    engineScope.launch(Dispatchers.IO) {
+                        // Find data to move to blacklist
+                        val scanned = db.scannedImageDao().getAllImagesSync().find { it.uriString == currentUri }
+                        if (scanned != null) {
+                            db.blacklistedDao().insertBlacklist(
+                                BlacklistedImageEntity(
+                                    uriString = scanned.uriString,
+                                    folderUriString = scanned.folderUriString,
+                                    displayName = scanned.displayName
+                                )
+                            )
+                        }
+                        db.favoriteDao().deleteFavoriteByUriSync(currentUri)
+                        db.scannedImageDao().deleteImageByUriSync(currentUri)
+                        
+                        withContext(Dispatchers.Main) {
+                            // Visual feedback: brief red flash
+                            showBlacklistFeedback = true
+                            requestDraw()
+                            delay(150)
+                            showBlacklistFeedback = false
+                            rotateWallpapers() // Immediately change
+                        }
+                    }
+                }
+            }
+        }
+
+        private var showBlacklistFeedback = false
 
         private var isLoading = false
         private var surfaceWidth = 1080
@@ -105,6 +148,12 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var aiSensitivityY = 0.4f
         private var transitionType = "slide"
         private var fadeSpeed = 15
+        private var blurRadius = 0f
+        private var dimIntensity = 0f
+        private var blurEnabled = false
+        private var dimEnabled = false
+        private var subjectFocusEnabled = false
+        private var subjectFocusSmoothing = 0.5f
         private var useFavoritesOnly = false
         private var currentRoll = 0f
         private var currentPitch = 0f
@@ -142,8 +191,16 @@ class MultiWallpaperLiveService : WallpaperService() {
             isAntiAlias = true 
         }
 
+        private val vignettePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+        }
+
         // Persistent Face Detector to avoid reloading models (saves massive RAM/CPU)
         private var faceDetector: com.google.mlkit.vision.face.FaceDetector? = null
+
+        // RenderNode for high-performance visual effects (Blur/Dim) on Android 12+
+        private var visualEffectNode: android.graphics.RenderNode? = null
 
         private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             updateSettings()
@@ -185,6 +242,12 @@ class MultiWallpaperLiveService : WallpaperService() {
             val oldZoom = aiZoomSlack
             val oldSensX = aiSensitivityX
             val oldSensY = aiSensitivityY
+            val oldBlurEnabled = blurEnabled
+            val oldBlurRadius = blurRadius
+            val oldDimEnabled = dimEnabled
+            val oldDimIntensity = dimIntensity
+            val oldSubjectFocusEnabled = subjectFocusEnabled
+            val oldSubjectFocusSmoothing = subjectFocusSmoothing
             
             useFavoritesOnly = newUseFav
             parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
@@ -198,6 +261,12 @@ class MultiWallpaperLiveService : WallpaperService() {
             aiSensitivityY = prefs.getFloat("ai_sensitivity_y", 0.4f)
             transitionType = prefs.getString("transition_type", "slide") ?: "slide"
             fadeSpeed = prefs.getInt("fade_speed", 15)
+            blurRadius = prefs.getFloat("blur_radius", 0f)
+            dimIntensity = prefs.getFloat("dim_intensity", 0f)
+            blurEnabled = prefs.getBoolean("blur_enabled", false)
+            dimEnabled = prefs.getBoolean("dim_enabled", false)
+            subjectFocusEnabled = prefs.getBoolean("subject_focus_enabled", false)
+            subjectFocusSmoothing = prefs.getFloat("subject_focus_smoothing", 0.5f)
             
             if (useFavChanged || forceReload) {
                 loadWallpapersForPages()
@@ -205,7 +274,13 @@ class MultiWallpaperLiveService : WallpaperService() {
                        oldAiAdv != aiAdvancedEnabled || 
                        oldZoom != aiZoomSlack || 
                        oldSensX != aiSensitivityX || 
-                       oldSensY != aiSensitivityY) {
+                       oldSensY != aiSensitivityY ||
+                       oldBlurEnabled != blurEnabled ||
+                       oldBlurRadius != blurRadius ||
+                       oldDimEnabled != dimEnabled ||
+                       oldDimIntensity != dimIntensity ||
+                       oldSubjectFocusEnabled != subjectFocusEnabled ||
+                       oldSubjectFocusSmoothing != subjectFocusSmoothing) {
                 requestDraw()
             }
             
@@ -288,6 +363,10 @@ class MultiWallpaperLiveService : WallpaperService() {
             unregisterSensor()
             faceDetector?.close()
             faceDetector = null
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                visualEffectNode?.discardDisplayList()
+                visualEffectNode = null
+            }
             recycleBitmaps()
         }
 
@@ -299,8 +378,22 @@ class MultiWallpaperLiveService : WallpaperService() {
             when (event.action) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     lastX = event.x
+                    val currTime = System.currentTimeMillis()
+                    val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+                    val doubleTapEnabled = prefs.getBoolean("double_tap_enabled", true)
+                    
+                    // Start long press detection if this is potentially the 2nd tap of a double tap
+                    if (doubleTapEnabled && (currTime - lastTapTime) < doubleTapThreshold) {
+                        handler.postDelayed(longPressRunnable, longPressThreshold)
+                    }
                 }
                 android.view.MotionEvent.ACTION_UP -> {
+                    handler.removeCallbacks(longPressRunnable)
+                    if (isLongPressing) {
+                        isLongPressing = false
+                        return
+                    }
+
                     val currTime = System.currentTimeMillis()
                     val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
                     val doubleTapEnabled = prefs.getBoolean("double_tap_enabled", true)
@@ -979,6 +1072,124 @@ class MultiWallpaperLiveService : WallpaperService() {
             val maxIdx = (detectedPages - 1).coerceAtLeast(0)
             val idx = if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
 
+            // Focal point only used if AI Focus is enabled
+            val focal = if (smartCropEnabled && subjectFocusEnabled) pageFocalPoints[idx] else null
+
+            // MODERN VISUAL EFFECTS PIPELINE (Android 12+)
+            if (android.os.Build.VERSION.SDK_INT >= 31 && canvas.isHardwareAccelerated) {
+                try {
+                    if (visualEffectNode == null) {
+                        visualEffectNode = android.graphics.RenderNode("VisualEffects")
+                    }
+                    val node = visualEffectNode!!
+                    node.setPosition(0, 0, w, h)
+                    
+                    // Apply Blur to the Node (Global background blur)
+                    val actualBlur = if (blurEnabled) blurRadius else 0f
+                    if (actualBlur > 0f) {
+                        val method = node::class.java.getMethod("setRenderEffect", android.graphics.RenderEffect::class.java)
+                        method.invoke(node, android.graphics.RenderEffect.createBlurEffect(actualBlur, actualBlur, android.graphics.Shader.TileMode.CLAMP))
+                    } else {
+                        val method = node::class.java.getMethod("setRenderEffect", android.graphics.RenderEffect::class.java)
+                        method.invoke(node, null)
+                    }
+
+                    // Record drawing into the Node
+                    val recordingCanvas = node.beginRecording()
+                    drawWallpaperContent(recordingCanvas, w, h)
+                    
+                    // Apply Spotlight (Vignette) INSIDE the node if AI Focus is ON and focal is found
+                    if (subjectFocusEnabled && focal != null && dimEnabled && dimIntensity > 0f) {
+                        drawSubjectFocus(recordingCanvas, w.toFloat(), h.toFloat(), focal)
+                    }
+                    
+                    node.endRecording()
+
+                    // Draw the Node (Blurred background + Spotlight)
+                    canvas.drawRenderNode(node)
+                    
+                    // TRUE PORTRAIT MODE: Draw a SHARP subject on top of the blurred node
+                    // Only if AI Focus is ON, Blur is ON, and focal is found
+                    if (subjectFocusEnabled && focal != null && blurEnabled && blurRadius > 0f) {
+                        drawSharpSubject(canvas, w.toFloat(), h.toFloat(), focal)
+                    }
+                } catch (e: Exception) {
+                    Log.e("MultiWallpaper", "RenderNode Effects failed: ${e.message}")
+                    drawWallpaperContent(canvas, w, h)
+                }
+            } else {
+                // FALLBACK for older Android or non-HW canvas
+                drawWallpaperContent(canvas, w, h)
+                if (subjectFocusEnabled && focal != null) {
+                    if (dimEnabled && dimIntensity > 0f) drawSubjectFocus(canvas, w.toFloat(), h.toFloat(), focal)
+                    if (blurEnabled && blurRadius > 0f) drawSharpSubject(canvas, w.toFloat(), h.toFloat(), focal)
+                }
+            }
+
+            // Apply Global Dim Overlay (Only if AI Focus is OFF or no focal found)
+            if (dimEnabled && dimIntensity > 0f && (focal == null || !subjectFocusEnabled)) {
+                val alpha = (dimIntensity * 255).toInt().coerceIn(0, 255)
+                canvas.drawColor(android.graphics.Color.argb(alpha, 0, 0, 0))
+            }
+
+            // Blacklist visual feedback (Red flash)
+            if (showBlacklistFeedback) {
+                canvas.drawColor(android.graphics.Color.argb(100, 255, 0, 0))
+            }
+        }
+
+
+        private fun drawSharpSubject(canvas: Canvas, w: Float, h: Float, focal: PointF) {
+            // Use saveLayer to create a composition for the mask
+            val checkpoint = canvas.saveLayer(0f, 0f, w, h, null)
+            
+            // 1. Draw the sharp version of the content
+            drawWallpaperContent(canvas, w.toInt(), h.toInt())
+            
+            // 2. Draw a radial mask that is TRANSPARENT in the center and BLACK at the edges.
+            val faceX = focal.x * w
+            val faceY = focal.y * h
+            val radius = maxOf(w, h) * 0.45f
+            
+            // Central area is TRANSPARENT (keeps subject), edges are BLACK (removes subject).
+            val colors = intArrayOf(Color.TRANSPARENT, Color.BLACK)
+            // Use smoothing to control the gradient transition
+            val innerStop = (0.45f - (subjectFocusSmoothing * 0.4f)).coerceIn(0.01f, 0.44f)
+            val outerStop = (0.45f + (subjectFocusSmoothing * 0.4f)).coerceIn(0.46f, 0.99f)
+            val stops = floatArrayOf(innerStop, outerStop)
+            
+            val gradient = RadialGradient(faceX, faceY, radius, colors, stops, Shader.TileMode.CLAMP)
+            maskPaint.shader = gradient
+            canvas.drawRect(0f, 0f, w, h, maskPaint)
+            
+            canvas.restoreToCount(checkpoint)
+        }
+
+        private fun drawSubjectFocus(canvas: Canvas, w: Float, h: Float, focal: PointF) {
+            val radius = maxOf(w, h) * 0.9f
+            val faceX = focal.x * w
+            val faceY = focal.y * h
+            
+            // Central area (around face) is transparent, edges are dark
+            val alpha = (dimIntensity * 255).toInt().coerceIn(0, 255)
+            val colors = intArrayOf(Color.TRANSPARENT, Color.argb(alpha, 0, 0, 0))
+            
+            // Apply smoothing to spotlight transition
+            val innerStop = (0.25f - (subjectFocusSmoothing * 0.2f)).coerceIn(0.01f, 0.24f)
+            val outerStop = (0.25f + (subjectFocusSmoothing * 0.7f)).coerceIn(0.26f, 0.99f)
+            val stops = floatArrayOf(innerStop, outerStop)
+            
+            val gradient = RadialGradient(faceX, faceY, radius, colors, stops, Shader.TileMode.CLAMP)
+            vignettePaint.shader = gradient
+            canvas.drawRect(0f, 0f, w, h, vignettePaint)
+        }
+
+        private fun drawWallpaperContent(canvas: Canvas, w: Int, h: Int) {
+            val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
+            val pos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
+            val maxIdx = (detectedPages - 1).coerceAtLeast(0)
+            val idx = if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
+
             val curr = pageBitmaps[idx]
             if (curr != null && !curr.isRecycled) {
                 if (isTransitioning && nextBitmap != null && !nextBitmap!!.isRecycled) {
@@ -986,10 +1197,11 @@ class MultiWallpaperLiveService : WallpaperService() {
                     calculateRects(curr, w, h, srcRect, dstRect, currFocal)
                     canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
                     
+                    val oldAlpha = bitmapPaint.alpha
                     bitmapPaint.alpha = transitionAlpha
                     calculateRects(nextBitmap!!, w, h, nextSrcRect, nextDstRect, nextFocalPoint)
                     canvas.drawBitmap(nextBitmap!!, nextSrcRect, nextDstRect, bitmapPaint)
-                    bitmapPaint.alpha = 255 // Reset
+                    bitmapPaint.alpha = oldAlpha
                 } else if (transitionType == "fade" && isFluid) {
                     val floatPos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
                     val l = floatPos.toInt().coerceIn(0, maxIdx)
@@ -1003,13 +1215,13 @@ class MultiWallpaperLiveService : WallpaperService() {
                         calculateRects(lb, w, h, srcRect, dstRect, lf)
                         calculateRects(rb, w, h, nextSrcRect, nextDstRect, rf)
 
+                        val oldAlpha = bitmapPaint.alpha
                         bitmapPaint.alpha = ((1f - f) * 255).toInt()
                         canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
                         
                         bitmapPaint.alpha = (f * 255).toInt()
                         canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
-                        
-                        bitmapPaint.alpha = 255 // Reset alpha
+                        bitmapPaint.alpha = oldAlpha
                     } else if (lb != null) drawSingleBitmap(canvas, lb, w, h)
                     else drawLoadingState(canvas, w, h)
                 } else drawSingleBitmap(canvas, curr, w, h)

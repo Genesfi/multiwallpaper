@@ -64,6 +64,9 @@ interface FavoriteDao {
 
     @Query("DELETE FROM favorites")
     suspend fun deleteAllFavorites()
+
+    @Query("DELETE FROM favorites WHERE uriString = :uriString")
+    suspend fun deleteFavoriteByUriSync(uriString: String)
 }
 
 @Dao
@@ -88,6 +91,9 @@ interface ScannedImageDao {
 
     @Query("DELETE FROM scanned_images WHERE folderUriString = :folderUriString")
     suspend fun deleteImagesByFolderUri(folderUriString: String)
+
+    @Query("DELETE FROM scanned_images WHERE uriString = :uriString")
+    suspend fun deleteImageByUriSync(uriString: String)
 }
 
 @Dao
@@ -103,5 +109,26 @@ interface PresetDao {
 
     @Update
     suspend fun updatePreset(preset: PresetEntity)
+}
+
+@Dao
+interface BlacklistedDao {
+    @Query("SELECT * FROM blacklisted_images ORDER BY addedTime DESC")
+    fun getAllBlacklisted(): Flow<List<BlacklistedImageEntity>>
+
+    @Query("SELECT * FROM blacklisted_images")
+    suspend fun getAllBlacklistedSync(): List<BlacklistedImageEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertBlacklist(image: BlacklistedImageEntity)
+
+    @Delete
+    suspend fun deleteBlacklist(image: BlacklistedImageEntity)
+
+    @Query("DELETE FROM blacklisted_images WHERE uriString = :uriString")
+    suspend fun deleteBlacklistByUri(uriString: String)
+
+    @Query("SELECT EXISTS(SELECT 1 FROM blacklisted_images WHERE uriString = :uriString)")
+    suspend fun isBlacklistedSync(uriString: String): Boolean
 }
 
