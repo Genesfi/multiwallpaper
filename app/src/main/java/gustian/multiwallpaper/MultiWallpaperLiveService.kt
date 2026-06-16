@@ -50,17 +50,15 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private var lastTapTime: Long = 0
         private val doubleTapThreshold = 500L
-        private var isLongPressing = false
-        private val longPressThreshold = 800L // 0.8s for blacklist
-        private val longPressRunnable = Runnable {
-            performBlacklist()
-        }
+        private var isGestureConsumed = false
+        private val blacklistDelay = 150L
+        private val blacklistRunnable = Runnable { performBlacklist() }
 
         private fun performBlacklist() {
             synchronized(bitmapLock) {
                 val currentUri = pageUris[manualPageIndex]
                 if (currentUri != null) {
-                    isLongPressing = true
+                    isGestureConsumed = true
                     // Delete from DB in background
                     val db = AppDatabase.getDatabase(applicationContext)
                     engineScope.launch(Dispatchers.IO) {
@@ -375,22 +373,28 @@ class MultiWallpaperLiveService : WallpaperService() {
             val numBitmaps = pageBitmaps.size
             if (numBitmaps <= 0) return
 
-            when (event.action) {
+            when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     lastX = event.x
-                    val currTime = System.currentTimeMillis()
-                    val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
-                    val doubleTapEnabled = prefs.getBoolean("double_tap_enabled", true)
-                    
-                    // Start long press detection if this is potentially the 2nd tap of a double tap
-                    if (doubleTapEnabled && (currTime - lastTapTime) < doubleTapThreshold) {
-                        handler.postDelayed(longPressRunnable, longPressThreshold)
+                    isGestureConsumed = false
+                    handler.removeCallbacks(blacklistRunnable)
+                }
+                android.view.MotionEvent.ACTION_POINTER_DOWN -> {
+                    if (event.pointerCount == 2) {
+                        handler.postDelayed(blacklistRunnable, blacklistDelay)
+                    } else if (event.pointerCount > 2) {
+                        handler.removeCallbacks(blacklistRunnable)
+                    }
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (event.pointerCount > 2) {
+                        handler.removeCallbacks(blacklistRunnable)
                     }
                 }
                 android.view.MotionEvent.ACTION_UP -> {
-                    handler.removeCallbacks(longPressRunnable)
-                    if (isLongPressing) {
-                        isLongPressing = false
+                    handler.removeCallbacks(blacklistRunnable)
+                    if (isGestureConsumed) {
+                        isGestureConsumed = false
                         return
                     }
 

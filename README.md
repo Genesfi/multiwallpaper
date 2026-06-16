@@ -8,7 +8,7 @@ A professional, high-performance Android Live Wallpaper application designed to 
 - **AI Portrait Mode**: Revolutionary background blur that follows the subject's face while keeping them 100% sharp. Optimized for Android 12-16 using `RenderNode`.
 - **AI Spotlight Focus**: Dynamic vignette effect that centers on detected faces, adding a dramatic stage-light look.
 - **Smart Visual Toggles**: Unified UI for Dimming and Blur that automatically adapts to "Subject-Aware" mode when AI Focus is enabled.
-- **Instant Blacklist Gesture**: Manage thousands of photos directly from your home screen. **Double Tap & Hold** for 1s to remove an image from rotation instantly.
+- **Instant Blacklist Gesture**: Manage thousands of photos directly from your home screen. **2 Finger Tap** to remove an image from rotation instantly.
 - **Gallery Blacklist Management**: Dedicated section to view and restore blacklisted photos, preventing "zombie" files from cluttering your rotation.
 - **Multi-Select Support**: Mark and blacklist multiple images at once from the Gallery view.
 - **GitHub Update Sync**: Stay current with the latest features using the new in-app "Check for Update" system linked directly to the repository.

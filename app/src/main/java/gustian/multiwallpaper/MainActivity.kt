@@ -1037,7 +1037,7 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
                 Spacer(modifier = Modifier.width(16.dp))
                 Column {
                     Text("Instant Blacklist", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
-                    Text("Double Tap & Hold for 1s on Home Screen to remove current wallpaper from rotation.", style = MaterialTheme.typography.labelSmall)
+                    Text("2 Finger Tap on Home Screen to remove current wallpaper from rotation.", style = MaterialTheme.typography.labelSmall)
                 }
             }
         }
