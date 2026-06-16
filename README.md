@@ -14,7 +14,7 @@ A professional, high-performance Android Live Wallpaper application designed to 
 - **GitHub Update Sync**: Stay current with the latest features using the new in-app "Check for Update" system linked directly to the repository.
 
 ### v1.0.1: Stability & Performance Overhaul
-- **Memory Leak Fixes**: Patched critical leaks in the rotation engine, stabilizing RAM usage in the healthy **6GB - 7.7GB** range even with 20+ active pages.
+- **Memory Leak Fixes**: Patched critical leaks in the rotation engine, stabilizing RAM usage in the healthy even with 20+ active pages.
 - **AI 480px Downscaling**: Face detection now uses an industry-standard proxy bitmap, resulting in 10x faster detection and massive RAM savings for 4K/108MP images.
 - **Database Indexing**: Scalability fix to handle 10,000+ images without lag by fetching URIs one-by-one via database offsets.
 - **Sapu Jagat Memory Guard**: Advanced thread synchronization and "Zombie Bitmap" removal logic for high-intensity shake/swipe interactions.
