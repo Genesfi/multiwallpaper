@@ -1,5 +1,6 @@
 package gustian.multiwallpaper
 
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.*
@@ -19,6 +20,7 @@ import android.view.SurfaceHolder
 import android.view.animation.DecelerateInterpolator
 import gustian.multiwallpaper.data.AppDatabase
 import gustian.multiwallpaper.data.BlacklistedImageEntity
+import gustian.multiwallpaper.data.RotationHistoryEntity
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -31,10 +33,26 @@ import kotlin.random.Random
 
 class MultiWallpaperLiveService : WallpaperService() {
 
+    companion object {
+        // Persistent Global History (Ingatan Gajah) across service restarts/recreates
+        private val recentHistory = LinkedHashSet<String>()
+        private const val DEFAULT_MAX_HISTORY = 150
+    }
+
+    private var activeEngine: MultiWallpaperEngine? = null
+
     override fun onCreateEngine(): Engine {
         val engine = MultiWallpaperEngine()
         engine.setOffsetNotificationsEnabled(true)
+        activeEngine = engine
         return engine
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            activeEngine?.trimMemory()
+        }
     }
 
     inner class MultiWallpaperEngine : Engine(), SensorEventListener {
@@ -50,15 +68,15 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private var lastTapTime: Long = 0
         private val doubleTapThreshold = 500L
-        private var isGestureConsumed = false
-        private val blacklistDelay = 150L
-        private val blacklistRunnable = Runnable { performBlacklist() }
+
+        private val blacklistRunnable = Runnable {
+            performBlacklist()
+        }
 
         private fun performBlacklist() {
             synchronized(bitmapLock) {
                 val currentUri = pageUris[manualPageIndex]
                 if (currentUri != null) {
-                    isGestureConsumed = true
                     // Delete from DB in background
                     val db = AppDatabase.getDatabase(applicationContext)
                     engineScope.launch(Dispatchers.IO) {
@@ -152,13 +170,12 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var dimEnabled = false
         private var subjectFocusEnabled = false
         private var subjectFocusSmoothing = 0.5f
+        private var smartAdjacencyEnabled = true
         private var useFavoritesOnly = false
         private var currentRoll = 0f
         private var currentPitch = 0f
         private val smoothingFactor = 0.05f // Stronger LPF to ignore jitter
         private var detectedPages = 20 // Default to 20 for launchers that don't report xStep (HyperOS)
-        private val recentHistory = LinkedHashSet<String>()
-        private val MAX_HISTORY = 150
         
         // Job tracking for concurrency safety
         private var mainLoadJob: Job? = null
@@ -174,6 +191,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private val sensorThrottleMs = 50L // Aggressive throttling (~20fps) to save power
         private var lastShakeTime = 0L
         private val shakeThreshold = 14f // m/s^2 above gravity
+        private var lastRotationTime = 0L
         
         private val bitmapPaint = Paint().apply { isFilterBitmap = true }
         private val textPaint = Paint().apply { 
@@ -213,6 +231,16 @@ class MultiWallpaperLiveService : WallpaperService() {
 
             val db = AppDatabase.getDatabase(applicationContext)
             engineScope.launch {
+                // Keep in-memory history synced with database
+                db.rotationHistoryDao().getAllHistory().collect { dbHistory ->
+                    synchronized(recentHistory) {
+                        recentHistory.clear()
+                        recentHistory.addAll(dbHistory.reversed()) // Oldest first for LinkedHashSet FIFO
+                    }
+                }
+            }
+
+            engineScope.launch {
                 db.folderDao().getAllFolders().collectLatest {
                     loadWallpapersForPages()
                 }
@@ -246,6 +274,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             val oldDimIntensity = dimIntensity
             val oldSubjectFocusEnabled = subjectFocusEnabled
             val oldSubjectFocusSmoothing = subjectFocusSmoothing
+            val oldSmartAdjacency = smartAdjacencyEnabled
             
             useFavoritesOnly = newUseFav
             parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
@@ -265,6 +294,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             dimEnabled = prefs.getBoolean("dim_enabled", false)
             subjectFocusEnabled = prefs.getBoolean("subject_focus_enabled", false)
             subjectFocusSmoothing = prefs.getFloat("subject_focus_smoothing", 0.5f)
+            smartAdjacencyEnabled = prefs.getBoolean("smart_adjacency_enabled", true)
             
             if (useFavChanged || forceReload) {
                 loadWallpapersForPages()
@@ -278,7 +308,8 @@ class MultiWallpaperLiveService : WallpaperService() {
                        oldDimEnabled != dimEnabled ||
                        oldDimIntensity != dimIntensity ||
                        oldSubjectFocusEnabled != subjectFocusEnabled ||
-                       oldSubjectFocusSmoothing != subjectFocusSmoothing) {
+                       oldSubjectFocusSmoothing != subjectFocusSmoothing ||
+                       oldSmartAdjacency != smartAdjacencyEnabled) {
                 requestDraw()
             }
             
@@ -351,6 +382,25 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
+        fun trimMemory() {
+            // Under memory pressure, release non-visible bitmaps
+            engineScope.launch(Dispatchers.Main) {
+                synchronized(bitmapLock) {
+                    preloadedBitmap?.recycle()
+                    preloadedBitmap = null
+                    preloadedUri = null
+                    preloadedFocalPoint = null
+                    
+                    // If we're not currently visible, we can even release current bitmaps
+                    // to be re-decoded when user returns to home.
+                    if (!visible) {
+                        recycleBitmaps()
+                    }
+                }
+                System.gc()
+            }
+        }
+
         override fun onDestroy() {
             super.onDestroy()
             engineScope.cancel()
@@ -373,31 +423,26 @@ class MultiWallpaperLiveService : WallpaperService() {
             val numBitmaps = pageBitmaps.size
             if (numBitmaps <= 0) return
 
-            when (event.actionMasked) {
+            val action = event.actionMasked
+            when (action) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     lastX = event.x
-                    isGestureConsumed = false
-                    handler.removeCallbacks(blacklistRunnable)
                 }
                 android.view.MotionEvent.ACTION_POINTER_DOWN -> {
+                    // TWO-FINGER TAP DETECTION WITH DEBOUNCE (150ms)
                     if (event.pointerCount == 2) {
-                        handler.postDelayed(blacklistRunnable, blacklistDelay)
+                        handler.postDelayed(blacklistRunnable, 150)
                     } else if (event.pointerCount > 2) {
+                        // 3rd finger detected (like screenshot), cancel immediately
                         handler.removeCallbacks(blacklistRunnable)
                     }
                 }
-                android.view.MotionEvent.ACTION_MOVE -> {
-                    if (event.pointerCount > 2) {
-                        handler.removeCallbacks(blacklistRunnable)
-                    }
+                android.view.MotionEvent.ACTION_POINTER_UP -> {
+                    // Jari diangkat sebelum 150ms, batalkan
+                    handler.removeCallbacks(blacklistRunnable)
                 }
                 android.view.MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(blacklistRunnable)
-                    if (isGestureConsumed) {
-                        isGestureConsumed = false
-                        return
-                    }
-
                     val currTime = System.currentTimeMillis()
                     val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
                     val doubleTapEnabled = prefs.getBoolean("double_tap_enabled", true)
@@ -427,15 +472,22 @@ class MultiWallpaperLiveService : WallpaperService() {
         override fun onVisibilityChanged(visible: Boolean) {
             this.visible = visible
             if (visible) {
+                // CATCH-UP LOGIC: If the interval has passed while screen was off, rotate immediately
+                val currentTime = System.currentTimeMillis()
+                val intervalMs = getRotationIntervalMs()
+                if (currentTime - lastRotationTime >= intervalMs) {
+                    rotateWallpapers()
+                }
+
                 updateSettings()
                 scheduleRotation()
                 requestDraw()
             } else {
-                // NUCLEAR CLEANUP: Stop all active background processes immediately
+                // LESS AGGRESSIVE CLEANUP: 
+                // Don't cancel rotationJob immediately if it's already running a swap
                 mainLoadJob?.cancel()
                 backgroundRefreshJob?.cancel()
                 preloadJob?.cancel()
-                rotationJob?.cancel()
                 
                 isDrawScheduled = false
                 handler.removeCallbacks(drawRunnable)
@@ -508,52 +560,63 @@ class MultiWallpaperLiveService : WallpaperService() {
             handler.postDelayed(rotationRunnable, intervalMs)
         }
 
-        private suspend fun getSingleRandomUri(): String? {
+        private suspend fun getNextWallpaperUri(): String? {
+            val db = AppDatabase.getDatabase(applicationContext)
+            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val useFavorites = prefs.getBoolean("use_favorites_only", false)
+            val sortOrder = prefs.getString("rotation_sort_order", "RANDOM")
+            
             return try {
-                // Use the application-wide database instance to avoid connection leaks
-                val db = AppDatabase.getDatabase(applicationContext)
-                val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
-                val useFavorites = prefs.getBoolean("use_favorites_only", false)
-                
-                val total = if (useFavorites) db.favoriteDao().getFavoriteCount() 
-                            else db.scannedImageDao().getImageCount()
-                
-                if (total <= 0) return null
-                
-                var finalUri: String? = null
-                // Try to find one not in recent history (fair randomness)
-                repeat(5) {
-                    val randomIndex = Random.nextInt(total)
-                    val candidate = if (useFavorites) db.favoriteDao().getUriAtPosition(randomIndex)
-                                    else db.scannedImageDao().getUriAtPosition(randomIndex)
-                    
-                    if (candidate != null) {
-                        if (!recentHistory.contains(candidate)) {
-                            finalUri = candidate
-                            return@repeat
-                        }
-                        finalUri = candidate // Fallback
+                val finalUri = if (useFavorites) {
+                    if (sortOrder == "FOLDER") {
+                        db.favoriteDao().getOrderedFavoriteUriExcludingHistorySubquery()
+                    } else {
+                        db.favoriteDao().getRandomFavoriteUriExcludingHistorySubquery()
+                    }
+                } else {
+                    if (sortOrder == "FOLDER") {
+                        db.scannedImageDao().getOrderedUriExcludingHistorySubquery()
+                    } else {
+                        db.scannedImageDao().getRandomUriExcludingHistorySubquery()
                     }
                 }
                 
-                finalUri?.let {
-                    recentHistory.add(it)
-                    if (recentHistory.size > MAX_HISTORY) {
-                        val iterator = recentHistory.iterator()
-                        if (iterator.hasNext()) {
-                            iterator.next()
-                            iterator.remove()
+                finalUri?.let { uri ->
+                    synchronized(recentHistory) {
+                        val isAuto = prefs.getBoolean("auto_limit_enabled", false)
+                        val totalCount = prefs.getInt("total_scanned_count", 150)
+                        val currentMax = if (isAuto) totalCount.coerceAtLeast(150) 
+                                         else prefs.getInt("history_limit", DEFAULT_MAX_HISTORY)
+                        
+                        recentHistory.add(uri)
+                        
+                        engineScope.launch(Dispatchers.IO) {
+                            db.rotationHistoryDao().insertHistory(RotationHistoryEntity(uriString = uri))
+                            // Only trim if we actually exceed the limit to save DB cycles
+                            val count = db.rotationHistoryDao().getHistoryCountSync()
+                            if (count > currentMax + 10) {
+                                db.rotationHistoryDao().trimHistory(currentMax)
+                            }
+                        }
+
+                        if (recentHistory.size > currentMax) {
+                            val iterator = recentHistory.iterator()
+                            if (iterator.hasNext()) {
+                                iterator.next()
+                                iterator.remove()
+                            }
                         }
                     }
                 }
                 finalUri
             } catch (e: Exception) { 
-                Log.e("MultiWallpaper", "Database error in getSingleRandomUri", e)
+                Log.e("MultiWallpaper", "True Random database error", e)
                 null 
             }
         }
 
         private fun rotateWallpapers() {
+            lastRotationTime = System.currentTimeMillis()
             synchronized(bitmapLock) {
                 if (isTransitioning) return // Avoid overlapping transitions
 
@@ -620,7 +683,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                 
                 (0 until detectedPages).filter { it != manualPageIndex }.forEach { p ->
                     if (!isActive) return@launch
-                    val nextUri = getSingleRandomUri() ?: return@forEach
+                    val nextUri = getNextWallpaperUri() ?: return@forEach
                     
                     val b = decodeSampledBitmapFromUri(Uri.parse(nextUri), surfaceWidth, surfaceHeight)
                     if (b != null) {
@@ -642,7 +705,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private fun preloadNextWallpaper() {
             preloadJob?.cancel()
             preloadJob = engineScope.launch(Dispatchers.IO) {
-                val nextUri = getSingleRandomUri() ?: return@launch
+                val nextUri = getNextWallpaperUri() ?: return@launch
                 
                 val rawBmp = decodeSampledBitmapFromUri(Uri.parse(nextUri), surfaceWidth, surfaceHeight)
                 if (rawBmp != null) {
@@ -668,7 +731,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private fun startFadeRotation() {
             rotationJob?.cancel()
             rotationJob = engineScope.launch(Dispatchers.IO) {
-                val nextUri = getSingleRandomUri()
+                val nextUri = getNextWallpaperUri()
                 if (nextUri != null) {
                     val rawBmp = decodeSampledBitmapFromUri(Uri.parse(nextUri), surfaceWidth, surfaceHeight)
                     if (rawBmp != null) {
@@ -784,34 +847,29 @@ class MultiWallpaperLiveService : WallpaperService() {
             return (seconds * 1000L).toLong()
         }
 
-        private fun getAllAvailableUris(): List<String> {
-            val db = AppDatabase.getDatabase(applicationContext)
-            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
-            
-            return if (prefs.getBoolean("use_favorites_only", false)) {
-                db.favoriteDao().getAllFavoritesSync().map { it.uriString }
-            } else {
-                // Optimization: Use cached scanned images instead of re-scanning folders
-                db.scannedImageDao().getAllImagesSync().map { it.uriString }
-            }
-        }
-
         private fun loadWallpapersForPages() {
             mainLoadJob?.cancel()
             backgroundRefreshJob?.cancel()
             
-            // Set loading state on main thread before starting the background work
-            synchronized(bitmapLock) {
-                if (pageBitmaps.isEmpty()) {
-                    isLoading = true
-                    requestDraw()
-                }
+            // Validate surface before starting expensive work
+            if (surfaceWidth <= 0 || surfaceHeight <= 0) {
+                requestDraw() // Try to trigger a surface check
+                return
             }
+
+            // Set loading state immediately
+            isLoading = true
+            requestDraw()
 
             mainLoadJob = engineScope.launch(Dispatchers.IO) {
                 try {
-                    val allUris = getAllAvailableUris()
-                    if (allUris.isEmpty()) {
+                    val db = AppDatabase.getDatabase(applicationContext)
+                    val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+                    val useFavorites = prefs.getBoolean("use_favorites_only", false)
+                    
+                    val total = if (useFavorites) db.favoriteDao().getFavoriteCount() else db.scannedImageDao().getImageCount()
+                    
+                    if (total <= 0) {
                         withContext(Dispatchers.Main) { 
                             synchronized(bitmapLock) {
                                 recycleBitmaps()
@@ -824,12 +882,11 @@ class MultiWallpaperLiveService : WallpaperService() {
 
                     if (!isActive) return@launch
 
-                    val random = Random(System.currentTimeMillis())
-                    val shuffledUris = allUris.shuffled(random)
-                    
                     // Priority 1: Load current visible page immediately
-                    val visibleIdx = manualPageIndex.coerceIn(0, shuffledUris.size - 1)
-                    val visibleUri = shuffledUris[visibleIdx]
+                    val visibleUri = if (useFavorites) db.favoriteDao().getUriAtPosition(Random.nextInt(total))
+                                     else db.scannedImageDao().getUriAtPosition(Random.nextInt(total))
+                    
+                    if (visibleUri == null) return@launch
                     val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight)
                     
                     if (!isActive) { firstBitmap?.recycle(); return@launch }
@@ -851,23 +908,46 @@ class MultiWallpaperLiveService : WallpaperService() {
                                 pageFocalPoints[manualPageIndex] = firstFocal
                                 if (currentBitmap != firstBitmap) currentBitmap?.recycle()
                             }
-                            isLoading = false
+                            
+                            // PRIORITY UI FEEDBACK: Stop the spinner as soon as the main image is visible
+                            isLoading = false 
                             requestDraw()
                         }
                     }
 
                     if (!isActive) return@launch
 
-                    // Priority 2: Load other pages sequentially with delay in background
-                    val targetPageCount = detectedPages.coerceAtMost(shuffledUris.size)
-                    (0 until targetPageCount).filter { it != manualPageIndex }.forEach { p ->
-                        if (!isActive) return@launch
-                        val uriIdx = p % shuffledUris.size
-                        val uri = shuffledUris[uriIdx]
+                    // Priority 2: Load other pages sequentially with LARGER DELAY to avoid CPU choking
+                    val targetPageCount = detectedPages.coerceAtMost(total)
+                    for (p in 0 until targetPageCount) {
+                        if (p == manualPageIndex || !isActive) continue
+                        
+                        // Optimized Adjacency Guard: Single pass with local random offset
+                        val startOffset = Random.nextInt(total)
+                        var selectedUri: String? = null
+                        val prevPageFolder = pageUris[p - 1]?.let { Uri.parse(it).path?.substringBeforeLast('/') }
+
+                        for (i in 0 until 10) { // Limit search effort
+                            val candidateIdx = (startOffset + i) % total
+                            val candidate = if (useFavorites) db.favoriteDao().getUriAtPosition(candidateIdx)
+                                            else db.scannedImageDao().getUriAtPosition(candidateIdx)
+                            
+                            if (candidate == null) continue
+                            val candidateFolder = Uri.parse(candidate).path?.substringBeforeLast('/')
+                            
+                            if (!smartAdjacencyEnabled || candidateFolder != prevPageFolder) {
+                                selectedUri = candidate
+                                break
+                            }
+                        }
+                        
+                        val fallbackIdx = p % total
+                        val uri = selectedUri ?: (if (useFavorites) db.favoriteDao().getUriAtPosition(fallbackIdx) 
+                                                  else db.scannedImageDao().getUriAtPosition(fallbackIdx)) ?: continue
                         
                         val b = decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight)
                         if (b != null) {
-                            if (!isActive) { b.recycle(); return@launch }
+                            if (!isActive) { b.recycle(); break }
                             val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
                             withContext(Dispatchers.Main) {
                                 synchronized(bitmapLock) {
@@ -876,11 +956,11 @@ class MultiWallpaperLiveService : WallpaperService() {
                                     pageUris[p] = uri
                                     pageFocalPoints[p] = focal
                                     old?.recycle()
-                                    requestDraw()
+                                    // requestDraw() // Only draw background pages silently
                                 }
                             }
                         }
-                        delay(100) // yield
+                        delay(200) // SUBSTANTIAL DELAY: Gives CPU time to breathe between 4K decodes
                     }
                     
                     if (isActive) {
@@ -893,32 +973,44 @@ class MultiWallpaperLiveService : WallpaperService() {
                     Log.e("MultiWallpaper", "Loading failed", t)
                 } finally {
                     withContext(Dispatchers.Main) {
-                        synchronized(bitmapLock) {
-                            isLoading = false
-                            requestDraw()
-                        }
+                        isLoading = false
+                        requestDraw()
                     }
                 }
             }
         }
 
         private suspend fun detectFaceFocalPoint(bitmap: Bitmap): PointF? {
+            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val manX = prefs.getFloat("manual_focal_x", 0.5f)
+            val manY = prefs.getFloat("manual_focal_y", 0.4f)
+            val fallback = PointF(manX, manY)
+
             // Downscale for faster and more accurate pattern recognition (Industry Standard)
             val targetSize = 480
             val scale = (targetSize.toFloat() / maxOf(bitmap.width, bitmap.height)).coerceAtMost(1f)
 
-            val detectionBitmap = if (scale < 1f) {
-                try {
+            // ALWAYS create a copy for asynchronous ML Kit processing.
+            // This prevents the original bitmap from being recycled by other parts of the service
+            // while ML Kit is working on it, especially during fast rotations (e.g. 5s interval).
+            val detectionBitmap = try {
+                if (scale < 1f) {
                     Bitmap.createScaledBitmap(
                         bitmap,
-                        (bitmap.width * scale).toInt(),
-                        (bitmap.height * scale).toInt(),
+                        (bitmap.width * scale).toInt().coerceAtLeast(1),
+                        (bitmap.height * scale).toInt().coerceAtLeast(1),
                         true
                     )
-                } catch (e: Exception) { bitmap }
-            } else {
-                bitmap
-            }
+                } else {
+                    bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
+                }
+            } catch (e: Exception) { null }
+
+            if (detectionBitmap == null) return fallback
+
+            // Capture dimensions BEFORE any potential recycling in background threads
+            val dWidth = detectionBitmap.width
+            val dHeight = detectionBitmap.height
 
             // Reuse or initialize the detector ONCE
             if (faceDetector == null) {
@@ -931,37 +1023,40 @@ class MultiWallpaperLiveService : WallpaperService() {
                 faceDetector = FaceDetection.getClient(options)
             }
             
-            val detector = faceDetector ?: return null
+            val detector = faceDetector ?: run {
+                detectionBitmap.recycle()
+                return fallback
+            }
 
             return try {
                 val image = InputImage.fromBitmap(detectionBitmap, 0)
+                val task = detector.process(image)
+
+                // CRITICAL: Only recycle when ML Kit task is completely finished.
+                // This survives timeouts/cancellations of the calling coroutine.
+                task.addOnCompleteListener {
+                    try { if (!detectionBitmap.isRecycled) detectionBitmap.recycle() } catch (e: Exception) {}
+                }
                 
                 // Add timeout to prevent infinite loading if ML Kit is waiting for downloads
                 val faces = withTimeoutOrNull(5000L) {
                     suspendCancellableCoroutine<List<com.google.mlkit.vision.face.Face>> { cont ->
-                        detector.process(image)
-                            .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
+                        task.addOnSuccessListener { if (cont.isActive) cont.resume(it) }
                             .addOnFailureListener { if (cont.isActive) cont.resume(emptyList()) }
                     }
                 } ?: emptyList()
                 
                 if (faces.isNotEmpty()) {
                     val mainFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() }!!
-                    val focal = PointF(mainFace.boundingBox.centerX() / detectionBitmap.width.toFloat(), 
-                                       mainFace.boundingBox.centerY() / detectionBitmap.height.toFloat())
-                    Log.d("MultiWallpaper", "Main face detected at: $focal (using ${detectionBitmap.width}x${detectionBitmap.height} proxy)")
+                    val focal = PointF(mainFace.boundingBox.centerX() / dWidth.toFloat(), 
+                                       mainFace.boundingBox.centerY() / dHeight.toFloat())
+                    Log.d("MultiWallpaper", "Main face detected at: $focal (using ${dWidth}x${dHeight} proxy)")
                     focal
                 } else {
-                    // SMART FALLBACK: If no face, estimate subject position (usually upper 1/3 for humans)
-                    val fallbackFocal = PointF(0.5f, 0.35f) 
-                    Log.d("MultiWallpaper", "No faces found. Using smart fallback subject position.")
-                    fallbackFocal
+                    fallback // Fallback slightly above center
                 }
             } catch (e: Exception) { 
-                null 
-            } finally {
-                // CRITICAL: Recycle the proxy bitmap, but KEEP the detector open for reuse
-                if (detectionBitmap != bitmap) detectionBitmap.recycle()
+                fallback // Fallback slightly above center on error
             }
         }
 
@@ -1026,7 +1121,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             pageBitmaps.clear()
             pageFocalPoints.clear()
             pageUris.clear()
-            recentHistory.clear()
+            // recentHistory.clear() // REMOVED: Now persistent in companion object
             nextBitmap?.recycle(); nextBitmap = null
             nextFocalPoint = null
             preloadedBitmap?.recycle(); preloadedBitmap = null
@@ -1374,4 +1469,3 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
     }
 }
-

@@ -22,7 +22,7 @@ class Converters {
     }
 }
 
-@Database(entities = [FolderEntity::class, FavoriteImageEntity::class, PresetEntity::class, ScannedImageEntity::class, BlacklistedImageEntity::class], version = 5, exportSchema = false)
+@Database(entities = [FolderEntity::class, FavoriteImageEntity::class, PresetEntity::class, ScannedImageEntity::class, BlacklistedImageEntity::class, RotationHistoryEntity::class], version = 9, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun folderDao(): FolderDao
@@ -30,6 +30,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun presetDao(): PresetDao
     abstract fun scannedImageDao(): ScannedImageDao
     abstract fun blacklistedDao(): BlacklistedDao
+    abstract fun rotationHistoryDao(): RotationHistoryDao
 
     companion object {
         @Volatile

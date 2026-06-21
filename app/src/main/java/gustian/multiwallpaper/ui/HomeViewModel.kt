@@ -27,6 +27,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val presetDao = db.presetDao()
     private val scannedImageDao = db.scannedImageDao()
     private val blacklistedDao = db.blacklistedDao()
+    private val historyDao = db.rotationHistoryDao()
 
     val prefs = application.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
 
@@ -138,7 +139,71 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _updateMessage = MutableStateFlow<String?>(null)
     val updateMessage = _updateMessage.asStateFlow()
+
+    private val _smartAdjacencyEnabled = MutableStateFlow(prefs.getBoolean("smart_adjacency_enabled", true))
+    val smartAdjacencyEnabled = _smartAdjacencyEnabled.asStateFlow()
+
+    private val _rotationSortOrder = MutableStateFlow(prefs.getString("rotation_sort_order", "RANDOM") ?: "RANDOM")
+    val rotationSortOrder = _rotationSortOrder.asStateFlow()
+
+    private val _historyLimit = MutableStateFlow(prefs.getInt("history_limit", 150))
+    val historyLimit = _historyLimit.asStateFlow()
+
+    private val _autoLimitEnabled = MutableStateFlow(prefs.getBoolean("auto_limit_enabled", false))
+    val autoLimitEnabled = _autoLimitEnabled.asStateFlow()
+
+    val historyCount = historyDao.getHistoryCount()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
     
+    private val _manualFocalX = MutableStateFlow(prefs.getFloat("manual_focal_x", 0.5f))
+    val manualFocalX = _manualFocalX.asStateFlow()
+
+    private val _manualFocalY = MutableStateFlow(prefs.getFloat("manual_focal_y", 0.4f))
+    val manualFocalY = _manualFocalY.asStateFlow()
+
+    private val _historyList = MutableStateFlow<List<String>>(emptyList())
+    val historyList: StateFlow<List<String>> = _historyList.asStateFlow()
+
+    private val _isLoadingHistory = MutableStateFlow(false)
+    val isLoadingHistory: StateFlow<Boolean> = _isLoadingHistory.asStateFlow()
+
+    private var hasMoreHistory = true
+
+    fun resetAndLoadHistory() {
+        _historyList.value = emptyList()
+        hasMoreHistory = true
+        loadMoreHistory()
+    }
+
+    fun loadMoreHistory() {
+        if (_isLoadingHistory.value || !hasMoreHistory) return
+        
+        viewModelScope.launch(Dispatchers.IO) {
+            _isLoadingHistory.value = true
+            val currentSize = _historyList.value.size
+            val more = historyDao.getHistoryPaged(100, currentSize)
+            
+            if (more.isNotEmpty()) {
+                _historyList.value = _historyList.value + more
+                hasMoreHistory = more.size == 100
+            } else {
+                hasMoreHistory = false
+            }
+            _isLoadingHistory.value = false
+        }
+    }
+
+    fun hasMoreHistory(): Boolean = hasMoreHistory
+
+    fun setManualFocalPoint(x: Float, y: Float) {
+        prefs.edit()
+            .putFloat("manual_focal_x", x)
+            .putFloat("manual_focal_y", y)
+            .apply()
+        _manualFocalX.value = x
+        _manualFocalY.value = y
+    }
+
     private var scanJob: Job? = null
 
     init {
@@ -147,8 +212,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 val favUris = withContext(Dispatchers.IO) {
                     favoriteDao.getAllFavoritesSync().map { it.uriString }.toSet()
                 }
-                _scannedImages.value = entities.map { 
+                val images = entities.map { 
                     WallpaperImg(it.uriString, it.folderUriString, it.displayName, favUris.contains(it.uriString))
+                }
+                _scannedImages.value = images
+                prefs.edit().putInt("total_scanned_count", images.size).apply()
+                
+                if (_autoLimitEnabled.value) {
+                    _historyLimit.value = images.size.coerceAtLeast(150)
                 }
             }
         }
@@ -345,6 +416,41 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _useFavoritesOnly.value = enable
     }
 
+    fun setHistoryLimit(limit: Int) {
+        if (!_autoLimitEnabled.value) {
+            val cappedLimit = limit.coerceIn(10, 8000)
+            prefs.edit().putInt("history_limit", cappedLimit).apply()
+            _historyLimit.value = cappedLimit
+        }
+    }
+
+    fun setAutoLimitEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("auto_limit_enabled", enabled).apply()
+        _autoLimitEnabled.value = enabled
+        if (enabled) {
+            _historyLimit.value = _scannedImages.value.size.coerceAtLeast(150)
+        } else {
+            val savedLimit = prefs.getInt("history_limit", 150)
+            _historyLimit.value = savedLimit
+        }
+    }
+
+    fun removeFromHistory(uri: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            historyDao.deleteHistoryByUri(uri)
+        }
+    }
+
+    fun removeMultipleFromHistory(uris: List<String>) {
+        viewModelScope.launch(Dispatchers.IO) {
+            historyDao.deleteMultipleHistoryByUri(uris)
+        }
+    }
+
+    suspend fun getHistoryPaged(limit: Int, offset: Int): List<String> {
+        return historyDao.getHistoryPaged(limit, offset)
+    }
+
     fun setDoubleTapEnabled(enable: Boolean) {
         prefs.edit().putBoolean("double_tap_enabled", enable).apply()
         _doubleTapEnabled.value = enable
@@ -418,6 +524,22 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setDimEnabled(enable: Boolean) {
         prefs.edit().putBoolean("dim_enabled", enable).apply()
         _dimEnabled.value = enable
+    }
+
+    fun setSmartAdjacencyEnabled(enable: Boolean) {
+        prefs.edit().putBoolean("smart_adjacency_enabled", enable).apply()
+        _smartAdjacencyEnabled.value = enable
+        if (enable && _rotationSortOrder.value != "RANDOM") {
+            setRotationSortOrder("RANDOM")
+        }
+    }
+
+    fun setRotationSortOrder(order: String) {
+        prefs.edit().putString("rotation_sort_order", order).apply()
+        _rotationSortOrder.value = order
+        if (order == "FOLDER" && _smartAdjacencyEnabled.value) {
+            setSmartAdjacencyEnabled(false)
+        }
     }
 
     fun setSubjectFocusEnabled(enable: Boolean) {
@@ -669,8 +791,34 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun scanFoldersSync() {
         val foldersList = folders.value
         val tempImages = mutableListOf<WallpaperImg>()
-        val favoriteUris = favoriteDao.getAllFavoritesSync().map { it.uriString }.toSet()
-        val blacklistedUris = blacklistedDao.getAllBlacklistedSync().map { it.uriString }.toSet()
+        
+        // Deep-Sync: Get all current entries to verify disk existence
+        val favoriteEntities = favoriteDao.getAllFavoritesSync()
+        val blacklistedEntities = blacklistedDao.getAllBlacklistedSync()
+        val contentResolver = getApplication<Application>().contentResolver
+
+        val favoriteUris = mutableSetOf<String>()
+        val blacklistedUris = mutableSetOf<String>()
+
+        // 1. Verify Favorites existence on disk
+        favoriteEntities.forEach { fav ->
+            if (verifyFileExists(Uri.parse(fav.uriString))) {
+                favoriteUris.add(fav.uriString)
+            } else {
+                favoriteDao.deleteFavoriteByUriSync(fav.uriString)
+                Log.d("HomeViewModel", "Deep-Sync: Removed orphaned favorite: ${fav.displayName}")
+            }
+        }
+
+        // 2. Verify Blacklist existence on disk
+        blacklistedEntities.forEach { bl ->
+            if (verifyFileExists(Uri.parse(bl.uriString))) {
+                blacklistedUris.add(bl.uriString)
+            } else {
+                blacklistedDao.deleteBlacklistByUri(bl.uriString)
+                Log.d("HomeViewModel", "Deep-Sync: Removed orphaned blacklist entry: ${bl.displayName}")
+            }
+        }
 
         for (folder in foldersList) {
             yield()
@@ -693,6 +841,20 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         scannedImageDao.insertImages(tempImages.map { 
             ScannedImageEntity(it.uriString, it.folderUriString, it.displayName)
         })
+    }
+
+    private fun verifyFileExists(uri: Uri): Boolean {
+        return try {
+            if (uri.scheme == "file") {
+                java.io.File(uri.path ?: "").exists()
+            } else {
+                val pfd = getApplication<Application>().contentResolver.openFileDescriptor(uri, "r")
+                pfd?.close()
+                pfd != null
+            }
+        } catch (e: Exception) {
+            false
+        }
     }
 
     fun exportPresets() {

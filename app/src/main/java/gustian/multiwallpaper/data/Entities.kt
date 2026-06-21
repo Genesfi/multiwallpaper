@@ -1,7 +1,9 @@
 package gustian.multiwallpaper.data
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
+import java.util.*
 
 @Entity(tableName = "folders")
 data class FolderEntity(
@@ -43,5 +45,18 @@ data class BlacklistedImageEntity(
     val folderUriString: String,
     val displayName: String,
     val addedTime: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "rotation_history",
+    indices = [
+        Index(value = ["timestamp"]),
+        Index(value = ["id"])
+    ]
+)
+data class RotationHistoryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val uriString: String,
+    val timestamp: Long = System.currentTimeMillis()
 )
 

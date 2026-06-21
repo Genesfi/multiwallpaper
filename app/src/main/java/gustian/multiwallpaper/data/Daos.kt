@@ -47,6 +47,18 @@ interface FavoriteDao {
     @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE uriString = :uriString)")
     fun isFavoriteFlow(uriString: String): Flow<Boolean>
 
+    @Query("SELECT uriString FROM favorites WHERE uriString NOT IN (:history) ORDER BY RANDOM() LIMIT 1")
+    suspend fun getRandomFavoriteUriExcludingHistory(history: List<String>): String?
+
+    @Query("SELECT uriString FROM favorites WHERE uriString NOT IN (SELECT uriString FROM rotation_history) ORDER BY RANDOM() LIMIT 1")
+    suspend fun getRandomFavoriteUriExcludingHistorySubquery(): String?
+
+    @Query("SELECT uriString FROM favorites WHERE uriString NOT IN (:history) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
+    suspend fun getOrderedFavoriteUriExcludingHistory(history: List<String>): String?
+
+    @Query("SELECT uriString FROM favorites WHERE uriString NOT IN (SELECT uriString FROM rotation_history) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
+    suspend fun getOrderedFavoriteUriExcludingHistorySubquery(): String?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFavorite(favorite: FavoriteImageEntity)
 
@@ -94,6 +106,18 @@ interface ScannedImageDao {
 
     @Query("DELETE FROM scanned_images WHERE uriString = :uriString")
     suspend fun deleteImageByUriSync(uriString: String)
+
+    @Query("SELECT uriString FROM scanned_images WHERE uriString NOT IN (:history) ORDER BY RANDOM() LIMIT 1")
+    suspend fun getRandomUriExcludingHistory(history: List<String>): String?
+
+    @Query("SELECT uriString FROM scanned_images WHERE uriString NOT IN (SELECT uriString FROM rotation_history) ORDER BY RANDOM() LIMIT 1")
+    suspend fun getRandomUriExcludingHistorySubquery(): String?
+
+    @Query("SELECT uriString FROM scanned_images WHERE uriString NOT IN (:history) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
+    suspend fun getOrderedUriExcludingHistory(history: List<String>): String?
+
+    @Query("SELECT uriString FROM scanned_images WHERE uriString NOT IN (SELECT uriString FROM rotation_history) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
+    suspend fun getOrderedUriExcludingHistorySubquery(): String?
 }
 
 @Dao
@@ -130,5 +154,38 @@ interface BlacklistedDao {
 
     @Query("SELECT EXISTS(SELECT 1 FROM blacklisted_images WHERE uriString = :uriString)")
     suspend fun isBlacklistedSync(uriString: String): Boolean
+}
+
+@Dao
+interface RotationHistoryDao {
+    @Query("SELECT uriString FROM rotation_history ORDER BY id DESC")
+    fun getAllHistory(): Flow<List<String>>
+
+    @Query("SELECT uriString FROM rotation_history ORDER BY id DESC LIMIT :limit OFFSET :offset")
+    suspend fun getHistoryPaged(limit: Int, offset: Int): List<String>
+
+    @Query("SELECT COUNT(*) FROM rotation_history")
+    fun getHistoryCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM rotation_history")
+    suspend fun getHistoryCountSync(): Int
+
+    @Query("SELECT uriString FROM rotation_history ORDER BY id DESC")
+    suspend fun getAllHistorySync(): List<String>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertHistory(item: RotationHistoryEntity)
+
+    @Query("DELETE FROM rotation_history WHERE uriString = :uriString")
+    suspend fun deleteHistoryByUri(uriString: String)
+
+    @Query("DELETE FROM rotation_history WHERE uriString IN (:uris)")
+    suspend fun deleteMultipleHistoryByUri(uris: List<String>)
+
+    @Query("DELETE FROM rotation_history WHERE id NOT IN (SELECT id FROM rotation_history ORDER BY id DESC LIMIT :limit)")
+    suspend fun trimHistory(limit: Int)
+
+    @Query("DELETE FROM rotation_history")
+    suspend fun clearHistory()
 }
 
