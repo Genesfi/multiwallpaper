@@ -1422,6 +1422,10 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
                 var scale by remember { mutableFloatStateOf(1f) }
                 var offset by remember { mutableStateOf(Offset.Zero) }
 
+                val animatedScale by animateFloatAsState(targetValue = scale, label = "hist_zoom_scale")
+                val animatedOffsetX by animateFloatAsState(targetValue = offset.x, label = "hist_pan_offset_x")
+                val animatedOffsetY by animateFloatAsState(targetValue = offset.y, label = "hist_pan_offset_y")
+
                 Dialog(
                     onDismissRequest = { previewIndex = null },
                     properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -1429,6 +1433,18 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
                     Box(modifier = Modifier
                         .fillMaxSize()
                         .background(Color.Black.copy(alpha = 0.9f))
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    if (scale > 1.1f) {
+                                        scale = 1f
+                                        offset = Offset.Zero
+                                    } else {
+                                        scale = 2.5f
+                                    }
+                                }
+                            )
+                        }
                         .pointerInput(Unit) {
                             detectTransformGestures { _, pan, zoom, _ ->
                                 scale = (scale * zoom).coerceIn(1f, 5f)
@@ -1445,10 +1461,10 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
                             modifier = Modifier
                                 .fillMaxSize()
                                 .graphicsLayer(
-                                    scaleX = scale,
-                                    scaleY = scale,
-                                    translationX = offset.x,
-                                    translationY = offset.y
+                                    scaleX = animatedScale,
+                                    scaleY = animatedScale,
+                                    translationX = animatedOffsetX,
+                                    translationY = animatedOffsetY
                                 ),
                             pageSpacing = 16.dp,
                             userScrollEnabled = scale <= 1.05f,
@@ -1732,6 +1748,10 @@ fun ImageDetailDialog(
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     
+    val animatedScale by animateFloatAsState(targetValue = scale, label = "zoom_scale")
+    val animatedOffsetX by animateFloatAsState(targetValue = offset.x, label = "pan_offset_x")
+    val animatedOffsetY by animateFloatAsState(targetValue = offset.y, label = "pan_offset_y")
+    
     // Smart Preview state
     var isSmartPreview by remember { mutableStateOf(false) }
 
@@ -1754,6 +1774,18 @@ fun ImageDetailDialog(
                 .fillMaxSize()
                 .alpha(dialogAlpha)
                 .background(Color.Black)
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            if (scale > 1.1f) {
+                                scale = 1f
+                                offset = Offset.Zero
+                            } else {
+                                scale = 2.5f
+                            }
+                        }
+                    )
+                }
                 .pointerInput(Unit) {
                     detectTransformGestures { _, pan, zoom, _ ->
                         scale = (scale * zoom).coerceIn(1f, 5f)
@@ -1785,10 +1817,10 @@ fun ImageDetailDialog(
                     .fillMaxSize()
                     .padding(bottom = 120.dp)
                     .graphicsLayer {
-                        scaleX = dialogScale * scale
-                        scaleY = dialogScale * scale
-                        translationX = offset.x
-                        translationY = offset.y
+                        scaleX = dialogScale * animatedScale
+                        scaleY = dialogScale * animatedScale
+                        translationX = animatedOffsetX
+                        translationY = animatedOffsetY
                     },
                 contentAlignment = Alignment.Center
             ) {

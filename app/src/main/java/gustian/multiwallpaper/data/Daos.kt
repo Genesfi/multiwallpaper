@@ -59,6 +59,9 @@ interface FavoriteDao {
     @Query("SELECT uriString FROM favorites WHERE uriString NOT IN (SELECT uriString FROM rotation_history) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
     suspend fun getOrderedFavoriteUriExcludingHistorySubquery(): String?
 
+    @Query("SELECT uriString FROM favorites WHERE uriString NOT IN (SELECT uriString FROM rotation_history) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun getRandomFavoriteUrisExcludingHistory(limit: Int): List<String>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFavorite(favorite: FavoriteImageEntity)
 
@@ -118,6 +121,9 @@ interface ScannedImageDao {
 
     @Query("SELECT uriString FROM scanned_images WHERE uriString NOT IN (SELECT uriString FROM rotation_history) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
     suspend fun getOrderedUriExcludingHistorySubquery(): String?
+
+    @Query("SELECT uriString FROM scanned_images WHERE uriString NOT IN (SELECT uriString FROM rotation_history) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun getRandomUrisExcludingHistory(limit: Int): List<String>
 }
 
 @Dao
