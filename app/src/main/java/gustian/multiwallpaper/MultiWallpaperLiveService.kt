@@ -62,6 +62,10 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var xOffset = 0f
         private var xStep = 0f
         
+        private var isStaticLauncher = false
+        private var hasDetectedLauncher = false
+        private var lastSuggestedWidth = -1
+
         private var lastX = 0f
         private var manualPageIndex = 0
         private val swipeThreshold = 150f
@@ -511,6 +515,17 @@ class MultiWallpaperLiveService : WallpaperService() {
             val validXOffset = if (xOffset.isNaN()) 0f else xOffset
             val validXStep = if (xStep.isNaN()) 0f else xStep
             
+            // Detect Static Launcher (Poco/HyperOS)
+            if (!hasDetectedLauncher && (validXStep == 0f || validXStep == 1f)) {
+                isStaticLauncher = true
+                hasDetectedLauncher = true
+                updateWallpaperDimensions(surfaceWidth, surfaceHeight)
+            } else if (!hasDetectedLauncher && validXStep > 0f && validXStep < 1f) {
+                isStaticLauncher = false
+                hasDetectedLauncher = true
+                updateWallpaperDimensions(surfaceWidth * 5, surfaceHeight)
+            }
+
             // LAUNCHER AUTO-RECOVERY: 
             if (validXStep <= 0f) {
                 if (detectedPages != 20) {
@@ -568,11 +583,28 @@ class MultiWallpaperLiveService : WallpaperService() {
             super.onSurfaceChanged(holder, format, width, height)
             this.surfaceWidth = width
             this.surfaceHeight = height
+            
+            // Re-suggest dimensions on surface change if we know the launcher type
+            if (hasDetectedLauncher) {
+                val targetW = if (isStaticLauncher) width else width * 5
+                updateWallpaperDimensions(targetW, height)
+            } else {
+                // Default to wide until detected
+                updateWallpaperDimensions(width * 5, height)
+            }
+            requestDraw()
+        }
+
+        private fun updateWallpaperDimensions(targetWidth: Int, targetHeight: Int) {
+            if (targetWidth <= 0 || targetHeight <= 0) return
+            if (lastSuggestedWidth == targetWidth) return
+            lastSuggestedWidth = targetWidth
             try {
                 val wm = getSystemService(Context.WALLPAPER_SERVICE) as android.app.WallpaperManager
-                wm.suggestDesiredDimensions(width * 5, height)
-            } catch (e: Exception) {}
-            requestDraw()
+                wm.suggestDesiredDimensions(targetWidth, targetHeight)
+            } catch (e: Exception) {
+                Log.e("MultiWallpaper", "Error suggesting dimensions: ${e.message}")
+            }
         }
 
         private fun scheduleRotation() {
@@ -770,19 +802,15 @@ class MultiWallpaperLiveService : WallpaperService() {
 
                 if (rawBmp != null) {
                     val focal = if (smartCropEnabled) detectFaceFocalPoint(rawBmp!!) else null
-                    // Pre-scale to screen size to eliminate scaling overhead during fade
-                    val scaledBmp = createScreenScaledBitmap(rawBmp!!)
                     withContext(Dispatchers.Main) {
                         if (!isActive) {
-                            scaledBmp?.recycle()
                             rawBmp!!.recycle()
                             return@withContext
                         }
                         preloadedBitmap?.recycle()
-                        preloadedBitmap = scaledBmp ?: rawBmp
+                        preloadedBitmap = rawBmp
                         preloadedUri = currentUri
                         preloadedFocalPoint = focal
-                        if (scaledBmp != null) rawBmp!!.recycle()
                     }
                 }
             }
@@ -803,18 +831,15 @@ class MultiWallpaperLiveService : WallpaperService() {
 
                 if (rawBmp != null) {
                     val focal = if (smartCropEnabled) detectFaceFocalPoint(rawBmp!!) else null
-                    val scaledBmp = createScreenScaledBitmap(rawBmp!!)
                     withContext(Dispatchers.Main) {
                         if (!isActive) {
-                            scaledBmp?.recycle()
                             rawBmp!!.recycle()
                             return@withContext
                         }
                         nextBitmap?.recycle()
                         pageUris[manualPageIndex] = currentUri
-                        nextBitmap = scaledBmp ?: rawBmp
+                        nextBitmap = rawBmp
                         nextFocalPoint = focal
-                        if (scaledBmp != null) rawBmp!!.recycle()
                         
                         if (visible) {
                             startFade()
@@ -838,32 +863,6 @@ class MultiWallpaperLiveService : WallpaperService() {
                     }
                 }
             }
-        }
-
-        private fun createScreenScaledBitmap(raw: Bitmap): Bitmap? {
-            return try {
-                if (surfaceWidth <= 0 || surfaceHeight <= 0) return null
-                
-                // Pre-scale including parallax zoom for consistency and to avoid crash
-                val zoomFactor = if (parallaxEnabled) 1.0f + (parallaxStrength * 0.1f) else 1.0f
-                val targetW = (surfaceWidth * zoomFactor).toInt()
-                val targetH = (surfaceHeight * zoomFactor).toInt()
-
-                val result = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-                val canvas = Canvas(result)
-                
-                val bW = raw.width.toFloat()
-                val bH = raw.height.toFloat()
-                val s = maxOf(targetW.toFloat() / bW, targetH.toFloat() / bH)
-                val ow = bW * s
-                val oh = bH * s
-                val dx = (targetW - ow) / 2f
-                val dy = (targetH - oh) / 2f
-                
-                val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-                canvas.drawBitmap(raw, null, RectF(dx, dy, dx + ow, dy + oh), paint)
-                result
-            } catch (e: Exception) { null }
         }
 
         private fun startFade() {
