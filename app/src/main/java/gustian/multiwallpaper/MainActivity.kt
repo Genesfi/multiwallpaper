@@ -890,6 +890,7 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     val shakeEnabled by viewModel.shakeEnabled.collectAsState()
     val smartCropEnabled by viewModel.smartCropEnabled.collectAsState()
     val lightModeEnabled by viewModel.lightModeEnabled.collectAsState()
+    val wallpaperQuality by viewModel.wallpaperQuality.collectAsState()
     val aiAdvancedEnabled by viewModel.aiAdvancedEnabled.collectAsState()
     val aiZoomSlack by viewModel.aiZoomSlack.collectAsState()
     val aiSensitivityX by viewModel.aiSensitivityX.collectAsState()
@@ -1057,6 +1058,32 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
+                Text("Wallpaper Quality", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("LOW", "NORMAL", "HIGH").forEach { q ->
+                        val selected = wallpaperQuality == q
+                        FilterChip(
+                            selected = selected,
+                            onClick = { viewModel.setWallpaperQuality(q) },
+                            label = { Text(q, fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                selectedLabelColor = MaterialTheme.colorScheme.primary
+                            )
+                        )
+                    }
+                }
+                val qualityDesc = when(wallpaperQuality) {
+                    "LOW" -> "Lowest RAM usage, RGB_565 format (16-bit), reduced resolution."
+                    "HIGH" -> "Maximum sharpness, ARGB_8888 format (32-bit), highest resolution."
+                    else -> "Balanced RAM & quality. Uses 32-bit for active page only."
+                }
+                Text(qualityDesc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 SettingRow(title = "Power Saver (Light Mode)", subtitle = "Saves battery & RAM", checked = lightModeEnabled, onCheckedChange = { viewModel.setLightModeEnabled(it) })
             }
         }

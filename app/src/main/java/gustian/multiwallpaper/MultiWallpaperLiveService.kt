@@ -175,10 +175,11 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var subjectFocusEnabled = false
         private var subjectFocusSmoothing = 0.5f
         private var smartAdjacencyEnabled = true
+        private var wallpaperQuality = "NORMAL"
         private var useFavoritesOnly = false
         private var currentRoll = 0f
         private var currentPitch = 0f
-        private var smoothingFactor = 0.05f // Stronger LPF to ignore jitter
+        private var smoothingFactor = 0.10f // More responsive for 30fps
         private var detectedPages = 20 // Default to 20 for launchers that don't report xStep (HyperOS)
         
         // Job tracking for concurrency safety
@@ -192,7 +193,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         
         private val deadZoneThreshold = 0.2f // Ignore very small tremors
         private var lastSensorDrawTime = 0L
-        private val sensorThrottleMs = 50L // Aggressive throttling (~20fps) to save power
+        private val sensorThrottleMs = 33L // Balanced throttling (30fps) for smoothness
         private var lastShakeTime = 0L
         private val shakeThreshold = 14f // m/s^2 above gravity
         private var lastRotationTime = 0L
@@ -279,6 +280,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             val oldSubjectFocusEnabled = subjectFocusEnabled
             val oldSubjectFocusSmoothing = subjectFocusSmoothing
             val oldSmartAdjacency = smartAdjacencyEnabled
+            val oldQuality = wallpaperQuality
             
             useFavoritesOnly = newUseFav
             parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
@@ -286,6 +288,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             shakeEnabled = prefs.getBoolean("shake_enabled", false)
             smartCropEnabled = prefs.getBoolean("smart_crop_enabled", true)
             lightModeEnabled = prefs.getBoolean("light_mode_enabled", false)
+            wallpaperQuality = prefs.getString("wallpaper_quality", "NORMAL") ?: "NORMAL"
             aiAdvancedEnabled = prefs.getBoolean("ai_advanced_enabled", false)
             aiZoomSlack = prefs.getFloat("ai_zoom_slack", 1.45f)
             aiSensitivityX = prefs.getFloat("ai_sensitivity_x", 0.9f)
@@ -300,7 +303,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             subjectFocusSmoothing = prefs.getFloat("subject_focus_smoothing", 0.5f)
             smartAdjacencyEnabled = prefs.getBoolean("smart_adjacency_enabled", true)
             
-            if (useFavChanged || forceReload) {
+            if (useFavChanged || forceReload || oldQuality != wallpaperQuality) {
                 loadWallpapersForPages()
             } else if (oldSmartCrop != smartCropEnabled || 
                        oldAiAdv != aiAdvancedEnabled || 
@@ -794,10 +797,11 @@ class MultiWallpaperLiveService : WallpaperService() {
                 if (candidates.isEmpty()) return@launch
                 
                 var currentUri = candidates.removeAt(0)
-                var rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight)
+                // Rotation target starts as ARGB_8888 for high quality fade
+                var rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight, isBackground = false)
                 if (rawBmp == null && candidates.isNotEmpty()) {
                     currentUri = candidates.removeAt(0)
-                    rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight)
+                    rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight, isBackground = false)
                 }
 
                 if (rawBmp != null) {
@@ -823,10 +827,11 @@ class MultiWallpaperLiveService : WallpaperService() {
                 if (candidates.isEmpty()) return@launch
                 
                 var currentUri = candidates.removeAt(0)
-                var rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight)
+                // Rotation target starts as ARGB_8888 for high quality fade
+                var rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight, isBackground = false)
                 if (rawBmp == null && candidates.isNotEmpty()) {
                     currentUri = candidates.removeAt(0)
-                    rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight)
+                    rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight, isBackground = false)
                 }
 
                 if (rawBmp != null) {
@@ -945,9 +950,9 @@ class MultiWallpaperLiveService : WallpaperService() {
                     val uriCandidates = getNextWallpaperUriBatch(batchSize).toMutableList()
                     if (uriCandidates.isEmpty()) return@launch
 
-                    // Priority 1: Current Page
+                    // Priority 1: Current Page (Main quality)
                     val visibleUri = uriCandidates.removeAt(0)
-                    val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight)
+                    val firstBitmap = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight, isBackground = false)
                     
                     if (!isActive) { firstBitmap?.recycle(); return@launch }
                     
@@ -1013,6 +1018,8 @@ class MultiWallpaperLiveService : WallpaperService() {
                         }
                         delay(200) // Breathe between decodes to prevent CPU choke
                     }
+                    
+                    System.gc() // Final cleanup after batch load
                     
                     if (isActive) {
                         withContext(Dispatchers.Main) { 
@@ -1123,17 +1130,35 @@ class MultiWallpaperLiveService : WallpaperService() {
                     val opt = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     BitmapFactory.decodeStream(input, null, opt)
                     
-                    var maxWidth = if (reqWidth > 0) reqWidth.coerceAtMost(2048) else 2048
-                    var maxHeight = if (reqHeight > 0) reqHeight.coerceAtMost(2048) else 2048
+                    // Quality-based max resolution
+                    val baseRes = when(wallpaperQuality) {
+                        "HIGH" -> 1920
+                        "LOW" -> 1080
+                        else -> 1440 // NORMAL
+                    }
+                    
+                    var maxWidth = if (reqWidth > 0) reqWidth.coerceAtMost(baseRes) else baseRes
+                    var maxHeight = if (reqHeight > 0) reqHeight.coerceAtMost(baseRes) else baseRes
 
-                    if (lightModeEnabled || isBackground) {
-                        maxWidth = (maxWidth * 0.7f).toInt().coerceAtLeast(720)
-                        maxHeight = (maxHeight * 0.7f).toInt().coerceAtLeast(1280)
+                    if (lightModeEnabled || isBackground || wallpaperQuality == "LOW") {
+                        val factor = if (wallpaperQuality == "LOW") 0.6f else 0.75f
+                        val minW = if (wallpaperQuality == "LOW") 480 else 720
+                        val minH = if (wallpaperQuality == "LOW") 720 else 1080
+                        
+                        maxWidth = (maxWidth * factor).toInt().coerceAtLeast(minW)
+                        maxHeight = (maxHeight * factor).toInt().coerceAtLeast(minH)
                     }
 
                     opt.inSampleSize = calculateInSampleSize(opt, maxWidth, maxHeight)
                     opt.inJustDecodeBounds = false
-                    opt.inPreferredConfig = if (lightModeEnabled || isBackground) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888
+                    
+                    // Bitmap configuration selection
+                    opt.inPreferredConfig = when {
+                        wallpaperQuality == "HIGH" && !isBackground -> Bitmap.Config.ARGB_8888
+                        wallpaperQuality == "LOW" -> Bitmap.Config.RGB_565
+                        lightModeEnabled || isBackground -> Bitmap.Config.RGB_565
+                        else -> Bitmap.Config.ARGB_8888 // NORMAL visible page
+                    }
                     
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         opt.inMutable = true

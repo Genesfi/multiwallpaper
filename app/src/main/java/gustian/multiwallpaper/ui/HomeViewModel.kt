@@ -86,6 +86,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _lightModeEnabled = MutableStateFlow(prefs.getBoolean("light_mode_enabled", false))
     val lightModeEnabled = _lightModeEnabled.asStateFlow()
 
+    private val _wallpaperQuality = MutableStateFlow(prefs.getString("wallpaper_quality", "NORMAL") ?: "NORMAL")
+    val wallpaperQuality = _wallpaperQuality.asStateFlow()
+
     private val _aiAdvancedEnabled = MutableStateFlow(prefs.getBoolean("ai_advanced_enabled", false))
     val aiAdvancedEnabled = _aiAdvancedEnabled.asStateFlow()
 
@@ -484,6 +487,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setLightModeEnabled(enable: Boolean) {
         prefs.edit().putBoolean("light_mode_enabled", enable).apply()
         _lightModeEnabled.value = enable
+    }
+
+    fun setWallpaperQuality(quality: String) {
+        prefs.edit().putString("wallpaper_quality", quality).apply()
+        _wallpaperQuality.value = quality
     }
 
     fun setAiAdvancedEnabled(enable: Boolean) {
