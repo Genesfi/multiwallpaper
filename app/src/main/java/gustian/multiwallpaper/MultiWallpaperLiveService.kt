@@ -174,7 +174,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         private var useFavoritesOnly = false
         private var currentRoll = 0f
         private var currentPitch = 0f
-        private val smoothingFactor = 0.05f // Stronger LPF to ignore jitter
+        private var smoothingFactor = 0.05f // Stronger LPF to ignore jitter
         private var detectedPages = 20 // Default to 20 for launchers that don't report xStep (HyperOS)
         
         // Job tracking for concurrency safety
@@ -511,43 +511,52 @@ class MultiWallpaperLiveService : WallpaperService() {
             val validXOffset = if (xOffset.isNaN()) 0f else xOffset
             val validXStep = if (xStep.isNaN()) 0f else xStep
             
-            // LAUNCHER AUTO-RECOVERY: Mimic manual Reload Button
-            if (validXStep <= 0f && this.xStep > 0f) {
+            // LAUNCHER AUTO-RECOVERY: 
+            if (validXStep <= 0f) {
+                if (detectedPages != 20) {
+                    detectedPages = 20
+                    val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+                    prefs.edit().putBoolean("force_reload_trigger", true).apply()
+                    updateSettings()
+                }
                 this.xStep = 0f
-                val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
-                prefs.edit().putBoolean("force_reload_trigger", true).apply()
-                updateSettings()
-                return
-            }
-
-            if (validXStep > 0f) {
+            } else {
                 val newDetectedPages = (1f / validXStep).roundToInt() + 1
                 if (newDetectedPages != detectedPages && newDetectedPages in 1..50) {
                     val oldPages = detectedPages
                     detectedPages = newDetectedPages
-                    // Only reload if the page count actually changed
                     if (newDetectedPages != oldPages || pageBitmaps.isEmpty()) {
                         handler.removeCallbacks(reloadRunnable)
                         handler.postDelayed(reloadRunnable, 500)
                     }
                 }
+                this.xStep = validXStep
             }
 
-            // Only redraw if the offset changed significantly to save power
+            // SYSTEM UI OFFSET GUARD (HYPEROS):
+            // HyperOS often resets xOffset to 0.0 when entering Recents/Multitasking.
+            // If the offset jumps to exactly 0 while we are NOT visible or during a sudden leap,
+            // we ignore it to prevent the wallpaper from jumping to Page 1.
+            if (!visible && validXOffset == 0f) return 
+
+            // Only redraw if the offset changed significantly
             val offsetDelta = kotlin.math.abs(this.xOffset - validXOffset)
             if (offsetDelta > 0.0001f || this.xStep != validXStep) {
                 this.xOffset = validXOffset
-                this.xStep = validXStep
                 
                 val numBitmaps = pageBitmaps.size
                 if (numBitmaps > 0) {
-                    // CRITICAL: Accurate page mapping for launchers like HyperOS
-                    val targetIndex = if (validXStep > 0f) (validXOffset / validXStep).roundToInt()
-                                     else (validXOffset * (detectedPages - 1)).roundToInt()
-                    val clampedIndex = targetIndex.coerceIn(0, numBitmaps - 1)
-                    if (manualPageIndex != clampedIndex) {
-                        manualPageIndex = clampedIndex
-                        requestDraw()
+                    // CRITICAL FIX FOR HYPEROS RECENTS:
+                    // If xStep is 0 (Poco/HyperOS), we DO NOT update manualPageIndex from xOffset.
+                    // Instead, we rely 100% on the swipe gestures in onTouchEvent.
+                    // This prevents the system from forcing us back to Page 1 during Recents.
+                    if (this.xStep > 0f) {
+                        val targetIndex = (validXOffset / this.xStep).roundToInt()
+                        val clampedIndex = targetIndex.coerceIn(0, detectedPages - 1)
+                        if (manualPageIndex != clampedIndex) {
+                            manualPageIndex = clampedIndex
+                            requestDraw()
+                        }
                     }
                 }
             }
@@ -578,6 +587,18 @@ class MultiWallpaperLiveService : WallpaperService() {
             val useFavorites = prefs.getBoolean("use_favorites_only", false)
             val sortOrder = prefs.getString("rotation_sort_order", "RANDOM")
             
+            // HISTORY EXHAUSTION FIX:
+            // If history is full (e.g. 10k photos), zero photos will be returned.
+            // We check if available photos are low and auto-clear history if needed.
+            val totalImages = if (useFavorites) db.favoriteDao().getFavoriteCount() else db.scannedImageDao().getImageCount()
+            val historyCount = db.rotationHistoryDao().getHistoryCountSync()
+            
+            if (totalImages > 0 && historyCount >= totalImages - 10) {
+                Log.d("MultiWallpaper", "History Exhaustion Detected: Full clearing history")
+                db.rotationHistoryDao().clearHistory() // FULL CLEAR as requested
+                synchronized(recentHistory) { recentHistory.clear() }
+            }
+
             return try {
                 val finalUris = if (useFavorites) {
                     if (sortOrder == "FOLDER") {
@@ -1342,9 +1363,18 @@ class MultiWallpaperLiveService : WallpaperService() {
             val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
             val pos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
             val maxIdx = (detectedPages - 1).coerceAtLeast(0)
-            val idx = if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
+            
+            // HYPEROS REPETITION FIX: 
+            // If xStep is 0 (Poco), we use a hard-coded 20-page loop. 
+            // This ensures manual swiping always accesses 20 unique slots (0 to 19)
+            val idx = if (this.xStep > 0f) {
+                if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
+            } else {
+                manualPageIndex % 20
+            }
+            val clampedIdx = idx.coerceIn(0, maxIdx)
 
-            val curr = pageBitmaps[idx]
+            val curr = pageBitmaps[clampedIdx]
             if (curr != null && !curr.isRecycled) {
                 if (isTransitioning && nextBitmap != null && !nextBitmap!!.isRecycled) {
                     val currFocal = if (smartCropEnabled) pageFocalPoints[idx] else null
