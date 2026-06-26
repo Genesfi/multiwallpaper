@@ -284,7 +284,10 @@ class MultiWallpaperLiveService : WallpaperService() {
             
             useFavoritesOnly = newUseFav
             parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
-            parallaxStrength = prefs.getFloat("parallax_strength", 0.5f)
+            val newStrength = prefs.getFloat("parallax_strength", 0.5f)
+            val strengthChanged = (parallaxStrength != newStrength)
+            parallaxStrength = newStrength
+
             shakeEnabled = prefs.getBoolean("shake_enabled", false)
             smartCropEnabled = prefs.getBoolean("smart_crop_enabled", true)
             lightModeEnabled = prefs.getBoolean("light_mode_enabled", false)
@@ -305,7 +308,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             
             if (useFavChanged || forceReload || oldQuality != wallpaperQuality) {
                 loadWallpapersForPages()
-            } else if (oldSmartCrop != smartCropEnabled || 
+            } else if (strengthChanged || oldSmartCrop != smartCropEnabled ||
                        oldAiAdv != aiAdvancedEnabled || 
                        oldZoom != aiZoomSlack || 
                        oldSensX != aiSensitivityX || 
@@ -1479,8 +1482,8 @@ class MultiWallpaperLiveService : WallpaperService() {
                 // direction of the background tilt. This makes the subject feel like they 
                 // are in a different layer than the background.
                 if (parallaxEnabled) {
-                    val subjectTiltX = (currentRoll / 12f) * (w * 0.08f) 
-                    val subjectTiltY = (currentPitch / 12f) * (h * 0.08f)
+                    val subjectTiltX = (currentRoll / 12f) * (w * 0.08f) * parallaxStrength
+                    val subjectTiltY = (currentPitch / 12f) * (h * 0.08f) * parallaxStrength
                     aiCX -= subjectTiltX // Opposite nudge for depth illusion
                     aiCY += subjectTiltY
                 }
@@ -1510,12 +1513,12 @@ class MultiWallpaperLiveService : WallpaperService() {
             if (parallaxEnabled) {
                 // ASPECT-AWARE PARALLAX (BACKGROUND LAYER):
                 // We scale the motion intensity based on how much "extra room" (ow - w) 
-                // the image actually has.
+                // the image actually has, MULTIPLIED by user preference.
                 val slackX = (ow - w) / 2f
                 val slackY = (oh - h) / 2f
                 
-                cX += (currentRoll / 10f) * slackX
-                cY -= (currentPitch / 10f) * slackY
+                cX += (currentRoll / 10f) * slackX * parallaxStrength
+                cY -= (currentPitch / 10f) * slackY * parallaxStrength
             }
 
             // Clamp to ensure screen is always covered
