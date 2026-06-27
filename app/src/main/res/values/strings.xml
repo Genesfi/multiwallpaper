@@ -1,5 +1,6 @@
 <resources>
     <string name="app_name">Multi Wallpaper</string>
-    <string name="live_wallpaper_label">Multi Wallpaper Live Changer</string>
+    <string name="live_wallpaper_label">Multi Wallpaper (Home)</string>
+    <string name="live_wallpaper_label_lock">Multi Wallpaper (Lock)</string>
     <string name="live_wallpaper_description">Menampilkan wallpaper berbeda di setiap halaman layar utama dari folder lokal pilihan Anda.</string>
 </resources>

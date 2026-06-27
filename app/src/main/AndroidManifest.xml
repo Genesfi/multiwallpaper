@@ -29,7 +29,7 @@
         </activity>
 
         <service
-            android:name=".MultiWallpaperLiveService"
+            android:name=".MultiWallpaperHomeService"
             android:label="@string/live_wallpaper_label"
             android:permission="android.permission.BIND_WALLPAPER"
             android:exported="true">
@@ -38,7 +38,20 @@
             </intent-filter>
             <meta-data
                 android:name="android.service.wallpaper"
-                android:resource="@xml/live_wallpaper" />
+                android:resource="@xml/live_wallpaper_home" />
+        </service>
+
+        <service
+            android:name=".MultiWallpaperLockService"
+            android:label="@string/live_wallpaper_label_lock"
+            android:permission="android.permission.BIND_WALLPAPER"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.wallpaper.WallpaperService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.wallpaper"
+                android:resource="@xml/live_wallpaper_lock" />
         </service>
     </application>
 

@@ -31,7 +31,9 @@ import kotlin.math.sqrt
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
-class MultiWallpaperLiveService : WallpaperService() {
+abstract class BaseMultiWallpaperService : WallpaperService() {
+
+    abstract fun getPreferencesName(): String
 
     companion object {
         // Persistent Global History (Ingatan Gajah) across service restarts/recreates
@@ -42,7 +44,9 @@ class MultiWallpaperLiveService : WallpaperService() {
     private var activeEngine: MultiWallpaperEngine? = null
 
     override fun onCreateEngine(): Engine {
-        val engine = MultiWallpaperEngine()
+        val prefs = getPreferencesName()
+        Log.d("MultiWallpaper", "Service onCreateEngine: ${this.javaClass.simpleName} using $prefs")
+        val engine = MultiWallpaperEngine(prefs)
         engine.setOffsetNotificationsEnabled(true)
         activeEngine = engine
         return engine
@@ -55,7 +59,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
     }
 
-    inner class MultiWallpaperEngine : Engine(), SensorEventListener {
+    inner class MultiWallpaperEngine(private val prefsName: String) : Engine(), SensorEventListener {
         private val handler = Handler(Looper.getMainLooper())
         private val engineScope = CoroutineScope(Dispatchers.Main + Job())
         private var visible = false
@@ -251,14 +255,15 @@ class MultiWallpaperLiveService : WallpaperService() {
                 }
             }
             
-            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             prefs.registerOnSharedPreferenceChangeListener(prefsListener)
             
             updateSettings()
         }
 
         private fun updateSettings() {
-            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            Log.d("MultiWallpaper", "Engine updateSettings: $prefsName (Visible: $visible)")
+            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             val newUseFav = prefs.getBoolean("use_favorites_only", false)
             val useFavChanged = useFavoritesOnly != newUseFav
             
@@ -416,7 +421,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             engineScope.cancel()
             handler.removeCallbacks(drawRunnable)
             handler.removeCallbacks(rotationRunnable)
-            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
             unregisterSensor()
             faceDetector?.close()
@@ -454,7 +459,7 @@ class MultiWallpaperLiveService : WallpaperService() {
                 android.view.MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(blacklistRunnable)
                     val currTime = System.currentTimeMillis()
-                    val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+                    val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                     val doubleTapEnabled = prefs.getBoolean("double_tap_enabled", true)
                     
                     val deltaX = event.x - lastX
@@ -536,7 +541,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             if (validXStep <= 0f) {
                 if (detectedPages != 20) {
                     detectedPages = 20
-                    val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+                    val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                     prefs.edit().putBoolean("force_reload_trigger", true).apply()
                     updateSettings()
                 }
@@ -621,7 +626,7 @@ class MultiWallpaperLiveService : WallpaperService() {
 
         private suspend fun getNextWallpaperUriBatch(count: Int = 1): List<String> {
             val db = AppDatabase.getDatabase(applicationContext)
-            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             val useFavorites = prefs.getBoolean("use_favorites_only", false)
             val sortOrder = prefs.getString("rotation_sort_order", "RANDOM")
             
@@ -911,9 +916,11 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private fun getRotationIntervalMs(): Long {
-            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             val seconds = prefs.getFloat("interval_seconds", 60f)
-            return (seconds * 1000L).toLong()
+            val interval = (seconds * 1000L).toLong()
+            Log.d("MultiWallpaper", "Engine getRotationIntervalMs: $prefsName -> $interval ms ($seconds s)")
+            return interval
         }
 
         private fun loadWallpapersForPages() {
@@ -931,7 +938,7 @@ class MultiWallpaperLiveService : WallpaperService() {
             mainLoadJob = engineScope.launch(Dispatchers.IO) {
                 try {
                     val db = AppDatabase.getDatabase(applicationContext)
-                    val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+                    val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                     val useFavorites = prefs.getBoolean("use_favorites_only", false)
                     
                     val total = if (useFavorites) db.favoriteDao().getFavoriteCount() else db.scannedImageDao().getImageCount()
@@ -1042,7 +1049,7 @@ class MultiWallpaperLiveService : WallpaperService() {
         }
 
         private suspend fun detectFaceFocalPoint(bitmap: Bitmap): PointF? {
-            val prefs = getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             val manX = prefs.getFloat("manual_focal_x", 0.5f)
             val manY = prefs.getFloat("manual_focal_y", 0.4f)
             val fallback = PointF(manX, manY)
@@ -1276,8 +1283,31 @@ class MultiWallpaperLiveService : WallpaperService() {
             val maxIdx = (detectedPages - 1).coerceAtLeast(0)
             val idx = if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
 
-            // Focal point only used if AI Focus is enabled
-            val focal = if (smartCropEnabled && subjectFocusEnabled) pageFocalPoints[idx] else null
+            // FOCAL POINT INTERPOLATION (Fixes effect "jolt" during transitions)
+            var focal: PointF? = null
+            if (smartCropEnabled && subjectFocusEnabled) {
+                if (isTransitioning && nextBitmap != null) {
+                    val startF = pageFocalPoints[manualPageIndex] ?: PointF(0.5f, 0.4f)
+                    val endF = nextFocalPoint ?: PointF(0.5f, 0.4f)
+                    val progress = transitionAlpha.toFloat() / 255f
+                    focal = PointF(
+                        startF.x + (endF.x - startF.x) * progress,
+                        startF.y + (endF.y - startF.y) * progress
+                    )
+                } else if (isFluid && transitionType == "fade") {
+                    val l = pos.toInt().coerceIn(0, maxIdx)
+                    val r = (l + 1).coerceAtMost(maxIdx)
+                    val f = pos - l
+                    val startF = pageFocalPoints[l] ?: PointF(0.5f, 0.4f)
+                    val endF = pageFocalPoints[r] ?: PointF(0.5f, 0.4f)
+                    focal = PointF(
+                        startF.x + (endF.x - startF.x) * f,
+                        startF.y + (endF.y - startF.y) * f
+                    )
+                } else {
+                    focal = pageFocalPoints[idx]
+                }
+            }
 
             // MODERN VISUAL EFFECTS PIPELINE (Android 12+)
             if (android.os.Build.VERSION.SDK_INT >= 31 && canvas.isHardwareAccelerated) {
@@ -1549,4 +1579,12 @@ class MultiWallpaperLiveService : WallpaperService() {
             canvas.drawBitmap(b, srcRect, dstRect, bitmapPaint)
         }
     }
+}
+
+class MultiWallpaperHomeService : BaseMultiWallpaperService() {
+    override fun getPreferencesName(): String = "multi_wallpaper_prefs"
+}
+
+class MultiWallpaperLockService : BaseMultiWallpaperService() {
+    override fun getPreferencesName(): String = "multi_wallpaper_prefs_lock"
 }

@@ -20,6 +20,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+enum class SettingTarget { HOME, LOCK }
+
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val db = AppDatabase.getDatabase(application)
     private val folderDao = db.folderDao()
@@ -29,7 +31,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val blacklistedDao = db.blacklistedDao()
     private val historyDao = db.rotationHistoryDao()
 
-    val prefs = application.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+    private val _settingsTarget = MutableStateFlow(SettingTarget.HOME)
+    val settingsTarget = _settingsTarget.asStateFlow()
+
+    private var currentPrefs = application.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
 
     val folders: StateFlow<List<FolderEntity>> = folderDao.getAllFolders()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -56,52 +61,52 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val selectedGalleryUris = _selectedGalleryUris.asStateFlow()
 
     // Settings States
-    private val _intervalSeconds = MutableStateFlow(prefs.getFloat("interval_seconds", 60f))
+    private val _intervalSeconds = MutableStateFlow(60f)
     val intervalSeconds = _intervalSeconds.asStateFlow()
 
-    private val _useFavoritesOnly = MutableStateFlow(prefs.getBoolean("use_favorites_only", false))
+    private val _useFavoritesOnly = MutableStateFlow(false)
     val useFavoritesOnly = _useFavoritesOnly.asStateFlow()
 
-    private val _transitionType = MutableStateFlow(prefs.getString("transition_type", "slide") ?: "slide")
+    private val _transitionType = MutableStateFlow("slide")
     val transitionType = _transitionType.asStateFlow()
 
-    private val _doubleTapEnabled = MutableStateFlow(prefs.getBoolean("double_tap_enabled", true))
+    private val _doubleTapEnabled = MutableStateFlow(true)
     val doubleTapEnabled = _doubleTapEnabled.asStateFlow()
 
-    private val _fadeSpeed = MutableStateFlow(prefs.getInt("fade_speed", 15))
+    private val _fadeSpeed = MutableStateFlow(15)
     val fadeSpeed = _fadeSpeed.asStateFlow()
 
-    private val _parallaxEnabled = MutableStateFlow(prefs.getBoolean("parallax_enabled", false))
+    private val _parallaxEnabled = MutableStateFlow(false)
     val parallaxEnabled = _parallaxEnabled.asStateFlow()
 
-    private val _parallaxStrength = MutableStateFlow(prefs.getFloat("parallax_strength", 0.5f))
+    private val _parallaxStrength = MutableStateFlow(0.5f)
     val parallaxStrength = _parallaxStrength.asStateFlow()
 
-    private val _shakeEnabled = MutableStateFlow(prefs.getBoolean("shake_enabled", false))
+    private val _shakeEnabled = MutableStateFlow(false)
     val shakeEnabled = _shakeEnabled.asStateFlow()
 
-    private val _smartCropEnabled = MutableStateFlow(prefs.getBoolean("smart_crop_enabled", true))
+    private val _smartCropEnabled = MutableStateFlow(true)
     val smartCropEnabled = _smartCropEnabled.asStateFlow()
 
-    private val _lightModeEnabled = MutableStateFlow(prefs.getBoolean("light_mode_enabled", false))
+    private val _lightModeEnabled = MutableStateFlow(false)
     val lightModeEnabled = _lightModeEnabled.asStateFlow()
 
-    private val _wallpaperQuality = MutableStateFlow(prefs.getString("wallpaper_quality", "NORMAL") ?: "NORMAL")
+    private val _wallpaperQuality = MutableStateFlow("NORMAL")
     val wallpaperQuality = _wallpaperQuality.asStateFlow()
 
-    private val _aiAdvancedEnabled = MutableStateFlow(prefs.getBoolean("ai_advanced_enabled", false))
+    private val _aiAdvancedEnabled = MutableStateFlow(false)
     val aiAdvancedEnabled = _aiAdvancedEnabled.asStateFlow()
 
-    private val _aiZoomSlack = MutableStateFlow(prefs.getFloat("ai_zoom_slack", 1.45f))
+    private val _aiZoomSlack = MutableStateFlow(1.45f)
     val aiZoomSlack = _aiZoomSlack.asStateFlow()
 
-    private val _aiSensitivityX = MutableStateFlow(prefs.getFloat("ai_sensitivity_x", 0.9f))
+    private val _aiSensitivityX = MutableStateFlow(0.9f)
     val aiSensitivityX = _aiSensitivityX.asStateFlow()
 
-    private val _aiSensitivityY = MutableStateFlow(prefs.getFloat("ai_sensitivity_y", 0.4f))
+    private val _aiSensitivityY = MutableStateFlow(0.4f)
     val aiSensitivityY = _aiSensitivityY.asStateFlow()
 
-    private val _gallerySortType = MutableStateFlow(prefs.getString("gallery_sort_type", "NAME") ?: "NAME")
+    private val _gallerySortType = MutableStateFlow("NAME")
     val gallerySortType = _gallerySortType.asStateFlow()
 
     private val _selectedGalleryFolderUris = MutableStateFlow<Set<String>>(emptySet())
@@ -116,22 +121,22 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLoadingPreset = MutableStateFlow(false)
     val isLoadingPreset = _isLoadingPreset.asStateFlow()
 
-    private val _blurRadius = MutableStateFlow(prefs.getFloat("blur_radius", 0f))
+    private val _blurRadius = MutableStateFlow(0f)
     val blurRadius = _blurRadius.asStateFlow()
 
-    private val _dimIntensity = MutableStateFlow(prefs.getFloat("dim_intensity", 0f))
+    private val _dimIntensity = MutableStateFlow(0f)
     val dimIntensity = _dimIntensity.asStateFlow()
 
-    private val _blurEnabled = MutableStateFlow(prefs.getBoolean("blur_enabled", false))
+    private val _blurEnabled = MutableStateFlow(false)
     val blurEnabled = _blurEnabled.asStateFlow()
 
-    private val _dimEnabled = MutableStateFlow(prefs.getBoolean("dim_enabled", false))
+    private val _dimEnabled = MutableStateFlow(false)
     val dimEnabled = _dimEnabled.asStateFlow()
 
-    private val _subjectFocusEnabled = MutableStateFlow(prefs.getBoolean("subject_focus_enabled", false))
+    private val _subjectFocusEnabled = MutableStateFlow(false)
     val subjectFocusEnabled = _subjectFocusEnabled.asStateFlow()
 
-    private val _subjectFocusSmoothing = MutableStateFlow(prefs.getFloat("subject_focus_smoothing", 0.5f))
+    private val _subjectFocusSmoothing = MutableStateFlow(0.5f)
     val subjectFocusSmoothing = _subjectFocusSmoothing.asStateFlow()
 
     private val _latestVersionInfo = MutableStateFlow<UpdateInfo?>(null)
@@ -143,25 +148,25 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _updateMessage = MutableStateFlow<String?>(null)
     val updateMessage = _updateMessage.asStateFlow()
 
-    private val _smartAdjacencyEnabled = MutableStateFlow(prefs.getBoolean("smart_adjacency_enabled", true))
+    private val _smartAdjacencyEnabled = MutableStateFlow(true)
     val smartAdjacencyEnabled = _smartAdjacencyEnabled.asStateFlow()
 
-    private val _rotationSortOrder = MutableStateFlow(prefs.getString("rotation_sort_order", "RANDOM") ?: "RANDOM")
+    private val _rotationSortOrder = MutableStateFlow("RANDOM")
     val rotationSortOrder = _rotationSortOrder.asStateFlow()
 
-    private val _historyLimit = MutableStateFlow(prefs.getInt("history_limit", 150))
+    private val _historyLimit = MutableStateFlow(150)
     val historyLimit = _historyLimit.asStateFlow()
 
-    private val _autoLimitEnabled = MutableStateFlow(prefs.getBoolean("auto_limit_enabled", false))
+    private val _autoLimitEnabled = MutableStateFlow(false)
     val autoLimitEnabled = _autoLimitEnabled.asStateFlow()
 
     val historyCount = historyDao.getHistoryCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
     
-    private val _manualFocalX = MutableStateFlow(prefs.getFloat("manual_focal_x", 0.5f))
+    private val _manualFocalX = MutableStateFlow(0.5f)
     val manualFocalX = _manualFocalX.asStateFlow()
 
-    private val _manualFocalY = MutableStateFlow(prefs.getFloat("manual_focal_y", 0.4f))
+    private val _manualFocalY = MutableStateFlow(0.4f)
     val manualFocalY = _manualFocalY.asStateFlow()
 
     private val _historyList = MutableStateFlow<List<String>>(emptyList())
@@ -198,8 +203,89 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun hasMoreHistory(): Boolean = hasMoreHistory
 
+    fun setSettingsTarget(target: SettingTarget) {
+        _settingsTarget.value = target
+        val prefsName = if (target == SettingTarget.HOME) "multi_wallpaper_prefs" else "multi_wallpaper_prefs_lock"
+        Log.d("MultiWallpaper", "ViewModel setSettingsTarget: $target using $prefsName")
+        currentPrefs = getApplication<Application>().getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        loadSettings()
+    }
+
+    private fun loadSettings() {
+        _intervalSeconds.value = currentPrefs.getFloat("interval_seconds", 60f)
+        _useFavoritesOnly.value = currentPrefs.getBoolean("use_favorites_only", false)
+        _transitionType.value = currentPrefs.getString("transition_type", "slide") ?: "slide"
+        _doubleTapEnabled.value = currentPrefs.getBoolean("double_tap_enabled", true)
+        _fadeSpeed.value = currentPrefs.getInt("fade_speed", 15)
+        _parallaxEnabled.value = currentPrefs.getBoolean("parallax_enabled", false)
+        _parallaxStrength.value = currentPrefs.getFloat("parallax_strength", 0.5f)
+        _shakeEnabled.value = currentPrefs.getBoolean("shake_enabled", false)
+        _smartCropEnabled.value = currentPrefs.getBoolean("smart_crop_enabled", true)
+        _lightModeEnabled.value = currentPrefs.getBoolean("light_mode_enabled", false)
+        _wallpaperQuality.value = currentPrefs.getString("wallpaper_quality", "NORMAL") ?: "NORMAL"
+        _aiAdvancedEnabled.value = currentPrefs.getBoolean("ai_advanced_enabled", false)
+        _aiZoomSlack.value = currentPrefs.getFloat("ai_zoom_slack", 1.45f)
+        _aiSensitivityX.value = currentPrefs.getFloat("ai_sensitivity_x", 0.9f)
+        _aiSensitivityY.value = currentPrefs.getFloat("ai_sensitivity_y", 0.4f)
+        _blurRadius.value = currentPrefs.getFloat("blur_radius", 0f)
+        _dimIntensity.value = currentPrefs.getFloat("dim_intensity", 0f)
+        _blurEnabled.value = currentPrefs.getBoolean("blur_enabled", false)
+        _dimEnabled.value = currentPrefs.getBoolean("dim_enabled", false)
+        _subjectFocusEnabled.value = currentPrefs.getBoolean("subject_focus_enabled", false)
+        _subjectFocusSmoothing.value = currentPrefs.getFloat("subject_focus_smoothing", 0.5f)
+        _smartAdjacencyEnabled.value = currentPrefs.getBoolean("smart_adjacency_enabled", true)
+        _rotationSortOrder.value = currentPrefs.getString("rotation_sort_order", "RANDOM") ?: "RANDOM"
+        _historyLimit.value = currentPrefs.getInt("history_limit", 150)
+        _autoLimitEnabled.value = currentPrefs.getBoolean("auto_limit_enabled", false)
+        _manualFocalX.value = currentPrefs.getFloat("manual_focal_x", 0.5f)
+        _manualFocalY.value = currentPrefs.getFloat("manual_focal_y", 0.4f)
+        
+        if (_autoLimitEnabled.value) {
+            _historyLimit.value = _scannedImages.value.size.coerceAtLeast(150)
+        }
+    }
+
+    fun copySettingsFromOther() {
+        val otherPrefsName = if (_settingsTarget.value == SettingTarget.HOME) "multi_wallpaper_prefs_lock" else "multi_wallpaper_prefs"
+        val otherPrefs = getApplication<Application>().getSharedPreferences(otherPrefsName, Context.MODE_PRIVATE)
+        
+        currentPrefs.edit().apply {
+            putFloat("interval_seconds", otherPrefs.getFloat("interval_seconds", 60f))
+            putBoolean("use_favorites_only", otherPrefs.getBoolean("use_favorites_only", false))
+            putString("transition_type", otherPrefs.getString("transition_type", "slide"))
+            putBoolean("double_tap_enabled", otherPrefs.getBoolean("double_tap_enabled", true))
+            putInt("fade_speed", otherPrefs.getInt("fade_speed", 15))
+            putBoolean("parallax_enabled", otherPrefs.getBoolean("parallax_enabled", false))
+            putFloat("parallax_strength", otherPrefs.getFloat("parallax_strength", 0.5f))
+            putBoolean("shake_enabled", otherPrefs.getBoolean("shake_enabled", false))
+            putBoolean("smart_crop_enabled", otherPrefs.getBoolean("smart_crop_enabled", true))
+            putBoolean("light_mode_enabled", otherPrefs.getBoolean("light_mode_enabled", false))
+            putString("wallpaper_quality", otherPrefs.getString("wallpaper_quality", "NORMAL"))
+            putBoolean("ai_advanced_enabled", otherPrefs.getBoolean("ai_advanced_enabled", false))
+            putFloat("ai_zoom_slack", otherPrefs.getFloat("ai_zoom_slack", 1.45f))
+            putFloat("ai_sensitivity_x", otherPrefs.getFloat("ai_sensitivity_x", 0.9f))
+            putFloat("ai_sensitivity_y", otherPrefs.getFloat("ai_sensitivity_y", 0.4f))
+            putFloat("blur_radius", otherPrefs.getFloat("blur_radius", 0f))
+            putFloat("dim_intensity", otherPrefs.getFloat("dim_intensity", 0f))
+            putBoolean("blur_enabled", otherPrefs.getBoolean("blur_enabled", false))
+            putBoolean("dim_enabled", otherPrefs.getBoolean("dim_enabled", false))
+            putBoolean("subject_focus_enabled", otherPrefs.getBoolean("subject_focus_enabled", false))
+            putFloat("subject_focus_smoothing", otherPrefs.getFloat("subject_focus_smoothing", 0.5f))
+            putBoolean("smart_adjacency_enabled", otherPrefs.getBoolean("smart_adjacency_enabled", true))
+            putString("rotation_sort_order", otherPrefs.getString("rotation_sort_order", "RANDOM"))
+            putInt("history_limit", otherPrefs.getInt("history_limit", 150))
+            putBoolean("auto_limit_enabled", otherPrefs.getBoolean("auto_limit_enabled", false))
+            putFloat("manual_focal_x", otherPrefs.getFloat("manual_focal_x", 0.5f))
+            putFloat("manual_focal_y", otherPrefs.getFloat("manual_focal_y", 0.4f))
+            putBoolean("force_reload_trigger", true)
+            apply()
+        }
+        loadSettings()
+        Toast.makeText(getApplication(), "Settings copied from ${if (_settingsTarget.value == SettingTarget.HOME) "Lock" else "Home"}", Toast.LENGTH_SHORT).show()
+    }
+
     fun setManualFocalPoint(x: Float, y: Float) {
-        prefs.edit()
+        currentPrefs.edit()
             .putFloat("manual_focal_x", x)
             .putFloat("manual_focal_y", y)
             .apply()
@@ -210,6 +296,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private var scanJob: Job? = null
 
     init {
+        loadSettings()
         viewModelScope.launch {
             scannedImageDao.getAllImages().collect { entities ->
                 val favUris = withContext(Dispatchers.IO) {
@@ -219,7 +306,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     WallpaperImg(it.uriString, it.folderUriString, it.displayName, favUris.contains(it.uriString))
                 }
                 _scannedImages.value = images
-                prefs.edit().putInt("total_scanned_count", images.size).apply()
+                currentPrefs.edit().putInt("total_scanned_count", images.size).apply()
                 
                 if (_autoLimitEnabled.value) {
                     _historyLimit.value = images.size.coerceAtLeast(150)
@@ -402,18 +489,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setTransitionType(type: String) {
-        prefs.edit().putString("transition_type", type).apply()
+        currentPrefs.edit().putString("transition_type", type).apply()
         _transitionType.value = type
     }
 
     fun setIntervalSeconds(seconds: Float) {
         val capped = seconds.coerceAtLeast(5f)
-        prefs.edit().putFloat("interval_seconds", capped).apply()
+        currentPrefs.edit().putFloat("interval_seconds", capped).apply()
         _intervalSeconds.value = capped
     }
 
     fun setUseFavoritesOnly(enable: Boolean) {
-        prefs.edit().putBoolean("use_favorites_only", enable)
+        currentPrefs.edit().putBoolean("use_favorites_only", enable)
             .putBoolean("force_reload_trigger", true) // Force service to react
             .apply()
         _useFavoritesOnly.value = enable
@@ -422,18 +509,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setHistoryLimit(limit: Int) {
         if (!_autoLimitEnabled.value) {
             val cappedLimit = limit.coerceIn(10, 8000)
-            prefs.edit().putInt("history_limit", cappedLimit).apply()
+            currentPrefs.edit().putInt("history_limit", cappedLimit).apply()
             _historyLimit.value = cappedLimit
         }
     }
 
     fun setAutoLimitEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean("auto_limit_enabled", enabled).apply()
+        currentPrefs.edit().putBoolean("auto_limit_enabled", enabled).apply()
         _autoLimitEnabled.value = enabled
         if (enabled) {
             _historyLimit.value = _scannedImages.value.size.coerceAtLeast(150)
         } else {
-            val savedLimit = prefs.getInt("history_limit", 150)
+            val savedLimit = currentPrefs.getInt("history_limit", 150)
             _historyLimit.value = savedLimit
         }
     }
@@ -455,87 +542,87 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setDoubleTapEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("double_tap_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("double_tap_enabled", enable).apply()
         _doubleTapEnabled.value = enable
     }
 
     fun setFadeSpeed(speed: Int) {
-        prefs.edit().putInt("fade_speed", speed).apply()
+        currentPrefs.edit().putInt("fade_speed", speed).apply()
         _fadeSpeed.value = speed
     }
 
     fun setParallaxEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("parallax_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("parallax_enabled", enable).apply()
         _parallaxEnabled.value = enable
     }
 
     fun setParallaxStrength(strength: Float) {
-        prefs.edit().putFloat("parallax_strength", strength).apply()
+        currentPrefs.edit().putFloat("parallax_strength", strength).apply()
         _parallaxStrength.value = strength
     }
 
     fun setShakeEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("shake_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("shake_enabled", enable).apply()
         _shakeEnabled.value = enable
     }
 
     fun setSmartCropEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("smart_crop_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("smart_crop_enabled", enable).apply()
         _smartCropEnabled.value = enable
     }
 
     fun setLightModeEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("light_mode_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("light_mode_enabled", enable).apply()
         _lightModeEnabled.value = enable
     }
 
     fun setWallpaperQuality(quality: String) {
-        prefs.edit().putString("wallpaper_quality", quality).apply()
+        currentPrefs.edit().putString("wallpaper_quality", quality).apply()
         _wallpaperQuality.value = quality
     }
 
     fun setAiAdvancedEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("ai_advanced_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("ai_advanced_enabled", enable).apply()
         _aiAdvancedEnabled.value = enable
     }
 
     fun setAiZoomSlack(value: Float) {
-        prefs.edit().putFloat("ai_zoom_slack", value).apply()
+        currentPrefs.edit().putFloat("ai_zoom_slack", value).apply()
         _aiZoomSlack.value = value
     }
 
     fun setAiSensitivityX(value: Float) {
-        prefs.edit().putFloat("ai_sensitivity_x", value).apply()
+        currentPrefs.edit().putFloat("ai_sensitivity_x", value).apply()
         _aiSensitivityX.value = value
     }
 
     fun setAiSensitivityY(value: Float) {
-        prefs.edit().putFloat("ai_sensitivity_y", value).apply()
+        currentPrefs.edit().putFloat("ai_sensitivity_y", value).apply()
         _aiSensitivityY.value = value
     }
 
     fun setBlurRadius(value: Float) {
-        prefs.edit().putFloat("blur_radius", value).apply()
+        currentPrefs.edit().putFloat("blur_radius", value).apply()
         _blurRadius.value = value
     }
 
     fun setDimIntensity(value: Float) {
-        prefs.edit().putFloat("dim_intensity", value).apply()
+        currentPrefs.edit().putFloat("dim_intensity", value).apply()
         _dimIntensity.value = value
     }
 
     fun setBlurEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("blur_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("blur_enabled", enable).apply()
         _blurEnabled.value = enable
     }
 
     fun setDimEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("dim_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("dim_enabled", enable).apply()
         _dimEnabled.value = enable
     }
 
     fun setSmartAdjacencyEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("smart_adjacency_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("smart_adjacency_enabled", enable).apply()
         _smartAdjacencyEnabled.value = enable
         if (enable && _rotationSortOrder.value != "RANDOM") {
             setRotationSortOrder("RANDOM")
@@ -543,7 +630,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setRotationSortOrder(order: String) {
-        prefs.edit().putString("rotation_sort_order", order).apply()
+        currentPrefs.edit().putString("rotation_sort_order", order).apply()
         _rotationSortOrder.value = order
         if (order == "FOLDER" && _smartAdjacencyEnabled.value) {
             setSmartAdjacencyEnabled(false)
@@ -551,12 +638,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setSubjectFocusEnabled(enable: Boolean) {
-        prefs.edit().putBoolean("subject_focus_enabled", enable).apply()
+        currentPrefs.edit().putBoolean("subject_focus_enabled", enable).apply()
         _subjectFocusEnabled.value = enable
     }
 
     fun setSubjectFocusSmoothing(value: Float) {
-        prefs.edit().putFloat("subject_focus_smoothing", value).apply()
+        currentPrefs.edit().putFloat("subject_focus_smoothing", value).apply()
         _subjectFocusSmoothing.value = value
     }
 
@@ -700,7 +787,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setGallerySortType(type: String) {
-        prefs.edit().putString("gallery_sort_type", type).apply()
+        currentPrefs.edit().putString("gallery_sort_type", type).apply()
         _gallerySortType.value = type
     }
 
@@ -917,7 +1004,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun triggerReload() {
-        prefs.edit().putBoolean("force_reload_trigger", true).apply()
+        Log.d("MultiWallpaper", "ViewModel triggerReload for ${if (_settingsTarget.value == SettingTarget.HOME) "Home" else "Lock"}")
+        currentPrefs.edit().putBoolean("force_reload_trigger", true).apply()
         Toast.makeText(getApplication(), "Wallpaper reload triggered", Toast.LENGTH_SHORT).show()
     }
 

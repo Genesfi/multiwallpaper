@@ -65,6 +65,7 @@ import gustian.multiwallpaper.ui.HomeViewModel
 import gustian.multiwallpaper.ui.WallpaperImg
 import gustian.multiwallpaper.ui.theme.MyApplicationTheme
 
+import android.util.Log
 import android.provider.Settings
 
 class MainActivity : ComponentActivity() {
@@ -133,7 +134,13 @@ fun MainLayout() {
                     } else if (currentTab == NavigationTab.GALLERY && gallerySearchQuery.isNotEmpty()) {
                         IconButton(onClick = { viewModel.setGallerySearchQuery("") }) { Icon(Icons.Default.Close, null) }
                     } else {
-                        IconButton(onClick = { triggerLiveWallpaperSelection(context) }) { Icon(Icons.Default.Wallpaper, null, tint = MaterialTheme.colorScheme.primary) }
+                        IconButton(onClick = { 
+                            val service = if (currentTab == NavigationTab.SETTINGS && viewModel.settingsTarget.value == gustian.multiwallpaper.ui.SettingTarget.LOCK)
+                                MultiWallpaperLockService::class.java
+                            else 
+                                MultiWallpaperHomeService::class.java
+                            triggerLiveWallpaperSelection(context, service) 
+                        }) { Icon(Icons.Default.Wallpaper, null, tint = MaterialTheme.colorScheme.primary) }
                     }
                 },
                 actions = {
@@ -880,6 +887,7 @@ fun FavoritesScreen(viewModel: HomeViewModel) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
+    val settingsTarget by viewModel.settingsTarget.collectAsState()
     val totalSeconds by viewModel.intervalSeconds.collectAsState()
     val transition by viewModel.transitionType.collectAsState()
     val useFav by viewModel.useFavoritesOnly.collectAsState()
@@ -911,7 +919,9 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     val historyCount by viewModel.historyCount.collectAsState()
     val sortOrder by viewModel.rotationSortOrder.collectAsState()
     
-    var unit by remember { mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") }
+    var unit by remember(totalSeconds) { 
+        mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") 
+    }
     val displayValue = remember(totalSeconds, unit) {
         val v = when(unit) {
             "Sec" -> totalSeconds
@@ -923,7 +933,50 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     }
     
     val scrollState = rememberScrollState()
+    val context = LocalContext.current
     Column(modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(scrollState)) {
+        // --- Settings Target Switcher ---
+        Text("TARGET SCREEN", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.HOME) },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            ) {
+                Icon(Icons.Default.Home, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Home")
+            }
+            Button(
+                onClick = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.LOCK) },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            ) {
+                Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Lock")
+            }
+        }
+        
+        TextButton(
+            onClick = { viewModel.copySettingsFromOther() },
+            modifier = Modifier.align(Alignment.End)
+        ) {
+            Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(14.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("Copy from ${if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) "Lock" else "Home"}", fontSize = 11.sp)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
         Text("GENERAL SETTINGS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -1718,10 +1771,26 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
             }
         }
         Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = onSetWallpaperClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), contentPadding = PaddingValues(16.dp)) { 
+        Button(
+            onClick = { triggerLiveWallpaperSelection(context, MultiWallpaperHomeService::class.java) },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            contentPadding = PaddingValues(16.dp)
+        ) { 
             Icon(Icons.Default.Wallpaper, null)
             Spacer(modifier = Modifier.width(8.dp))
-            Text("Set Live Wallpaper") 
+            Text("Set Home Wallpaper") 
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = { triggerLiveWallpaperSelection(context, MultiWallpaperLockService::class.java) },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            contentPadding = PaddingValues(16.dp)
+        ) { 
+            Icon(Icons.Default.Lock, null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Set Lock Wallpaper") 
         }
         Spacer(modifier = Modifier.height(40.dp))
     }
@@ -2191,11 +2260,19 @@ fun ManualFocalEditorDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
     }
 }
 
-private fun triggerLiveWallpaperSelection(context: Context) {
+private fun triggerLiveWallpaperSelection(context: Context, serviceClass: Class<*> = MultiWallpaperHomeService::class.java) {
+    Log.d("MultiWallpaper", "MainActivity trigger selection: ${serviceClass.simpleName}")
     try {
-        val intent = Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER).apply { putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT, ComponentName(context, MultiWallpaperLiveService::class.java)) }
+        val intent = Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER).apply { 
+            putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT, ComponentName(context.packageName, serviceClass.name))
+        }
         context.startActivity(intent)
-    } catch (e: Exception) { try { context.startActivity(Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER)) } catch (e2: Exception) {} }
+    } catch (e: Exception) { 
+        Log.e("MultiWallpaper", "MainActivity selection error", e)
+        try { 
+            context.startActivity(Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER)) 
+        } catch (e2: Exception) {} 
+    }
 }
 
 private fun saveImageToGallery(context: Context, imageUri: Uri, displayName: String) {
