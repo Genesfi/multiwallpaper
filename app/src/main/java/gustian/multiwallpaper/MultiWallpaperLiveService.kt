@@ -1,16 +1,28 @@
 package gustian.multiwallpaper
 
-import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.SharedPreferences
-import android.graphics.*
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.PointF
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.RadialGradient
+import android.graphics.Rect
+import android.graphics.RectF
+import android.graphics.RenderEffect
+import android.graphics.RenderNode
+import android.graphics.Shader
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
-import androidx.exifinterface.media.ExifInterface
 import android.os.Handler
 import android.os.Looper
 import android.service.wallpaper.WallpaperService
@@ -18,18 +30,26 @@ import android.util.Log
 import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.animation.DecelerateInterpolator
-import gustian.multiwallpaper.data.AppDatabase
-import gustian.multiwallpaper.data.BlacklistedImageEntity
-import gustian.multiwallpaper.data.RotationHistoryEntity
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
-import kotlinx.coroutines.*
+import gustian.multiwallpaper.data.AppDatabase
+import gustian.multiwallpaper.data.BlacklistedImageEntity
+import gustian.multiwallpaper.data.RotationHistoryEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
-import kotlin.math.sqrt
 import kotlin.math.roundToInt
-import kotlin.random.Random
+import kotlin.math.sqrt
 
 abstract class BaseMultiWallpaperService : WallpaperService() {
 
@@ -37,7 +57,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
     companion object {
         // Persistent Global History (Ingatan Gajah) across service restarts/recreates
-        private val recentHistory = LinkedHashSet<String>()
+        // Keyed by Target Name (e.g. "HOME", "LOCK")
+        private val recentHistories = mutableMapOf<String, LinkedHashSet<String>>()
         private const val DEFAULT_MAX_HISTORY = 150
     }
 
@@ -87,9 +108,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 if (currentUri != null) {
                     // Delete from DB in background
                     val db = AppDatabase.getDatabase(applicationContext)
+                    val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
                     engineScope.launch(Dispatchers.IO) {
                         // Find data to move to blacklist
-                        val scanned = db.scannedImageDao().getAllImagesSync().find { it.uriString == currentUri }
+                        val scanned = db.scannedImageDao().getAllImagesSync(targetName).find { it.uriString == currentUri }
                         if (scanned != null) {
                             db.blacklistedDao().insertBlacklist(
                                 BlacklistedImageEntity(
@@ -99,8 +121,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 )
                             )
                         }
-                        db.favoriteDao().deleteFavoriteByUriSync(currentUri)
-                        db.scannedImageDao().deleteImageByUriSync(currentUri)
+                        db.favoriteDao().deleteFavoriteByUriSync(currentUri, targetName)
+                        db.scannedImageDao().deleteImageByUriSync(currentUri, targetName)
                         
                         withContext(Dispatchers.Main) {
                             // Visual feedback: brief red flash
@@ -178,6 +200,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var dimEnabled = false
         private var subjectFocusEnabled = false
         private var subjectFocusSmoothing = 0.5f
+        private var vignetteModeEnabled = false
+        private var vignetteSharpness = 0.5f
+        private var vignetteWidth = 0.2f
         private var smartAdjacencyEnabled = true
         private var wallpaperQuality = "NORMAL"
         private var useFavoritesOnly = false
@@ -239,18 +264,21 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
             val db = AppDatabase.getDatabase(applicationContext)
+            val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
             engineScope.launch {
                 // Keep in-memory history synced with database
-                db.rotationHistoryDao().getAllHistory().collect { dbHistory ->
-                    synchronized(recentHistory) {
-                        recentHistory.clear()
-                        recentHistory.addAll(dbHistory.reversed()) // Oldest first for LinkedHashSet FIFO
+                db.rotationHistoryDao().getAllHistory(targetName).collect { dbHistory ->
+                    synchronized(recentHistories) {
+                        val history = recentHistories.getOrPut(targetName) { LinkedHashSet() }
+                        history.clear()
+                        history.addAll(dbHistory.reversed()) // Oldest first for LinkedHashSet FIFO
                     }
                 }
             }
 
             engineScope.launch {
-                db.folderDao().getAllFolders().collectLatest {
+                val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
+                db.folderDao().getAllFolders(targetName).collectLatest {
                     loadWallpapersForPages()
                 }
             }
@@ -309,6 +337,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             dimEnabled = prefs.getBoolean("dim_enabled", false)
             subjectFocusEnabled = prefs.getBoolean("subject_focus_enabled", false)
             subjectFocusSmoothing = prefs.getFloat("subject_focus_smoothing", 0.5f)
+            vignetteModeEnabled = prefs.getBoolean("vignette_mode_enabled", false)
+            vignetteSharpness = prefs.getFloat("vignette_sharpness", 0.5f)
+            vignetteWidth = prefs.getFloat("vignette_width", 0.2f)
             smartAdjacencyEnabled = prefs.getBoolean("smart_adjacency_enabled", true)
             
             if (useFavChanged || forceReload || oldQuality != wallpaperQuality) {
@@ -630,53 +661,57 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val useFavorites = prefs.getBoolean("use_favorites_only", false)
             val sortOrder = prefs.getString("rotation_sort_order", "RANDOM")
             
+            // Resolve target string based on prefsName
+            val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
+            
             // HISTORY EXHAUSTION FIX:
             // If history is full (e.g. 10k photos), zero photos will be returned.
             // We check if available photos are low and auto-clear history if needed.
-            val totalImages = if (useFavorites) db.favoriteDao().getFavoriteCount() else db.scannedImageDao().getImageCount()
-            val historyCount = db.rotationHistoryDao().getHistoryCountSync()
+            val totalImages = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
+            val historyCount = db.rotationHistoryDao().getHistoryCountSync(targetName)
             
             if (totalImages > 0 && historyCount >= totalImages - 10) {
-                Log.d("MultiWallpaper", "History Exhaustion Detected: Full clearing history")
-                db.rotationHistoryDao().clearHistory() // FULL CLEAR as requested
-                synchronized(recentHistory) { recentHistory.clear() }
+                Log.d("MultiWallpaper", "History Exhaustion Detected for $targetName: Full clearing history")
+                db.rotationHistoryDao().clearHistory(targetName) // FULL CLEAR as requested
+                synchronized(recentHistories) { recentHistories[targetName]?.clear() }
             }
 
             return try {
                 val finalUris = if (useFavorites) {
                     if (sortOrder == "FOLDER") {
-                        listOfNotNull(db.favoriteDao().getOrderedFavoriteUriExcludingHistorySubquery())
+                        listOfNotNull(db.favoriteDao().getOrderedFavoriteUriExcludingHistorySubquery(targetName))
                     } else {
-                        db.favoriteDao().getRandomFavoriteUrisExcludingHistory(count)
+                        db.favoriteDao().getRandomFavoriteUrisExcludingHistory(targetName, count)
                     }
                 } else {
                     if (sortOrder == "FOLDER") {
-                        listOfNotNull(db.scannedImageDao().getOrderedUriExcludingHistorySubquery())
+                        listOfNotNull(db.scannedImageDao().getOrderedUriExcludingHistorySubquery(targetName))
                     } else {
-                        db.scannedImageDao().getRandomUrisExcludingHistory(count)
+                        db.scannedImageDao().getRandomUrisExcludingHistory(targetName, count)
                     }
                 }
                 
                 finalUris.forEach { uri ->
-                    synchronized(recentHistory) {
+                    synchronized(recentHistories) {
                         val isAuto = prefs.getBoolean("auto_limit_enabled", false)
                         val totalCount = prefs.getInt("total_scanned_count", 150)
                         val currentMax = if (isAuto) totalCount.coerceAtLeast(150) 
                                          else prefs.getInt("history_limit", DEFAULT_MAX_HISTORY)
                         
-                        recentHistory.add(uri)
+                        val history = recentHistories.getOrPut(targetName) { LinkedHashSet() }
+                        history.add(uri)
                         
                         engineScope.launch(Dispatchers.IO) {
-                            db.rotationHistoryDao().insertHistory(RotationHistoryEntity(uriString = uri))
+                            db.rotationHistoryDao().insertHistory(RotationHistoryEntity(uriString = uri, target = targetName))
                             // Only trim if we actually exceed the limit to save DB cycles
-                            val historyCount = db.rotationHistoryDao().getHistoryCountSync()
+                            val historyCount = db.rotationHistoryDao().getHistoryCountSync(targetName)
                             if (historyCount > currentMax + 10) {
-                                db.rotationHistoryDao().trimHistory(currentMax)
+                                db.rotationHistoryDao().trimHistory(targetName, currentMax)
                             }
                         }
 
-                        if (recentHistory.size > currentMax) {
-                            val iterator = recentHistory.iterator()
+                        if (history.size > currentMax) {
+                            val iterator = history.iterator()
                             if (iterator.hasNext()) {
                                 iterator.next()
                                 iterator.remove()
@@ -783,6 +818,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     }
 
                     if (b != null) {
+                        // DETECT AI INSTANTLY FOR NEIGHBORS
                         val focal = if (smartCropEnabled) detectFaceFocalPoint(b!!) else null
                         withContext(Dispatchers.Main) {
                             val old = pageBitmaps[p]
@@ -941,7 +977,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                     val useFavorites = prefs.getBoolean("use_favorites_only", false)
                     
-                    val total = if (useFavorites) db.favoriteDao().getFavoriteCount() else db.scannedImageDao().getImageCount()
+                    val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
+                    val total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
                     
                     if (total <= 0) {
                         withContext(Dispatchers.Main) { 
@@ -966,6 +1003,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     
                     if (!isActive) { firstBitmap?.recycle(); return@launch }
                     
+                    // RUN AI INSTANTLY FOR MAIN PAGE
                     val firstFocal = if (firstBitmap != null && smartCropEnabled) detectFaceFocalPoint(firstBitmap) else null
                     
                     withContext(Dispatchers.Main) {
@@ -1015,6 +1053,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         
                         if (b != null) {
                             if (!isActive) { b.recycle(); break }
+                            // RUN AI INSTANTLY FOR NEIGHBORS
                             val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
                             withContext(Dispatchers.Main) {
                                 synchronized(bitmapLock) {
@@ -1026,7 +1065,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 }
                             }
                         }
-                        delay(200) // Breathe between decodes to prevent CPU choke
+                        delay(100) // Breathe between decodes
                     }
                     
                     System.gc() // Final cleanup after batch load
@@ -1329,21 +1368,23 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     // Record drawing into the Node
                     val recordingCanvas = node.beginRecording()
                     drawWallpaperContent(recordingCanvas, w, h)
-                    
-                    // Apply Spotlight (Vignette) INSIDE the node if AI Focus is ON and focal is found
-                    if (subjectFocusEnabled && focal != null && dimEnabled && dimIntensity > 0f) {
-                        drawSubjectFocus(recordingCanvas, w.toFloat(), h.toFloat(), focal)
-                    }
-                    
                     node.endRecording()
 
-                    // Draw the Node (Blurred background + Spotlight)
+                    // Draw the Node (Blurred background)
                     canvas.drawRenderNode(node)
                     
-                    // TRUE PORTRAIT MODE: Draw a SHARP subject on top of the blurred node
-                    // Only if AI Focus is ON, Blur is ON, and focal is found
+                    // Apply Spotlight/Vignette (Drawn OUTSIDE the blurred node to keep edges sharp)
+                    if (subjectFocusEnabled && focal != null && dimEnabled && dimIntensity > 0f) {
+                        drawSubjectFocus(canvas, w.toFloat(), h.toFloat(), focal)
+                    } else if (vignetteModeEnabled && dimEnabled && dimIntensity > 0f) {
+                        drawSubjectFocus(canvas, w.toFloat(), h.toFloat(), PointF(0.5f, 0.5f))
+                    }
+                    
+                    // TRUE PORTRAIT MODE: Draw a SHARP subject on top
                     if (subjectFocusEnabled && focal != null && blurEnabled && blurRadius > 0f) {
                         drawSharpSubject(canvas, w.toFloat(), h.toFloat(), focal)
+                    } else if (vignetteModeEnabled && blurEnabled && blurRadius > 0f) {
+                        drawSharpSubject(canvas, w.toFloat(), h.toFloat(), PointF(0.5f, 0.5f))
                     }
                 } catch (e: Exception) {
                     Log.e("MultiWallpaper", "RenderNode Effects failed: ${e.message}")
@@ -1355,11 +1396,14 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 if (subjectFocusEnabled && focal != null) {
                     if (dimEnabled && dimIntensity > 0f) drawSubjectFocus(canvas, w.toFloat(), h.toFloat(), focal)
                     if (blurEnabled && blurRadius > 0f) drawSharpSubject(canvas, w.toFloat(), h.toFloat(), focal)
+                } else if (vignetteModeEnabled) {
+                    if (dimEnabled && dimIntensity > 0f) drawSubjectFocus(canvas, w.toFloat(), h.toFloat(), PointF(0.5f, 0.5f))
+                    if (blurEnabled && blurRadius > 0f) drawSharpSubject(canvas, w.toFloat(), h.toFloat(), PointF(0.5f, 0.5f))
                 }
             }
 
-            // Apply Global Dim Overlay (Only if AI Focus is OFF or no focal found)
-            if (dimEnabled && dimIntensity > 0f && (focal == null || !subjectFocusEnabled)) {
+            // Apply Global Dim Overlay (Only if AI Focus and Vignette are OFF)
+            if (dimEnabled && dimIntensity > 0f && !subjectFocusEnabled && !vignetteModeEnabled) {
                 val alpha = (dimIntensity * 255).toInt().coerceIn(0, 255)
                 canvas.drawColor(Color.argb(alpha, 0, 0, 0))
             }
@@ -1372,48 +1416,114 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
 
         private fun drawSharpSubject(canvas: Canvas, w: Float, h: Float, focal: PointF) {
-            // Use saveLayer to create a composition for the mask
+            val isVignette = (focal.x == 0.5f && focal.y == 0.5f)
             val checkpoint = canvas.saveLayer(0f, 0f, w, h, null)
-            
-            // 1. Draw the sharp version of the content
             drawWallpaperContent(canvas, w.toInt(), h.toInt())
             
-            // 2. Draw a radial mask that is TRANSPARENT in the center and BLACK at the edges.
-            val faceX = focal.x * w
-            val faceY = focal.y * h
-            val radius = maxOf(w, h) * 0.45f
-            
-            // Central area is TRANSPARENT (keeps subject), edges are BLACK (removes subject).
-            val colors = intArrayOf(Color.TRANSPARENT, Color.BLACK)
-            // Use smoothing to control the gradient transition
-            val innerStop = (0.45f - (subjectFocusSmoothing * 0.4f)).coerceIn(0.01f, 0.44f)
-            val outerStop = (0.45f + (subjectFocusSmoothing * 0.4f)).coerceIn(0.46f, 0.99f)
-            val stops = floatArrayOf(innerStop, outerStop)
-            
-            val gradient = RadialGradient(faceX, faceY, radius, colors, stops, Shader.TileMode.CLAMP)
-            maskPaint.shader = gradient
-            canvas.drawRect(0f, 0f, w, h, maskPaint)
-            
+            if (isVignette) {
+                // TRUE RECTANGULAR EDGE SHADOW (STRICTLY LINEAR)
+                val edgeW = w * vignetteWidth
+                val edgeH = h * vignetteWidth
+                val shadowColor = Color.BLACK
+                val transparent = Color.TRANSPARENT
+                
+                val smoothing = 1.0f - vignetteSharpness
+                val colorsArr = intArrayOf(shadowColor, transparent)
+                val stops = floatArrayOf(
+                    (0.5f - (smoothing * 0.45f)).coerceIn(0.01f, 0.49f),
+                    (0.5f + (smoothing * 0.45f)).coerceIn(0.51f, 0.99f)
+                )
+
+                // ANTI-CROSS (+) LOGIC: 
+                // Use default DST_OUT to mask out the sharp layer edges.
+                // Overlapping corners will be slightly more transparent, creating a natural vignette shape.
+
+                // Left
+                maskPaint.shader = android.graphics.LinearGradient(0f, 0f, edgeW, 0f, colorsArr, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, 0f, edgeW, h, maskPaint)
+                // Right
+                maskPaint.shader = android.graphics.LinearGradient(w, 0f, w - edgeW, 0f, colorsArr, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(w - edgeW, 0f, w, h, maskPaint)
+                // Top
+                maskPaint.shader = android.graphics.LinearGradient(0f, 0f, 0f, edgeH, colorsArr, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, 0f, w, edgeH, maskPaint)
+                // Bottom
+                maskPaint.shader = android.graphics.LinearGradient(0f, h, 0f, h - edgeH, colorsArr, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, h - edgeH, w, h, maskPaint)
+            } else {
+                // ORIGINAL RADIAL MASK FOR AI SUBJECT FOCUS (ROUND SPOTLIGHT)
+                val faceX = focal.x * w
+                val faceY = focal.y * h
+                val diagonal = sqrt(w * w + h * h) / 2f
+                val radius = diagonal * (0.5f + subjectFocusSmoothing * 1.5f)
+                val colors = intArrayOf(Color.TRANSPARENT, Color.BLACK)
+                
+                val smoothing = 1.0f - (vignetteSharpness * 0.9f) 
+                val innerStop = (0.5f - (smoothing * 0.45f)).coerceIn(0.01f, 0.49f)
+                val outerStop = (0.5f + (smoothing * 0.45f)).coerceIn(0.51f, 0.99f)
+                val stops = floatArrayOf(innerStop, outerStop)
+                
+                val gradient = RadialGradient(faceX, faceY, radius, colors, stops, Shader.TileMode.CLAMP)
+                maskPaint.shader = gradient
+                canvas.drawRect(0f, 0f, w, h, maskPaint)
+            }
             canvas.restoreToCount(checkpoint)
         }
 
         private fun drawSubjectFocus(canvas: Canvas, w: Float, h: Float, focal: PointF) {
-            val radius = maxOf(w, h) * 0.9f
-            val faceX = focal.x * w
-            val faceY = focal.y * h
-            
-            // Central area (around face) is transparent, edges are dark
+            val isVignette = (focal.x == 0.5f && focal.y == 0.5f)
             val alpha = (dimIntensity * 255).toInt().coerceIn(0, 255)
-            val colors = intArrayOf(Color.TRANSPARENT, Color.argb(alpha, 0, 0, 0))
+            val shadowColor = Color.argb(alpha, 0, 0, 0)
+            val transparent = Color.TRANSPARENT
             
-            // Apply smoothing to spotlight transition
-            val innerStop = (0.25f - (subjectFocusSmoothing * 0.2f)).coerceIn(0.01f, 0.24f)
-            val outerStop = (0.25f + (subjectFocusSmoothing * 0.7f)).coerceIn(0.26f, 0.99f)
-            val stops = floatArrayOf(innerStop, outerStop)
-            
-            val gradient = RadialGradient(faceX, faceY, radius, colors, stops, Shader.TileMode.CLAMP)
-            vignettePaint.shader = gradient
-            canvas.drawRect(0f, 0f, w, h, vignettePaint)
+            if (isVignette) {
+                // TRUE RECTANGULAR EDGE DIMMING (STRICTLY LINEAR)
+                val edgeW = w * vignetteWidth
+                val edgeH = h * vignetteWidth
+                
+                val smoothing = 1.0f - vignetteSharpness
+                val colorsArr = intArrayOf(shadowColor, transparent)
+                val stops = floatArrayOf(
+                    (0.5f - (smoothing * 0.45f)).coerceIn(0.01f, 0.49f),
+                    (0.5f + (smoothing * 0.45f)).coerceIn(0.51f, 0.99f)
+                )
+
+                // Use DARKEN xfermode to prevent corner doubling
+                val oldXfer = vignettePaint.xfermode
+                vignettePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DARKEN)
+                
+                // Left
+                vignettePaint.shader = android.graphics.LinearGradient(0f, 0f, edgeW, 0f, colorsArr, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, 0f, edgeW, h, vignettePaint)
+                // Right
+                vignettePaint.shader = android.graphics.LinearGradient(w, 0f, w - edgeW, 0f, colorsArr, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(w - edgeW, 0f, w, h, vignettePaint)
+                // Top
+                vignettePaint.shader = android.graphics.LinearGradient(0f, 0f, 0f, edgeH, colorsArr, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, 0f, w, edgeH, vignettePaint)
+                // Bottom
+                vignettePaint.shader = android.graphics.LinearGradient(0f, h, 0f, h - edgeH, colorsArr, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, h - edgeH, w, h, vignettePaint)
+                
+                vignettePaint.xfermode = oldXfer
+            } else {
+                // ORIGINAL RADIAL DIMMING FOR AI SUBJECT FOCUS (ROUND SPOTLIGHT)
+                val faceX = focal.x * w
+                val faceY = focal.y * h
+                val diagonal = sqrt(w * w + h * h) / 2f
+                val radius = diagonal * (0.5f + subjectFocusSmoothing * 1.5f)
+                
+                val smoothing = 1.0f - (vignetteSharpness * 0.9f)
+                val radialColors = intArrayOf(transparent, shadowColor)
+                val radialStops = floatArrayOf(
+                    (0.6f - (smoothing * 0.55f)).coerceIn(0.01f, 0.59f),
+                    (0.6f + (smoothing * 0.35f)).coerceIn(0.61f, 0.99f)
+                )
+                
+                val gradient = RadialGradient(faceX, faceY, radius, radialColors, radialStops, Shader.TileMode.CLAMP)
+                vignettePaint.shader = gradient
+                canvas.drawRect(0f, 0f, w, h, vignettePaint)
+            }
         }
 
         private fun drawWallpaperContent(canvas: Canvas, w: Int, h: Int) {

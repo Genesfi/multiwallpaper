@@ -46,7 +46,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -65,8 +64,18 @@ import gustian.multiwallpaper.ui.HomeViewModel
 import gustian.multiwallpaper.ui.WallpaperImg
 import gustian.multiwallpaper.ui.theme.MyApplicationTheme
 
+import kotlinx.coroutines.launch
 import android.util.Log
 import android.provider.Settings
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.draw.drawWithContent
+import android.graphics.Shader as AndroidShader
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -119,6 +128,7 @@ fun MainLayout() {
     val isLoadingPreset by viewModel.isLoadingPreset.collectAsState()
     val latestVersionInfo by viewModel.latestVersionInfo.collectAsState()
     val updateMessage by viewModel.updateMessage.collectAsState()
+    val settingsTarget by viewModel.settingsTarget.collectAsState()
     val context = LocalContext.current
 
     Scaffold(
@@ -135,7 +145,7 @@ fun MainLayout() {
                         IconButton(onClick = { viewModel.setGallerySearchQuery("") }) { Icon(Icons.Default.Close, null) }
                     } else {
                         IconButton(onClick = { 
-                            val service = if (currentTab == NavigationTab.SETTINGS && viewModel.settingsTarget.value == gustian.multiwallpaper.ui.SettingTarget.LOCK)
+                            val service = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK)
                                 MultiWallpaperLockService::class.java
                             else 
                                 MultiWallpaperHomeService::class.java
@@ -225,7 +235,7 @@ fun MainLayout() {
                     NavigationTab.FOLDERS -> FolderScreen(viewModel)
                     NavigationTab.GALLERY -> GalleryScreen(viewModel)
                     NavigationTab.FAVORITES -> FavoritesScreen(viewModel)
-                    NavigationTab.SETTINGS -> SettingsScreen(viewModel) { triggerLiveWallpaperSelection(context) }
+                    NavigationTab.SETTINGS -> SettingsScreen(viewModel)
                 }
             }
             if (showMultiSelectDialog) MultiFolderSelectDialog(viewModel, { showMultiSelectDialog = false })
@@ -332,7 +342,8 @@ fun MultiFolderSelectDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
                     TextButton(onClick = { viewModel.toggleSelectAll() }) { Text(if (isAllSelected) "None" else "All") }
                 }
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Text(text = currentPath.absolutePath.replace("/storage/emulated/0", "Internal"), modifier = Modifier.padding(8.dp), style = MaterialTheme.typography.labelSmall)
+                    val pathText = currentPath?.absolutePath?.replace("/storage/emulated/0", "Internal") ?: "Internal"
+                    Text(text = pathText, modifier = Modifier.padding(8.dp), style = MaterialTheme.typography.labelSmall)
                 }
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     items(items) { item ->
@@ -363,30 +374,79 @@ fun MultiFolderSelectDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FolderScreen(viewModel: HomeViewModel) {
-    val folders by viewModel.folders.collectAsState()
+    val settingsTarget by viewModel.settingsTarget.collectAsState()
+    val folders by viewModel.folders.collectAsState(initial = emptyList())
     val isScanning by viewModel.isScanning.collectAsState()
     val selectedIds by viewModel.selectedFolderIds.collectAsState()
     val scannedImages by viewModel.scannedImages.collectAsState()
-    val presets by viewModel.presets.collectAsState()
+    val presets by viewModel.presets.collectAsState(initial = emptyList())
     val activePresetName by viewModel.activePresetName.collectAsState()
 
-    FolderScreen(
-        folders = folders,
-        isScanning = isScanning,
-        selectedIds = selectedIds,
-        scannedImages = scannedImages,
-        presets = presets,
-        activePresetName = activePresetName,
-        onDeleteFolder = { viewModel.deleteFolder(it) },
-        onScan = { viewModel.scanFolders() },
-        onClearAllFolders = { viewModel.clearAllFolders() },
-        onToggleFolderIdSelection = { viewModel.toggleFolderIdSelection(it) },
-        onUpdateActivePreset = { viewModel.updateActivePreset() },
-        onSavePreset = { viewModel.saveCurrentAsPreset(it) },
-        onLoadPreset = { viewModel.loadPreset(it) },
-        onDeletePreset = { viewModel.deletePreset(it) },
-        onAddClick = null
-    )
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Target Switcher at Top
+        TargetSwitcher(
+            selectedTarget = settingsTarget,
+            onTargetSelected = { viewModel.setSettingsTarget(it) }
+        )
+        
+        FolderScreen(
+            folders = folders,
+            isScanning = isScanning,
+            selectedIds = selectedIds,
+            scannedImages = scannedImages,
+            presets = presets,
+            activePresetName = activePresetName,
+            onDeleteFolder = { viewModel.deleteFolder(it) },
+            onScan = { viewModel.scanFolders() },
+            onClearAllFolders = { viewModel.clearAllFolders() },
+            onToggleFolderIdSelection = { viewModel.toggleFolderIdSelection(it) },
+            onUpdateActivePreset = { viewModel.updateActivePreset() },
+            onSavePreset = { viewModel.saveCurrentAsPreset(it) },
+            onLoadPreset = { viewModel.loadPreset(it) },
+            onDeletePreset = { viewModel.deletePreset(it) },
+            onAddClick = null
+        )
+    }
+}
+
+@Composable
+fun TargetSwitcher(
+    selectedTarget: gustian.multiwallpaper.ui.SettingTarget,
+    onTargetSelected: (gustian.multiwallpaper.ui.SettingTarget) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+    ) {
+        Row(modifier = Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { onTargetSelected(gustian.multiwallpaper.ui.SettingTarget.HOME) },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (selectedTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (selectedTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            ) {
+                Icon(Icons.Default.Home, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Home Sources", fontSize = 12.sp)
+            }
+            Button(
+                onClick = { onTargetSelected(gustian.multiwallpaper.ui.SettingTarget.LOCK) },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (selectedTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (selectedTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            ) {
+                Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Lock Sources", fontSize = 12.sp)
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -607,7 +667,7 @@ fun FolderScreen(
 
 @Composable
 fun PresetManagerDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
-    val presets by viewModel.presets.collectAsState()
+    val presets by viewModel.presets.collectAsState(initial = emptyList())
     val scannedImages by viewModel.scannedImages.collectAsState()
     PresetManagerDialog(
         presets = presets,
@@ -701,6 +761,7 @@ fun PresetManagerDialog(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun GalleryScreen(viewModel: HomeViewModel) {
+    val settingsTarget by viewModel.settingsTarget.collectAsState()
     val images by viewModel.scannedImages.collectAsState()
     val blacklisted by viewModel.blacklisted.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
@@ -726,7 +787,7 @@ fun GalleryScreen(viewModel: HomeViewModel) {
                        }
         
         val groups = filtered.groupBy { it.folderUriString }
-        when (sortType) {
+        val sorted = when (sortType) {
             "NAME" -> groups.entries.sortedBy { entry -> 
                 val uri = Uri.parse(entry.key)
                 if (uri.scheme == "file") java.io.File(uri.path ?: "").name else Uri.decode(entry.key).split("/").lastOrNull() ?: "Folder"
@@ -734,13 +795,19 @@ fun GalleryScreen(viewModel: HomeViewModel) {
             "DATE" -> groups.entries.toList() // Scan order is basically date added
             "STAR" -> groups.entries.sortedByDescending { it.value.any { img -> img.isFavorite } }
             else -> groups.entries.toList()
-        }.associate { it.key to it.value }
+        }
+        sorted.associate { it.key to it.value }
     }
     
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
     var showBlacklistSection by remember { mutableStateOf(false) }
     
     Column(modifier = Modifier.fillMaxSize()) {
+        TargetSwitcher(
+            selectedTarget = settingsTarget,
+            onTargetSelected = { viewModel.setSettingsTarget(it) }
+        )
+
         if (isScanning) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
         // Header for toggling Blacklist view
@@ -853,17 +920,25 @@ fun GalleryScreen(viewModel: HomeViewModel) {
 
 @Composable
 fun FavoritesScreen(viewModel: HomeViewModel) {
-    val favorites by viewModel.favorites.collectAsState()
+    val settingsTarget by viewModel.settingsTarget.collectAsState()
+    val favorites by viewModel.favorites.collectAsState(initial = emptyList())
     var selectedFavIndex by remember { mutableIntStateOf(-1) }
     
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("FAVORITES (${favorites.size})", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (favorites.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No Favorites yet", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        else LazyVerticalGrid(columns = GridCells.Adaptive(100.dp), modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            itemsIndexed(favorites) { index, f ->
-                Box(modifier = Modifier.aspectRatio(0.85f).clip(RoundedCornerShape(16.dp)).clickable { selectedFavIndex = index }) {
-                    AsyncImage(model = Uri.parse(f.uriString), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                    IconButton(onClick = { viewModel.toggleFavorite(WallpaperImg(f.uriString, f.folderUriString, f.displayName, true)) }, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f), RoundedCornerShape(8.dp)).size(32.dp)) { Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308), modifier = Modifier.size(18.dp)) }
+    Column(modifier = Modifier.fillMaxSize()) {
+        TargetSwitcher(
+            selectedTarget = settingsTarget,
+            onTargetSelected = { viewModel.setSettingsTarget(it) }
+        )
+
+        Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+            Text("FAVORITES (${favorites.size})", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (favorites.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No Favorites yet", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            else LazyVerticalGrid(columns = GridCells.Adaptive(100.dp), modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                itemsIndexed(favorites) { index, f ->
+                    Box(modifier = Modifier.aspectRatio(0.85f).clip(RoundedCornerShape(16.dp)).clickable { selectedFavIndex = index }) {
+                        AsyncImage(model = Uri.parse(f.uriString), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        IconButton(onClick = { viewModel.toggleFavorite(WallpaperImg(f.uriString, f.folderUriString, f.displayName, true)) }, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f), RoundedCornerShape(8.dp)).size(32.dp)) { Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308), modifier = Modifier.size(18.dp)) }
+                    }
                 }
             }
         }
@@ -886,7 +961,7 @@ fun FavoritesScreen(viewModel: HomeViewModel) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
+fun SettingsScreen(viewModel: HomeViewModel) {
     val settingsTarget by viewModel.settingsTarget.collectAsState()
     val totalSeconds by viewModel.intervalSeconds.collectAsState()
     val transition by viewModel.transitionType.collectAsState()
@@ -912,6 +987,9 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     val dimEnabled by viewModel.dimEnabled.collectAsState()
     val subjectFocusEnabled by viewModel.subjectFocusEnabled.collectAsState()
     val subjectFocusSmoothing by viewModel.subjectFocusSmoothing.collectAsState()
+    val vignetteModeEnabled by viewModel.vignetteModeEnabled.collectAsState()
+    val vignetteSharpness by viewModel.vignetteSharpness.collectAsState()
+    val vignetteWidth by viewModel.vignetteWidth.collectAsState()
     val latestVersionInfo by viewModel.latestVersionInfo.collectAsState()
     val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
     val updateMessage by viewModel.updateMessage.collectAsState()
@@ -934,865 +1012,1134 @@ fun SettingsScreen(viewModel: HomeViewModel, onSetWallpaperClick: () -> Unit) {
     
     val scrollState = rememberScrollState()
     val context = LocalContext.current
-    Column(modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(scrollState)) {
-        // --- Settings Target Switcher ---
-        Text("TARGET SCREEN", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(12.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.HOME) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            ) {
-                Icon(Icons.Default.Home, null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Home")
-            }
-            Button(
-                onClick = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.LOCK) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            ) {
-                Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Lock")
-            }
-        }
-        
-        TextButton(
-            onClick = { viewModel.copySettingsFromOther() },
-            modifier = Modifier.align(Alignment.End)
-        ) {
-            Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(14.dp))
-            Spacer(Modifier.width(4.dp))
-            Text("Copy from ${if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) "Lock" else "Home"}", fontSize = 11.sp)
-        }
+    
+    // --- REAL-TIME PREVIEW STATE ---
+    var isDraggingSlider by remember { mutableStateOf(false) }
+    val favorites by viewModel.favorites.collectAsState(initial = emptyList())
+    val scannedImages by viewModel.scannedImages.collectAsState()
+    val previewUri = remember(favorites, scannedImages) {
+        favorites.firstOrNull()?.uriString ?: scannedImages.firstOrNull()?.uriString
+    }
 
-        Spacer(modifier = Modifier.height(16.dp))
-        Text("GENERAL SETTINGS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(16.dp))
+    val isPreviewActive = isDraggingSlider
 
-        // --- Interaction Group ---
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                SettingRow(title = "Use Favorites Only", checked = useFav, onCheckedChange = { viewModel.setUseFavoritesOnly(it) })
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                SettingRow(
-                    title = "Smart Adjacency locking",
-                    subtitle = if (sortOrder == "FOLDER") "Disabled in 'By Folder' order" else "Prevent same folder on adjacent pages",
-                    checked = smartAdjacencyEnabled && sortOrder != "FOLDER",
-                    onCheckedChange = { if (sortOrder != "FOLDER") viewModel.setSmartAdjacencyEnabled(it) }
-                )
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                SettingRow(title = "Double Tap to Change", checked = doubleTap, onCheckedChange = { viewModel.setDoubleTapEnabled(it) })
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                SettingRow(title = "Shake to Change", checked = shakeEnabled, onCheckedChange = { viewModel.setShakeEnabled(it) })
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("MOTION & PARALLAX", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // --- Motion Group ---
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                SettingRow(title = "React to Motion (Parallax)", checked = parallaxEnabled, onCheckedChange = { viewModel.setParallaxEnabled(it) })
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // --- FIXED HEADER: Settings Target Switcher ---
+            Column(modifier = Modifier.background(MaterialTheme.colorScheme.surface).padding(horizontal = 20.dp, vertical = 12.dp)) {
+                Text("TARGET SCREEN", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.HOME) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    ) {
+                        Icon(Icons.Default.Home, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Home")
+                    }
+                    Button(
+                        onClick = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.LOCK) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    ) {
+                        Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Lock")
+                    }
+                }
                 
-                if (parallaxEnabled) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Motion Strength", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                    Slider(
-                        value = parallaxStrength,
-                        onValueChange = { viewModel.setParallaxStrength(it) },
-                        valueRange = 0.1f..1f,
-                        steps = 8
-                    )
-                    Text("${(parallaxStrength * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                TextButton(
+                    onClick = { viewModel.copySettingsFromOther() },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Copy from ${if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) "Lock" else "Home"}", fontSize = 11.sp)
                 }
             }
-        }
 
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("AI SMART CONTROLS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(12.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
-        // --- AI Group ---
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                SettingRow(title = "AI Smart Crop Face", checked = smartCropEnabled, onCheckedChange = { viewModel.setSmartCropEnabled(it) })
-                
-                if (smartCropEnabled) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    SettingRow(
-                        title = "Advanced AI Controls", 
-                        subtitle = "Unlock fine-tuned crop limits",
-                        checked = aiAdvancedEnabled, 
-                        onCheckedChange = { viewModel.setAiAdvancedEnabled(it) }
-                    )
+            // --- SCROLLABLE CONTENT ---
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 20.dp).verticalScroll(scrollState)) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("GENERAL SETTINGS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(16.dp))
 
-                    if (aiAdvancedEnabled) {
-                        Column(modifier = Modifier.padding(top = 8.dp)) {
-                            Text("AI Zoom Slack (Max Zoom)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                // --- Interaction Group ---
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        SettingRow(title = "Use Favorites Only", checked = useFav, onCheckedChange = { viewModel.setUseFavoritesOnly(it) })
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        SettingRow(
+                            title = "Smart Adjacency locking",
+                            subtitle = if (sortOrder == "FOLDER") "Disabled in 'By Folder' order" else "Prevent same folder on adjacent pages",
+                            checked = smartAdjacencyEnabled && sortOrder != "FOLDER",
+                            onCheckedChange = { if (sortOrder != "FOLDER") viewModel.setSmartAdjacencyEnabled(it) }
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        SettingRow(title = "Double Tap to Change", checked = doubleTap, onCheckedChange = { viewModel.setDoubleTapEnabled(it) })
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        SettingRow(title = "Shake to Change", checked = shakeEnabled, onCheckedChange = { viewModel.setShakeEnabled(it) })
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("MOTION & PARALLAX", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // --- Motion Group ---
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        SettingRow(title = "React to Motion (Parallax)", checked = parallaxEnabled, onCheckedChange = { viewModel.setParallaxEnabled(it) })
+                        
+                        if (parallaxEnabled) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Motion Strength", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                             Slider(
-                                value = aiZoomSlack,
-                                onValueChange = { viewModel.setAiZoomSlack(it) },
-                                valueRange = 1.1f..2.0f,
+                                value = parallaxStrength,
+                                onValueChange = { viewModel.setParallaxStrength(it) },
+                                valueRange = 0.1f..1f,
                                 steps = 8
                             )
-                            Text("${(aiZoomSlack * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
-
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text("Horizontal Sensitivity", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                            Slider(
-                                value = aiSensitivityX,
-                                onValueChange = { viewModel.setAiSensitivityX(it) },
-                                valueRange = 0.1f..1.0f
-                            )
-                            Text("${(aiSensitivityX * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
-
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text("Vertical Sensitivity", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                            Slider(
-                                value = aiSensitivityY,
-                                onValueChange = { viewModel.setAiSensitivityY(it) },
-                                valueRange = 0.1f..1.0f
-                            )
-                            Text("${(aiSensitivityY * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                            Text("${(parallaxStrength * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
                         }
                     }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    
-                    var showFocalEditor by remember { mutableStateOf(false) }
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clickable { showFocalEditor = true }.padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text("Adjust Manual Fallback", fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyLarge)
-                            Text("Set focus if AI detection fails", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Icon(Icons.Default.Adjust, null, tint = MaterialTheme.colorScheme.primary)
-                    }
-
-                    if (showFocalEditor) {
-                        ManualFocalEditorDialog(viewModel) { showFocalEditor = false }
-                    }
                 }
-            }
-        }
 
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("PERFORMANCE", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("AI SMART CONTROLS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(12.dp))
 
-        // --- Performance Group ---
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text("Wallpaper Quality", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("LOW", "NORMAL", "HIGH").forEach { q ->
-                        val selected = wallpaperQuality == q
-                        FilterChip(
-                            selected = selected,
-                            onClick = { viewModel.setWallpaperQuality(q) },
-                            label = { Text(q, fontSize = 11.sp) },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
-                                selectedLabelColor = MaterialTheme.colorScheme.primary
+                // --- AI Group ---
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        SettingRow(title = "AI Smart Crop Face", checked = smartCropEnabled, onCheckedChange = { viewModel.setSmartCropEnabled(it) })
+                        
+                        if (smartCropEnabled) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            SettingRow(
+                                title = "Advanced AI Controls", 
+                                subtitle = "Unlock fine-tuned crop limits",
+                                checked = aiAdvancedEnabled, 
+                                onCheckedChange = { viewModel.setAiAdvancedEnabled(it) }
                             )
-                        )
-                    }
-                }
-                val qualityDesc = when(wallpaperQuality) {
-                    "LOW" -> "Lowest RAM usage, RGB_565 format (16-bit), reduced resolution."
-                    "HIGH" -> "Maximum sharpness, ARGB_8888 format (32-bit), highest resolution."
-                    else -> "Balanced RAM & quality. Uses 32-bit for active page only."
-                }
-                Text(qualityDesc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
 
-                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                SettingRow(title = "Power Saver (Light Mode)", subtitle = "Saves battery & RAM", checked = lightModeEnabled, onCheckedChange = { viewModel.setLightModeEnabled(it) })
-            }
-        }
+                            if (aiAdvancedEnabled) {
+                                Column(modifier = Modifier.padding(top = 8.dp)) {
+                                    Text("AI Zoom Slack (Max Zoom)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    Slider(
+                                        value = aiZoomSlack,
+                                        onValueChange = { viewModel.setAiZoomSlack(it) },
+                                        valueRange = 1.1f..2.0f,
+                                        steps = 8
+                                    )
+                                    Text("${(aiZoomSlack * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
 
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("VISUAL EFFECTS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(12.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text("Horizontal Sensitivity", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    Slider(
+                                        value = aiSensitivityX,
+                                        onValueChange = { viewModel.setAiSensitivityX(it) },
+                                        valueRange = 0.1f..1.0f
+                                    )
+                                    Text("${(aiSensitivityX * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
 
-        // --- Visual Group ---
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                SettingRow(
-                    title = "AI Subject Focus",
-                    subtitle = "Effects follow the subject's face",
-                    checked = subjectFocusEnabled,
-                    onCheckedChange = { viewModel.setSubjectFocusEnabled(it) }
-                )
-                
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text("Vertical Sensitivity", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    Slider(
+                                        value = aiSensitivityY,
+                                        onValueChange = { viewModel.setAiSensitivityY(it) },
+                                        valueRange = 0.1f..1.0f
+                                    )
+                                    Text("${(aiSensitivityY * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                                }
+                            }
 
-                SettingRow(
-                    title = "Enable Dimming",
-                    subtitle = if (subjectFocusEnabled) "Vignette spotlight on face" else "Full screen darkening",
-                    checked = dimEnabled,
-                    onCheckedChange = { viewModel.setDimEnabled(it) }
-                )
-                
-                if (dimEnabled) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Dim Intensity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                    Slider(
-                        value = dimIntensity,
-                        onValueChange = { viewModel.setDimIntensity(it) },
-                        valueRange = 0f..1.0f
-                    )
-                    Text("${(dimIntensity * 100).toInt()}% Intensity", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
-                }
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            
+                            var showFocalEditor by remember { mutableStateOf(false) }
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { showFocalEditor = true }.padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text("Adjust Manual Fallback", fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodyLarge)
+                                    Text("Set focus if AI detection fails", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                Icon(Icons.Default.Adjust, null, tint = MaterialTheme.colorScheme.primary)
+                            }
 
-                if (android.os.Build.VERSION.SDK_INT >= 31) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    SettingRow(
-                        title = "Enable Blur",
-                        subtitle = if (subjectFocusEnabled) "Portrait bokeh (sharp face)" else "Full screen blur",
-                        checked = blurEnabled,
-                        onCheckedChange = { viewModel.setBlurEnabled(it) }
-                    )
-                    
-                    if (blurEnabled) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Blur Intensity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                        Slider(
-                            value = blurRadius,
-                            onValueChange = { viewModel.setBlurRadius(it) },
-                            valueRange = 0f..100f
-                        )
-                        Text("${blurRadius.toInt()}px Radius", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
-                    }
-                }
-
-                if (subjectFocusEnabled) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    Text("Focus Smoothing", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                    Slider(
-                        value = subjectFocusSmoothing,
-                        onValueChange = { viewModel.setSubjectFocusSmoothing(it) },
-                        valueRange = 0.1f..0.9f
-                    )
-                    Text("${(subjectFocusSmoothing * 100).toInt()}% Softness", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("GESTURE GUIDE", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.2f))
-        ) {
-            Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.DeleteSweep, null, tint = MaterialTheme.colorScheme.tertiary)
-                Spacer(modifier = Modifier.width(16.dp))
-                Column {
-                    Text("Instant Blacklist", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
-                    Text("Tap with 2 fingers on Home Screen to remove current wallpaper from rotation.", style = MaterialTheme.typography.labelSmall)
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("TIMING & EFFECTS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
-        
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 12.dp)) {
-            Text("Rotation Interval", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-            OutlinedTextField(
-                value = displayValue.toString(),
-                onValueChange = { 
-                    val v = it.toIntOrNull() ?: 0
-                    val newSec = when(unit) {
-                        "Sec" -> v.toFloat()
-                        "Min" -> (v * 60).toFloat()
-                        "Hour" -> (v * 3600).toFloat()
-                        else -> v.toFloat()
-                    }
-                    viewModel.setIntervalSeconds(newSec)
-                },
-                modifier = Modifier.width(90.dp),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            var expanded by remember { mutableStateOf(false) }
-            Box {
-                Button(onClick = { expanded = true }, shape = RoundedCornerShape(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) { 
-                    Text(unit, fontSize = 12.sp)
-                }
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    listOf("Sec", "Min", "Hour").forEach { u ->
-                        DropdownMenuItem(text = { Text(u) }, onClick = { unit = u; expanded = false })
-                    }
-                }
-            }
-        }
-        
-        Slider(
-            value = displayValue.toFloat().coerceIn(1f, 60f),
-            onValueChange = { 
-                val rounded = it.roundToInt()
-                val newSec = when(unit) {
-                    "Sec" -> rounded.toFloat()
-                    "Min" -> (rounded * 60).toFloat()
-                    "Hour" -> (rounded * 3600).toFloat()
-                    else -> rounded.toFloat()
-                }
-                viewModel.setIntervalSeconds(newSec)
-            },
-            valueRange = 1f..60f,
-            steps = 59
-        )
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        Text("Transition Effect", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { viewModel.setTransitionType("slide") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "slide") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Slide") }
-            Button(onClick = { viewModel.setTransitionType("fade") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "fade") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Fade") }
-        }
-        
-        if (transition == "fade") {
-            Spacer(modifier = Modifier.height(16.dp))
-            Text("Fade Speed", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-            Slider(
-                value = fadeSpeed.toFloat(),
-                onValueChange = { viewModel.setFadeSpeed(it.roundToInt()) },
-                valueRange = 5f..50f,
-                steps = 9
-            )
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-        Text("Rotation Order", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = { viewModel.setRotationSortOrder("RANDOM") }, 
-                modifier = Modifier.weight(1f), 
-                shape = RoundedCornerShape(12.dp), 
-                colors = ButtonDefaults.buttonColors(containerColor = if (sortOrder == "RANDOM") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, contentColor = if (sortOrder == "RANDOM") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-            ) { 
-                Text("Random") 
-            }
-            Button(
-                onClick = { viewModel.setRotationSortOrder("FOLDER") }, 
-                modifier = Modifier.weight(1f), 
-                shape = RoundedCornerShape(12.dp), 
-                colors = ButtonDefaults.buttonColors(containerColor = if (sortOrder == "FOLDER") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, contentColor = if (sortOrder == "FOLDER") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-            ) { 
-                Text("By Folder") 
-            }
-        }
-        if (sortOrder == "FOLDER") {
-            Text("Smart Adjacency is limited in Folder Order", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 4.dp))
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-        var showCooldownDialog by remember { mutableStateOf(false) }
-        val autoLimitEnabled by viewModel.autoLimitEnabled.collectAsState()
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Rotation History Limit", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                TextButton(onClick = { showCooldownDialog = true }, contentPadding = PaddingValues(0.dp)) {
-                    Text("View History ($historyCount)", fontSize = 12.sp)
-                }
-            }
-            
-            Column(horizontalAlignment = Alignment.End) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Auto", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.width(4.dp))
-                    Switch(
-                        checked = autoLimitEnabled,
-                        onCheckedChange = { viewModel.setAutoLimitEnabled(it) },
-                        modifier = Modifier.graphicsLayer(scaleX = 0.7f, scaleY = 0.7f)
-                    )
-                }
-                OutlinedTextField(
-                    value = if (autoLimitEnabled) "AUTO" else historyLimit.toString(),
-                    onValueChange = { 
-                        if (!autoLimitEnabled) {
-                            val v = it.toIntOrNull() ?: 0
-                            viewModel.setHistoryLimit(v.coerceIn(0, 8000))
-                        }
-                    },
-                    modifier = Modifier.width(90.dp),
-                    enabled = !autoLimitEnabled,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyMedium,
-                    shape = RoundedCornerShape(12.dp)
-                )
-            }
-        }
-        
-        Slider(
-            value = historyLimit.toFloat().coerceIn(10f, 8000f),
-            onValueChange = { viewModel.setHistoryLimit(it.roundToInt()) },
-            valueRange = 10f..8000f,
-            steps = 799,
-            enabled = !autoLimitEnabled
-        )
-        Text(
-            text = if (autoLimitEnabled) "All ${historyLimit} images (Preset Total)" else "$historyLimit images (Anti-repetition limit)", 
-            style = MaterialTheme.typography.labelSmall, 
-            color = if (autoLimitEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, 
-            modifier = Modifier.align(Alignment.End)
-        )
-
-        if (showCooldownDialog) {
-            val historyCount by viewModel.historyCount.collectAsState()
-            val historyList by viewModel.historyList.collectAsState()
-            val isLoadingHistory by viewModel.isLoadingHistory.collectAsState()
-            
-            LaunchedEffect(Unit) {
-                viewModel.resetAndLoadHistory()
-            }
-
-            val selectedUris = remember { mutableStateListOf<String>() }
-            var previewIndex by remember { mutableStateOf<Int?>(null) }
-            
-            AlertDialog(
-                onDismissRequest = { 
-                    if (selectedUris.isNotEmpty()) selectedUris.clear()
-                    else showCooldownDialog = false 
-                },
-                title = { 
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("History ($historyCount)") 
-                            Text(
-                                if (selectedUris.isEmpty()) "Click to preview • Long press to mark" 
-                                else "${selectedUris.size} selected", 
-                                style = MaterialTheme.typography.labelSmall, 
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (selectedUris.isNotEmpty()) {
-                            IconButton(onClick = { 
-                                viewModel.removeMultipleFromHistory(selectedUris.toList())
-                                selectedUris.clear()
-                                viewModel.resetAndLoadHistory() // Refresh after deletion
-                            }) {
-                                Icon(Icons.Default.Delete, "Release Selected", tint = MaterialTheme.colorScheme.error)
+                            if (showFocalEditor) {
+                                ManualFocalEditorDialog(viewModel) { showFocalEditor = false }
                             }
                         }
                     }
-                },
-                text = {
-                    if (historyList.isEmpty() && !isLoadingHistory) {
-                        Text("No images in history yet.")
-                    } else {
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(3),
-                            modifier = Modifier.heightIn(max = 450.dp),
-                            contentPadding = PaddingValues(4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            itemsIndexed(historyList) { index, uri ->
-                                // Load more trigger
-                                if (index >= historyList.size - 10) {
-                                    SideEffect {
-                                        viewModel.loadMoreHistory()
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("PERFORMANCE", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // --- Performance Group ---
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Wallpaper Quality", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("LOW", "NORMAL", "HIGH").forEach { q ->
+                                val selected = wallpaperQuality == q
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = { viewModel.setWallpaperQuality(q) },
+                                    label = { Text(q, fontSize = 11.sp) },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                        selectedLabelColor = MaterialTheme.colorScheme.primary
+                                    )
+                                )
+                            }
+                        }
+                        val qualityDesc = when(wallpaperQuality) {
+                            "LOW" -> "Lowest RAM usage, RGB_565 format (16-bit), reduced resolution."
+                            "HIGH" -> "Maximum sharpness, ARGB_8888 format (32-bit), highest resolution."
+                            else -> "Balanced RAM & quality. Uses 32-bit for active page only."
+                        }
+                        Text(qualityDesc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        SettingRow(title = "Power Saver (Light Mode)", subtitle = "Saves battery & RAM", checked = lightModeEnabled, onCheckedChange = { viewModel.setLightModeEnabled(it) })
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("VISUAL EFFECTS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // --- Visual Group ---
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        SettingRow(
+                            title = "AI Subject Focus",
+                            subtitle = "Effects follow the subject's face",
+                            checked = subjectFocusEnabled,
+                            onCheckedChange = { viewModel.setSubjectFocusEnabled(it) }
+                        )
+                        
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                        SettingRow(
+                            title = "Vignette Mode (Edge Focus)",
+                            subtitle = "Edge-mask focusing on screen center",
+                            checked = vignetteModeEnabled,
+                            onCheckedChange = { viewModel.setVignetteModeEnabled(it) }
+                        )
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                        SettingRow(
+                            title = "Enable Dimming",
+                            subtitle = if (subjectFocusEnabled || vignetteModeEnabled) "Edge darkening (Spotlight)" else "Full screen darkening",
+                            checked = dimEnabled,
+                            onCheckedChange = { viewModel.setDimEnabled(it) }
+                        )
+                        
+                        if (dimEnabled) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Dim Intensity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            Slider(
+                                value = dimIntensity,
+                                onValueChange = { 
+                                    isDraggingSlider = true
+                                    viewModel.setDimIntensity(it) 
+                                },
+                                onValueChangeFinished = { isDraggingSlider = false },
+                                valueRange = 0f..1.0f
+                            )
+                            Text("${(dimIntensity * 100).toInt()}% Intensity", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                        }
+
+                        if (android.os.Build.VERSION.SDK_INT >= 31) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            SettingRow(
+                                title = "Enable Blur",
+                                subtitle = if (subjectFocusEnabled || vignetteModeEnabled) "Edge bokeh (sharp center)" else "Full screen blur",
+                                checked = blurEnabled,
+                                onCheckedChange = { viewModel.setBlurEnabled(it) }
+                            )
+                            
+                            if (blurEnabled) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text("Blur Intensity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = blurRadius,
+                                    onValueChange = { 
+                                        isDraggingSlider = true
+                                        viewModel.setBlurRadius(it) 
+                                    },
+                                    onValueChangeFinished = { isDraggingSlider = false },
+                                    valueRange = 0f..100f
+                                )
+                                Text("${blurRadius.toInt()}px Radius", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                            }
+                        }
+
+                        if (subjectFocusEnabled || vignetteModeEnabled) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            
+                            if (vignetteModeEnabled) {
+                                Text("Shadow Width (Spread)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = vignetteWidth,
+                                    onValueChange = { 
+                                        isDraggingSlider = true
+                                        viewModel.setVignetteWidth(it) 
+                                    },
+                                    onValueChangeFinished = { isDraggingSlider = false },
+                                    valueRange = 0.05f..0.5f
+                                )
+                                Text("${(vignetteWidth * 100).toInt()}% Width", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text("Shadow Sharpness (Edge Focus)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = vignetteSharpness,
+                                    onValueChange = { 
+                                        isDraggingSlider = true
+                                        viewModel.setVignetteSharpness(it) 
+                                    },
+                                    onValueChangeFinished = { isDraggingSlider = false },
+                                    valueRange = 0.1f..0.9f
+                                )
+                                Text("${(vignetteSharpness * 100).toInt()}% Sharpness", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                            } else {
+                                Text("Spotlight Size (Diameter)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = subjectFocusSmoothing,
+                                    onValueChange = { 
+                                        isDraggingSlider = true
+                                        viewModel.setSubjectFocusSmoothing(it) 
+                                    },
+                                    onValueChangeFinished = { isDraggingSlider = false },
+                                    valueRange = 0.1f..0.9f
+                                )
+                                Text("${(subjectFocusSmoothing * 100).toInt()}% Size", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text("Focus Smoothing (Softness)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                Slider(
+                                    value = vignetteSharpness,
+                                    onValueChange = { 
+                                        isDraggingSlider = true
+                                        viewModel.setVignetteSharpness(it) 
+                                    },
+                                    onValueChangeFinished = { isDraggingSlider = false },
+                                    valueRange = 0.1f..0.9f
+                                )
+                                Text("${(vignetteSharpness * 100).toInt()}% Softness", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("GESTURE GUIDE", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.2f))
+                ) {
+                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.DeleteSweep, null, tint = MaterialTheme.colorScheme.tertiary)
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Column {
+                            Text("Instant Blacklist", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                            val hintText = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) "Lock Screen" else "Home Screen"
+                            Text("Tap with 2 fingers on $hintText to remove current wallpaper from rotation.", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("TIMING & EFFECTS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 12.dp)) {
+                    Text("Rotation Interval", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                    OutlinedTextField(
+                        value = displayValue.toString(),
+                        onValueChange = { 
+                            val v = it.toIntOrNull() ?: 0
+                            val newSec = when(unit) {
+                                "Sec" -> v.toFloat()
+                                "Min" -> (v * 60).toFloat()
+                                "Hour" -> (v * 3600).toFloat()
+                                else -> v.toFloat()
+                            }
+                            viewModel.setIntervalSeconds(newSec)
+                        },
+                        modifier = Modifier.width(90.dp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    var expanded by remember { mutableStateOf(false) }
+                    Box {
+                        Button(onClick = { expanded = true }, shape = RoundedCornerShape(12.dp), contentPadding = PaddingValues(horizontal = 12.dp)) { 
+                            Text(unit, fontSize = 12.sp)
+                        }
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            listOf("Sec", "Min", "Hour").forEach { u ->
+                                DropdownMenuItem(text = { Text(u) }, onClick = { unit = u; expanded = false })
+                            }
+                        }
+                    }
+                }
+                
+                Slider(
+                    value = displayValue.toFloat().coerceIn(1f, 60f),
+                    onValueChange = { 
+                        val rounded = it.roundToInt()
+                        val newSec = when(unit) {
+                            "Sec" -> rounded.toFloat()
+                            "Min" -> (rounded * 60).toFloat()
+                            "Hour" -> (rounded * 3600).toFloat()
+                            else -> rounded.toFloat()
+                        }
+                        viewModel.setIntervalSeconds(newSec)
+                    },
+                    valueRange = 1f..60f,
+                    steps = 59
+                )
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Transition Effect", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { viewModel.setTransitionType("slide") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "slide") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Slide") }
+                    Button(onClick = { viewModel.setTransitionType("fade") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "fade") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Fade") }
+                }
+                
+                if (transition == "fade") {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Fade Speed", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Slider(
+                        value = fadeSpeed.toFloat(),
+                        onValueChange = { viewModel.setFadeSpeed(it.roundToInt()) },
+                        valueRange = 5f..50f,
+                        steps = 9
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Rotation Order", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { viewModel.setRotationSortOrder("RANDOM") }, 
+                        modifier = Modifier.weight(1f), 
+                        shape = RoundedCornerShape(12.dp), 
+                        colors = ButtonDefaults.buttonColors(containerColor = if (sortOrder == "RANDOM") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, contentColor = if (sortOrder == "RANDOM") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    ) { 
+                        Text("Random") 
+                    }
+                    Button(
+                        onClick = { viewModel.setRotationSortOrder("FOLDER") }, 
+                        modifier = Modifier.weight(1f), 
+                        shape = RoundedCornerShape(12.dp), 
+                        colors = ButtonDefaults.buttonColors(containerColor = if (sortOrder == "FOLDER") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, contentColor = if (sortOrder == "FOLDER") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    ) { 
+                        Text("By Folder") 
+                    }
+                }
+                if (sortOrder == "FOLDER") {
+                    Text("Smart Adjacency is limited in Folder Order", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 4.dp))
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                var showCooldownDialog by remember { mutableStateOf(false) }
+                val autoLimitEnabled by viewModel.autoLimitEnabled.collectAsState()
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Rotation History Limit", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                        TextButton(onClick = { showCooldownDialog = true }, contentPadding = PaddingValues(0.dp)) {
+                            Text("View History ($historyCount)", fontSize = 12.sp)
+                        }
+                    }
+                    
+                    Column(horizontalAlignment = Alignment.End) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Auto", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.width(4.dp))
+                            Switch(
+                                checked = autoLimitEnabled,
+                                onCheckedChange = { viewModel.setAutoLimitEnabled(it) },
+                                modifier = Modifier.graphicsLayer(scaleX = 0.7f, scaleY = 0.7f)
+                            )
+                        }
+                        OutlinedTextField(
+                            value = if (autoLimitEnabled) "AUTO" else historyLimit.toString(),
+                            onValueChange = { 
+                                if (!autoLimitEnabled) {
+                                    val v = it.toIntOrNull() ?: 0
+                                    viewModel.setHistoryLimit(v.coerceIn(0, 8000))
+                                }
+                            },
+                            modifier = Modifier.width(90.dp),
+                            enabled = !autoLimitEnabled,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                    }
+                }
+                
+                Slider(
+                    value = historyLimit.toFloat().coerceIn(10f, 8000f),
+                    onValueChange = { viewModel.setHistoryLimit(it.roundToInt()) },
+                    valueRange = 10f..8000f,
+                    steps = 799,
+                    enabled = !autoLimitEnabled
+                )
+                Text(
+                    text = if (autoLimitEnabled) "All ${historyLimit} images (Preset Total)" else "$historyLimit images (Anti-repetition limit)", 
+                    style = MaterialTheme.typography.labelSmall, 
+                    color = if (autoLimitEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, 
+                    modifier = Modifier.align(Alignment.End)
+                )
+
+                if (showCooldownDialog) {
+                    val historyList by viewModel.historyList.collectAsState()
+                    val isLoadingHistory by viewModel.isLoadingHistory.collectAsState()
+                    
+                    LaunchedEffect(Unit) {
+                        viewModel.resetAndLoadHistory()
+                    }
+
+                    val selectedUris = remember { mutableStateListOf<String>() }
+                    var previewIndex by remember { mutableStateOf<Int?>(null) }
+                    
+                    AlertDialog(
+                        onDismissRequest = { 
+                            if (selectedUris.isNotEmpty()) selectedUris.clear()
+                            else showCooldownDialog = false 
+                        },
+                        title = { 
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("History ($historyCount)") 
+                                    Text(
+                                        if (selectedUris.isEmpty()) "Click to preview • Long press to mark" 
+                                        else "${selectedUris.size} selected", 
+                                        style = MaterialTheme.typography.labelSmall, 
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (selectedUris.isNotEmpty()) {
+                                    IconButton(onClick = { 
+                                        viewModel.removeMultipleFromHistory(selectedUris.toList())
+                                        selectedUris.clear()
+                                        viewModel.resetAndLoadHistory() // Refresh after deletion
+                                    }) {
+                                        Icon(Icons.Default.Delete, "Release Selected", tint = MaterialTheme.colorScheme.error)
                                     }
                                 }
-
-                                val isSelected = selectedUris.contains(uri)
-                                Box(
-                                    modifier = Modifier
-                                        .aspectRatio(0.7f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                                        .combinedClickable(
-                                            onClick = { 
-                                                if (selectedUris.isNotEmpty()) {
-                                                    if (isSelected) selectedUris.remove(uri) else selectedUris.add(uri)
-                                                } else {
-                                                    previewIndex = index
-                                                }
-                                            },
-                                            onLongClick = {
-                                                if (!isSelected) selectedUris.add(uri)
-                                            }
-                                        )
+                            }
+                        },
+                        text = {
+                            if (historyList.isEmpty() && !isLoadingHistory) {
+                                Text("No images in history yet.")
+                            } else {
+                                LazyVerticalGrid(
+                                    columns = GridCells.Fixed(3),
+                                    modifier = Modifier.heightIn(max = 450.dp),
+                                    contentPadding = PaddingValues(4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    AsyncImage(
-                                        model = Uri.parse(uri),
-                                        contentDescription = null,
-                                        modifier = Modifier.fillMaxSize().alpha(if (isSelected) 0.6f else 1f),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                    if (isSelected) {
+                                    itemsIndexed(historyList) { index, uri ->
+                                        // Load more trigger
+                                        if (index >= historyList.size - 10) {
+                                            SideEffect {
+                                                viewModel.loadMoreHistory()
+                                            }
+                                        }
+
+                                        val isSelected = selectedUris.contains(uri)
                                         Box(
                                             modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)),
-                                            contentAlignment = Alignment.Center
+                                                .aspectRatio(0.7f)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                                .combinedClickable(
+                                                    onClick = { 
+                                                        if (selectedUris.isNotEmpty()) {
+                                                            if (isSelected) selectedUris.remove(uri) else selectedUris.add(uri)
+                                                        } else {
+                                                            previewIndex = index
+                                                        }
+                                                    },
+                                                    onLongClick = {
+                                                        if (!isSelected) selectedUris.add(uri)
+                                                    }
+                                                )
                                         ) {
-                                            Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.primary)
+                                            AsyncImage(
+                                                model = Uri.parse(uri),
+                                                contentDescription = null,
+                                                modifier = Modifier.fillMaxSize().alpha(if (isSelected) 0.6f else 1f),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                            if (isSelected) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxSize()
+                                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.primary)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (isLoadingHistory) {
+                                        item(span = { GridItemSpan(3) }) {
+                                            Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
+                                                CircularProgressIndicator(Modifier.size(24.dp))
+                                            }
                                         }
                                     }
                                 }
                             }
-                            
-                            if (isLoadingHistory) {
-                                item(span = { GridItemSpan(3) }) {
-                                    Box(Modifier.fillMaxWidth().padding(8.dp), contentAlignment = Alignment.Center) {
-                                        CircularProgressIndicator(Modifier.size(24.dp))
+                        },
+                        confirmButton = { 
+                            TextButton(onClick = { 
+                                if (selectedUris.isNotEmpty()) selectedUris.clear() 
+                                else showCooldownDialog = false 
+                            }) { 
+                                Text(if (selectedUris.isNotEmpty()) "Cancel" else "Close") 
+                            } 
+                        }
+                    )
+                    
+                    if (previewIndex != null) {
+                        val hasMoreHistory = viewModel.hasMoreHistory()
+                        val pagerState = rememberPagerState(initialPage = previewIndex!!) { 
+                            if (hasMoreHistory) historyList.size + 1 else historyList.size 
+                        }
+                        var scale by remember { mutableFloatStateOf(1f) }
+                        var offset by remember { mutableStateOf(Offset.Zero) }
+
+                        val animatedScale by animateFloatAsState(targetValue = scale, label = "hist_zoom_scale")
+                        val animatedOffsetX by animateFloatAsState(targetValue = offset.x, label = "hist_pan_offset_x")
+                        val animatedOffsetY by animateFloatAsState(targetValue = offset.y, label = "hist_pan_offset_y")
+
+                        Dialog(
+                            onDismissRequest = { previewIndex = null },
+                            properties = DialogProperties(usePlatformDefaultWidth = false)
+                        ) {
+                            Box(modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.9f))
+                                .pointerInput(Unit) {
+                                    detectTapGestures(
+                                        onDoubleTap = {
+                                            if (scale > 1.1f) {
+                                                scale = 1f
+                                                offset = Offset.Zero
+                                            } else {
+                                                scale = 2.5f
+                                            }
+                                        }
+                                    )
+                                }
+                                .pointerInput(Unit) {
+                                    detectTransformGestures { _, pan, zoom, _ ->
+                                        scale = (scale * zoom).coerceIn(1f, 5f)
+                                        if (scale > 1f) {
+                                            offset += pan
+                                        } else {
+                                            offset = Offset.Zero
+                                        }
                                     }
                                 }
-                            }
-                        }
-                    }
-                },
-                confirmButton = { 
-                    TextButton(onClick = { 
-                        if (selectedUris.isNotEmpty()) selectedUris.clear() 
-                        else showCooldownDialog = false 
-                    }) { 
-                        Text(if (selectedUris.isNotEmpty()) "Cancel" else "Close") 
-                    } 
-                }
-            )
-            
-            if (previewIndex != null) {
-                val hasMoreHistory = viewModel.hasMoreHistory()
-                val pagerState = rememberPagerState(initialPage = previewIndex!!) { 
-                    if (hasMoreHistory) historyList.size + 1 else historyList.size 
-                }
-                var scale by remember { mutableFloatStateOf(1f) }
-                var offset by remember { mutableStateOf(Offset.Zero) }
+                            ) {
+                                HorizontalPager(
+                                    state = pagerState,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .graphicsLayer(
+                                            scaleX = animatedScale,
+                                            scaleY = animatedScale,
+                                            translationX = animatedOffsetX,
+                                            translationY = animatedOffsetY
+                                        ),
+                                    pageSpacing = 16.dp,
+                                    userScrollEnabled = scale <= 1.05f,
+                                    key = { index -> 
+                                        if (index < historyList.size) historyList[index] 
+                                        else "loading_${historyList.size}" 
+                                    }
+                                ) { page ->
+                                    if (page >= historyList.size) {
+                                        // Load more trigger in pager
+                                        LaunchedEffect(Unit) {
+                                            viewModel.loadMoreHistory()
+                                        }
+                                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            CircularProgressIndicator(color = Color.White)
+                                        }
+                                        return@HorizontalPager
+                                    }
 
-                val animatedScale by animateFloatAsState(targetValue = scale, label = "hist_zoom_scale")
-                val animatedOffsetX by animateFloatAsState(targetValue = offset.x, label = "hist_pan_offset_x")
-                val animatedOffsetY by animateFloatAsState(targetValue = offset.y, label = "hist_pan_offset_y")
-
-                Dialog(
-                    onDismissRequest = { previewIndex = null },
-                    properties = DialogProperties(usePlatformDefaultWidth = false)
-                ) {
-                    Box(modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.9f))
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onDoubleTap = {
-                                    if (scale > 1.1f) {
+                                    // Reset zoom when page changes
+                                    LaunchedEffect(page) {
                                         scale = 1f
                                         offset = Offset.Zero
-                                    } else {
-                                        scale = 2.5f
+                                    }
+
+                                    val uri = historyList[page]
+                                    val currentFavorites by viewModel.favorites.collectAsState(initial = emptyList())
+                                    val favorite = currentFavorites.any { it.uriString == uri }
+                                    
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(16.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center
+                                    ) {
+                                        AsyncImage(
+                                            model = Uri.parse(uri),
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .weight(1f)
+                                                .clip(RoundedCornerShape(12.dp)),
+                                            contentScale = ContentScale.Fit
+                                        )
+                                        Spacer(Modifier.height(16.dp))
+                                        val cleanName = remember(uri) {
+                                            val rawName = uri.substringAfterLast("/")
+                                            try { android.net.Uri.decode(rawName) } catch (e: Exception) { rawName }
+                                        }
+                                        Text(
+                                            text = cleanName, 
+                                            color = Color.White,
+                                            fontWeight = FontWeight.Bold, 
+                                            textAlign = TextAlign.Center,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(Modifier.height(16.dp))
+                                        
+                                        // Paging indicator
+                                        Text(
+                                            text = "Item ${page + 1} of $historyCount",
+                                            color = Color.White.copy(alpha = 0.6f),
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                        Spacer(Modifier.height(8.dp))
+
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .navigationBarsPadding()
+                                                .padding(bottom = 32.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            IconButton(
+                                                onClick = { 
+                                                    val displayName = uri.substringAfterLast("/")
+                                                    val folderUri = uri.substringBeforeLast("/")
+                                                    viewModel.toggleFavorite(WallpaperImg(uri, folderUri, displayName, favorite))
+                                                },
+                                                modifier = Modifier.background(Color.White.copy(alpha = 0.2f), CircleShape)
+                                            ) {
+                                                Icon(if (favorite) Icons.Default.Star else Icons.Default.StarOutline, null, tint = if (favorite) Color.Yellow else Color.White)
+                                            }
+                                            
+                                            Button(
+                                                onClick = { 
+                                                    val displayName = uri.substringAfterLast("/")
+                                                    val folderUri = uri.substringBeforeLast("/")
+                                                    viewModel.blacklistCurrentUri(uri, folderUri, displayName)
+                                                    viewModel.resetAndLoadHistory() // Refresh the centralized list
+                                                    if (historyList.isEmpty()) previewIndex = null
+                                                },
+                                                modifier = Modifier.weight(1f),
+                                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                                            ) {
+                                                Icon(Icons.Default.Block, null)
+                                                Spacer(Modifier.width(8.dp))
+                                                Text("Blacklist")
+                                            }
+
+                                            Button(
+                                                onClick = { 
+                                                    viewModel.removeFromHistory(uri)
+                                                    viewModel.resetAndLoadHistory() // Refresh the centralized list
+                                                    if (historyList.isEmpty()) previewIndex = null
+                                                },
+                                                modifier = Modifier.weight(1f),
+                                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                                            ) {
+                                                Text("Release")
+                                            }
+                                        }
                                     }
                                 }
+                                
+                                // Close button on top
+                                IconButton(
+                                    onClick = { previewIndex = null },
+                                    modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, null, tint = Color.White)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(32.dp))
+                Text("DATA MANAGEMENT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val scope = rememberCoroutineScope()
+                    
+                    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+                        uri?.let {
+                            scope.launch {
+                                val json = viewModel.getPresetsJson()
+                                if (json != null) {
+                                    try {
+                                        context.contentResolver.openOutputStream(it)?.use { output ->
+                                            output.write(json.toByteArray())
+                                        }
+                                        Toast.makeText(context, "Presets exported successfully!", Toast.LENGTH_SHORT).show()
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                        uri?.let {
+                            context.contentResolver.openInputStream(it)?.use { input ->
+                                val json = input.bufferedReader().use { r -> r.readText() }
+                                viewModel.importPresets(json)
+                            }
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = { 
+                            val targetName = settingsTarget.name.lowercase()
+                            exportLauncher.launch("multi_wallpaper_presets_$targetName.json") 
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Default.Upload, null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Export")
+                    }
+                    
+                    OutlinedButton(
+                        onClick = { importLauncher.launch("application/json") },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Import")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(32.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("ABOUT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Multi Wallpaper Live", fontWeight = FontWeight.Bold)
+                        Text("Version 1.1.0", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        Button(
+                            onClick = { viewModel.checkForUpdates() },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            enabled = !isCheckingUpdate,
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                        ) {
+                            if (isCheckingUpdate) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Update, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Check for Update", fontSize = 12.sp)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        var showHistoryDialog by remember { mutableStateOf(false) }
+                        Text(
+                            "Release History", 
+                            color = MaterialTheme.colorScheme.primary, 
+                            fontSize = 12.sp, 
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.clickable { showHistoryDialog = true }
+                        )
+                        
+                        if (showHistoryDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showHistoryDialog = false },
+                                title = { Text("Release History") },
+                                text = {
+                                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                        HistoryItem("v1.1.0", "• Blacklist System (Gesture & Gallery)\n• AI Portrait Mode (Background Blur)\n• GitHub Update Sync\n• Focus Smoothing Control")
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        HistoryItem("v1.0.1", "• Critical Memory Leak Fix\n• AI 480px Downscaling Optimization\n• Scalable Database Indexing\n• Hardware Canvas Acceleration")
+                                    }
+                                },
+                                confirmButton = {
+                                    TextButton(onClick = { showHistoryDialog = false }) { Text("Close") }
+                                },
+                                shape = RoundedCornerShape(16.dp)
                             )
                         }
-                        .pointerInput(Unit) {
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                scale = (scale * zoom).coerceIn(1f, 5f)
-                                if (scale > 1f) {
-                                    offset += pan
-                                } else {
-                                    offset = Offset.Zero
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("Developer: Migi Gustian", style = MaterialTheme.typography.bodyMedium)
+                        val context = LocalContext.current
+                        Text("GitHub: Genesfi/multiwallpaper", color = MaterialTheme.colorScheme.primary, modifier = Modifier.clickable { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Genesfi/multiwallpaper"))) })
+                    }
+                }
+                Spacer(modifier = Modifier.height(24.dp))
+                Button(
+                    onClick = { triggerLiveWallpaperSelection(context, MultiWallpaperHomeService::class.java) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(16.dp)
+                ) { 
+                    Icon(Icons.Default.Wallpaper, null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Set Home Wallpaper") 
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { triggerLiveWallpaperSelection(context, MultiWallpaperLockService::class.java) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(16.dp)
+                ) { 
+                    Icon(Icons.Default.Lock, null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Set Lock Wallpaper") 
+                }
+                Spacer(modifier = Modifier.height(40.dp))
+            }
+        }
+
+        // --- FULL SCREEN PREVIEW OVERLAY ---
+        if (isPreviewActive) {
+            Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+                if (previewUri != null) {
+                    // 1. BACKGROUND LAYER (Blurred)
+                    AsyncImage(
+                        model = previewUri,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize().let { 
+                            if (Build.VERSION.SDK_INT >= 31 && blurEnabled && blurRadius > 0f) {
+                                it.graphicsLayer {
+                                    renderEffect = android.graphics.RenderEffect.createBlurEffect(
+                                        blurRadius, blurRadius, android.graphics.Shader.TileMode.CLAMP
+                                    ).asComposeRenderEffect()
                                 }
-                            }
-                        }
-                    ) {
-                        HorizontalPager(
-                            state = pagerState,
+                            } else it
+                        },
+                        contentScale = ContentScale.Crop
+                    )
+                    
+                    // 2. FOREGROUND LAYER (Sharp with Masking)
+                    if (vignetteModeEnabled || subjectFocusEnabled) {
+                        AsyncImage(
+                            model = previewUri,
+                            contentDescription = null,
                             modifier = Modifier
                                 .fillMaxSize()
-                                .graphicsLayer(
-                                    scaleX = animatedScale,
-                                    scaleY = animatedScale,
-                                    translationX = animatedOffsetX,
-                                    translationY = animatedOffsetY
-                                ),
-                            pageSpacing = 16.dp,
-                            userScrollEnabled = scale <= 1.05f,
-                            key = { index -> 
-                                if (index < historyList.size) historyList[index] 
-                                else "loading_${historyList.size}" 
-                            }
-                        ) { page ->
-                            if (page >= historyList.size) {
-                                // Load more trigger in pager
-                                LaunchedEffect(Unit) {
-                                    viewModel.loadMoreHistory()
-                                }
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    CircularProgressIndicator(color = Color.White)
-                                }
-                                return@HorizontalPager
-                            }
+                                .graphicsLayer(alpha = 0.99f) // Required for DST_OUT masking
+                                .drawWithContent {
+                                    drawContent()
+                                    val w = size.width
+                                    val h = size.height
 
-                            // Reset zoom when page changes
-                            LaunchedEffect(page) {
-                                scale = 1f
-                                offset = Offset.Zero
-                            }
+                                    drawIntoCanvas { canvas ->
+                                        val nativeCanvas = canvas.nativeCanvas
+                                        val maskPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                                        maskPaint.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_OUT)
+                                        
+                                        val transparent = android.graphics.Color.TRANSPARENT
+                                        val black = android.graphics.Color.BLACK
 
-                            val uri = historyList[page]
-                            val currentFavorites by viewModel.favorites.collectAsState()
-                            val favorite = currentFavorites.any { it.uriString == uri }
-                            
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(16.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center
-                            ) {
-                                AsyncImage(
-                                    model = Uri.parse(uri),
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(12.dp)),
-                                    contentScale = ContentScale.Fit
-                                )
-                                Spacer(Modifier.height(16.dp))
-                                val cleanName = remember(uri) {
-                                    val rawName = uri.substringAfterLast("/")
-                                    try { android.net.Uri.decode(rawName) } catch (e: Exception) { rawName }
-                                }
-                                Text(
-                                    text = cleanName, 
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold, 
-                                    textAlign = TextAlign.Center,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(Modifier.height(16.dp))
+                                        if (vignetteModeEnabled) {
+                                            val edgeW = w * vignetteWidth
+                                            val edgeH = h * vignetteWidth
+                                            val smoothing = 1.0f - vignetteSharpness
+                                            
+                                            val colorsArr = intArrayOf(black, transparent)
+                                            val stops = floatArrayOf(
+                                                (0.6f - (smoothing * 0.55f)).coerceIn(0.01f, 0.59f),
+                                                (0.6f + (smoothing * 0.35f)).coerceIn(0.61f, 0.99f)
+                                            )
+                                            
+                                            // Left
+                                            maskPaint.shader = android.graphics.LinearGradient(0f, 0f, edgeW, 0f, colorsArr, stops, android.graphics.Shader.TileMode.CLAMP)
+                                            nativeCanvas.drawRect(0f, 0f, edgeW, h, maskPaint)
+                                            // Right
+                                            maskPaint.shader = android.graphics.LinearGradient(w, 0f, w - edgeW, 0f, colorsArr, stops, android.graphics.Shader.TileMode.CLAMP)
+                                            nativeCanvas.drawRect(w - edgeW, 0f, w, h, maskPaint)
+                                            // Top
+                                            maskPaint.shader = android.graphics.LinearGradient(0f, 0f, 0f, edgeH, colorsArr, stops, android.graphics.Shader.TileMode.CLAMP)
+                                            nativeCanvas.drawRect(0f, 0f, w, edgeH, maskPaint)
+                                            // Bottom
+                                            maskPaint.shader = android.graphics.LinearGradient(0f, h, 0f, h - edgeH, colorsArr, stops, android.graphics.Shader.TileMode.CLAMP)
+                                            nativeCanvas.drawRect(0f, h - edgeH, w, h, maskPaint)
+
+                                        } else if (subjectFocusEnabled) {
+                                            val faceX = w / 2f
+                                            val faceY = h / 2f
+                                            val diagonal = kotlin.math.sqrt(w * w + h * h) / 2f
+                                            val radius = diagonal * (0.5f + subjectFocusSmoothing * 1.5f)
+                                            
+                                            val smoothing = 1.0f - (vignetteSharpness * 0.9f)
+                                            val colors = intArrayOf(transparent, black)
+                                            val radialStops = floatArrayOf(
+                                                (0.6f - (smoothing * 0.55f)).coerceIn(0.01f, 0.59f),
+                                                (0.6f + (smoothing * 0.35f)).coerceIn(0.61f, 0.99f)
+                                            )
+                                            
+                                            maskPaint.shader = android.graphics.RadialGradient(faceX, faceY, radius, colors, radialStops, android.graphics.Shader.TileMode.CLAMP)
+                                            nativeCanvas.drawRect(0f, 0f, w, h, maskPaint)
+                                        }
+                                    }
+                                },
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+
+                    // 3. DIMMING LAYER (Shadows)
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val w = size.width
+                        val h = size.height
+                        val alpha = (dimIntensity * 255).toInt().coerceIn(0, 255)
+                        val shadowColor = android.graphics.Color.argb(alpha, 0, 0, 0)
+                        val transparent = android.graphics.Color.TRANSPARENT
+
+                        drawIntoCanvas { canvas ->
+                            val nativeCanvas = canvas.nativeCanvas
+                            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
+                            if (vignetteModeEnabled && dimEnabled) {
+                                val edgeW = w * vignetteWidth
+                                val edgeH = h * vignetteWidth
                                 
-                                // Paging indicator
-                                Text(
-                                    text = "Item ${page + 1} of $historyCount",
-                                    color = Color.White.copy(alpha = 0.6f),
-                                    style = MaterialTheme.typography.labelSmall
+                                val smoothing = 1.0f - vignetteSharpness
+                                val colorsArr = intArrayOf(shadowColor, transparent)
+                                val stops = floatArrayOf(
+                                    (0.6f - (smoothing * 0.55f)).coerceIn(0.01f, 0.59f),
+                                    (0.6f + (smoothing * 0.35f)).coerceIn(0.61f, 0.99f)
                                 )
-                                Spacer(Modifier.height(8.dp))
-
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .navigationBarsPadding()
-                                        .padding(bottom = 32.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    IconButton(
-                                        onClick = { 
-                                            val displayName = uri.substringAfterLast("/")
-                                            val folderUri = uri.substringBeforeLast("/")
-                                            viewModel.toggleFavorite(WallpaperImg(uri, folderUri, displayName, favorite))
-                                        },
-                                        modifier = Modifier.background(Color.White.copy(alpha = 0.2f), CircleShape)
-                                    ) {
-                                        Icon(if (favorite) Icons.Default.Star else Icons.Default.StarOutline, null, tint = if (favorite) Color.Yellow else Color.White)
-                                    }
-                                    
-                                    Button(
-                                        onClick = { 
-                                            val displayName = uri.substringAfterLast("/")
-                                            val folderUri = uri.substringBeforeLast("/")
-                                            viewModel.blacklistCurrentUri(uri, folderUri, displayName)
-                                            viewModel.resetAndLoadHistory() // Refresh the centralized list
-                                            if (historyList.isEmpty()) previewIndex = null
-                                        },
-                                        modifier = Modifier.weight(1f),
-                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                                    ) {
-                                        Icon(Icons.Default.Block, null)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Blacklist")
-                                    }
-
-                                    Button(
-                                        onClick = { 
-                                            viewModel.removeFromHistory(uri)
-                                            viewModel.resetAndLoadHistory() // Refresh the centralized list
-                                            if (historyList.isEmpty()) previewIndex = null
-                                        },
-                                        modifier = Modifier.weight(1f),
-                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                                    ) {
-                                        Text("Release")
-                                    }
-                                }
+                                
+                                // Left
+                                paint.shader = android.graphics.LinearGradient(0f, 0f, edgeW, 0f, colorsArr, stops, android.graphics.Shader.TileMode.CLAMP)
+                                nativeCanvas.drawRect(0f, 0f, edgeW, h, paint)
+                                // Right
+                                paint.shader = android.graphics.LinearGradient(w, 0f, w - edgeW, 0f, colorsArr, stops, android.graphics.Shader.TileMode.CLAMP)
+                                nativeCanvas.drawRect(w - edgeW, 0f, w, h, paint)
+                                // Top
+                                paint.shader = android.graphics.LinearGradient(0f, 0f, 0f, edgeH, colorsArr, stops, android.graphics.Shader.TileMode.CLAMP)
+                                nativeCanvas.drawRect(0f, 0f, w, edgeH, paint)
+                                // Bottom
+                                paint.shader = android.graphics.LinearGradient(0f, h, 0f, h - edgeH, colorsArr, stops, android.graphics.Shader.TileMode.CLAMP)
+                                nativeCanvas.drawRect(0f, h - edgeH, w, h, paint)
+                            } else if (subjectFocusEnabled && dimEnabled) {
+                                val faceX = w / 2f
+                                val faceY = h / 2f
+                                val diagonal = kotlin.math.sqrt(w * w + h * h) / 2f
+                                val radius = diagonal * (0.5f + subjectFocusSmoothing * 1.5f)
+                                
+                                val smoothing = 1.0f - (vignetteSharpness * 0.9f)
+                                val colors = intArrayOf(transparent, shadowColor)
+                                val radialStops = floatArrayOf(
+                                    (0.6f - (smoothing * 0.55f)).coerceIn(0.01f, 0.59f),
+                                    (0.6f + (smoothing * 0.35f)).coerceIn(0.61f, 0.99f)
+                                )
+                                
+                                paint.shader = android.graphics.RadialGradient(faceX, faceY, radius, colors, radialStops, android.graphics.Shader.TileMode.CLAMP)
+                                nativeCanvas.drawRect(0f, 0f, w, h, paint)
+                            } else if (dimEnabled && !subjectFocusEnabled && !vignetteModeEnabled) {
+                                nativeCanvas.drawColor(shadowColor)
                             }
                         }
-                        
-                        // Close button on top
-                        IconButton(
-                            onClick = { previewIndex = null },
-                            modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)
-                        ) {
-                            Icon(Icons.Default.Close, null, tint = Color.White)
-                        }
+                    }
+                } else {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No Images Found for Preview\nAdd some folders first", color = Color.White, textAlign = TextAlign.Center)
                     }
                 }
-            }
-        }
-        
-        Spacer(modifier = Modifier.height(32.dp))
-        Text("DATA MANAGEMENT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(modifier = Modifier.height(12.dp))
-        
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val context = LocalContext.current
-            val launcher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-                uri?.let {
-                    context.contentResolver.openInputStream(it)?.use { input ->
-                        val json = input.bufferedReader().use { r -> r.readText() }
-                        viewModel.importPresets(json)
-                    }
-                }
-            }
-
-            OutlinedButton(
-                onClick = { viewModel.exportPresets() },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(Icons.Default.Upload, null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Export")
-            }
-            
-            OutlinedButton(
-                onClick = { launcher.launch("application/json") },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Import")
-            }
-        }
-
-        Spacer(modifier = Modifier.height(32.dp))
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        Spacer(modifier = Modifier.height(16.dp))
-        Text("ABOUT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("Multi Wallpaper Live", fontWeight = FontWeight.Bold)
-                Text("Version 1.1.0", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(modifier = Modifier.height(8.dp))
                 
-                Button(
-                    onClick = { viewModel.checkForUpdates() },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    enabled = !isCheckingUpdate,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                // Indicate this is a preview
+                Surface(
+                    color = Color.Black.copy(alpha = 0.7f),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.align(Alignment.Center).padding(bottom = 120.dp)
                 ) {
-                    if (isCheckingUpdate) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
-                    } else {
-                        Icon(Icons.Default.Update, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Check for Update", fontSize = 12.sp)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-                var showHistoryDialog by remember { mutableStateOf(false) }
-                Text(
-                    "Release History", 
-                    color = MaterialTheme.colorScheme.primary, 
-                    fontSize = 12.sp, 
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.clickable { showHistoryDialog = true }
-                )
-                
-                if (showHistoryDialog) {
-                    AlertDialog(
-                        onDismissRequest = { showHistoryDialog = false },
-                        title = { Text("Release History") },
-                        text = {
-                            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                                HistoryItem("v1.1.0", "• Blacklist System (Gesture & Gallery)\n• AI Portrait Mode (Background Blur)\n• GitHub Update Sync\n• Focus Smoothing Control")
-                                Spacer(modifier = Modifier.height(12.dp))
-                                HistoryItem("v1.0.1", "• Critical Memory Leak Fix\n• AI 480px Downscaling Optimization\n• Scalable Database Indexing\n• Hardware Canvas Acceleration")
-                            }
-                        },
-                        confirmButton = {
-                            TextButton(onClick = { showHistoryDialog = false }) { Text("Close") }
-                        },
-                        shape = RoundedCornerShape(16.dp)
+                    Text(
+                        "REAL-TIME PREVIEW",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
                 }
-
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("Developer: Migi Gustian", style = MaterialTheme.typography.bodyMedium)
-                val context = LocalContext.current
-                Text("GitHub: Genesfi/multiwallpaper", color = MaterialTheme.colorScheme.primary, modifier = Modifier.clickable { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Genesfi/multiwallpaper"))) })
             }
         }
-        Spacer(modifier = Modifier.height(24.dp))
-        Button(
-            onClick = { triggerLiveWallpaperSelection(context, MultiWallpaperHomeService::class.java) },
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            contentPadding = PaddingValues(16.dp)
-        ) { 
-            Icon(Icons.Default.Wallpaper, null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Set Home Wallpaper") 
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-        OutlinedButton(
-            onClick = { triggerLiveWallpaperSelection(context, MultiWallpaperLockService::class.java) },
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            contentPadding = PaddingValues(16.dp)
-        ) { 
-            Icon(Icons.Default.Lock, null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Set Lock Wallpaper") 
-        }
-        Spacer(modifier = Modifier.height(40.dp))
     }
 }
 
@@ -2130,7 +2477,7 @@ fun ImageDetailDialog(
 
 @Composable
 fun ManualFocalEditorDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
-    val favorites by viewModel.favorites.collectAsState()
+    val favorites by viewModel.favorites.collectAsState(initial = emptyList())
     val scannedImages by viewModel.scannedImages.collectAsState()
     val manualFocalX by viewModel.manualFocalX.collectAsState()
     val manualFocalY by viewModel.manualFocalY.collectAsState()
@@ -2144,7 +2491,7 @@ fun ManualFocalEditorDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
     var currentY by remember { mutableFloatStateOf(manualFocalY) }
 
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
@@ -2297,4 +2644,3 @@ private fun saveImageToGallery(context: Context, imageUri: Uri, displayName: Str
         }
     } catch (e: Exception) {}
 }
-

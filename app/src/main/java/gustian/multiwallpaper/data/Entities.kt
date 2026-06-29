@@ -10,22 +10,25 @@ data class FolderEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val uriString: String,
     val displayName: String,
+    val target: String = "HOME", // "HOME" or "LOCK"
     val addedTime: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "favorites")
+@Entity(tableName = "favorites", primaryKeys = ["uriString", "target"])
 data class FavoriteImageEntity(
-    @PrimaryKey val uriString: String,
+    val uriString: String,
     val folderUriString: String,
     val displayName: String,
+    val target: String = "HOME", // "HOME" or "LOCK"
     val addedTime: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "scanned_images")
+@Entity(tableName = "scanned_images", primaryKeys = ["uriString", "target"])
 data class ScannedImageEntity(
-    @PrimaryKey val uriString: String,
+    val uriString: String,
     val folderUriString: String,
     val displayName: String,
+    val target: String = "HOME", // "HOME" or "LOCK"
     val lastScanned: Long = System.currentTimeMillis()
 )
 
@@ -36,6 +39,7 @@ data class PresetEntity(
     val thumbnailUri: String?,
     val folderUris: List<String>,
     val favoriteData: String, // Store full FavoriteImageEntity list as JSON string
+    val target: String = "HOME", // "HOME" or "LOCK"
     val createdTime: Long = System.currentTimeMillis()
 )
 
@@ -51,12 +55,14 @@ data class BlacklistedImageEntity(
     tableName = "rotation_history",
     indices = [
         Index(value = ["timestamp"]),
-        Index(value = ["id"])
+        Index(value = ["id"]),
+        Index(value = ["target"])
     ]
 )
 data class RotationHistoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val uriString: String,
+    val target: String = "HOME", // "HOME" or "LOCK"
     val timestamp: Long = System.currentTimeMillis()
 )
 

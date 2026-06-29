@@ -34,16 +34,19 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _settingsTarget = MutableStateFlow(SettingTarget.HOME)
     val settingsTarget = _settingsTarget.asStateFlow()
 
-    private var currentPrefs = application.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+    private var currentPrefs: android.content.SharedPreferences? = application.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
 
-    val folders: StateFlow<List<FolderEntity>> = folderDao.getAllFolders()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val folders: StateFlow<List<FolderEntity>> = settingsTarget.flatMapLatest { target ->
+        folderDao.getAllFolders(target.name)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val favorites: StateFlow<List<FavoriteImageEntity>> = favoriteDao.getAllFavorites()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val favorites: StateFlow<List<FavoriteImageEntity>> = settingsTarget.flatMapLatest { target ->
+        favoriteDao.getAllFavorites(target.name)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val presets: StateFlow<List<PresetEntity>> = presetDao.getAllPresets()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val presets: StateFlow<List<PresetEntity>> = settingsTarget.flatMapLatest { target ->
+        presetDao.getAllPresets(target.name)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val blacklisted: StateFlow<List<BlacklistedImageEntity>> = blacklistedDao.getAllBlacklisted()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -139,6 +142,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _subjectFocusSmoothing = MutableStateFlow(0.5f)
     val subjectFocusSmoothing = _subjectFocusSmoothing.asStateFlow()
 
+    private val _vignetteModeEnabled = MutableStateFlow(false)
+    val vignetteModeEnabled = _vignetteModeEnabled.asStateFlow()
+
+    private val _vignetteSharpness = MutableStateFlow(0.5f)
+    val vignetteSharpness = _vignetteSharpness.asStateFlow()
+
+    private val _vignetteWidth = MutableStateFlow(0.2f)
+    val vignetteWidth = _vignetteWidth.asStateFlow()
+
     private val _latestVersionInfo = MutableStateFlow<UpdateInfo?>(null)
     val latestVersionInfo = _latestVersionInfo.asStateFlow()
 
@@ -160,8 +172,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _autoLimitEnabled = MutableStateFlow(false)
     val autoLimitEnabled = _autoLimitEnabled.asStateFlow()
 
-    val historyCount = historyDao.getHistoryCount()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val historyCount = settingsTarget.flatMapLatest { target ->
+        historyDao.getHistoryCount(target.name)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
     
     private val _manualFocalX = MutableStateFlow(0.5f)
     val manualFocalX = _manualFocalX.asStateFlow()
@@ -188,8 +201,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         
         viewModelScope.launch(Dispatchers.IO) {
             _isLoadingHistory.value = true
+            val targetName = _settingsTarget.value.name
             val currentSize = _historyList.value.size
-            val more = historyDao.getHistoryPaged(100, currentSize)
+            val more = historyDao.getHistoryPaged(targetName, 100, currentSize)
             
             if (more.isNotEmpty()) {
                 _historyList.value = _historyList.value + more
@@ -212,33 +226,37 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadSettings() {
-        _intervalSeconds.value = currentPrefs.getFloat("interval_seconds", 60f)
-        _useFavoritesOnly.value = currentPrefs.getBoolean("use_favorites_only", false)
-        _transitionType.value = currentPrefs.getString("transition_type", "slide") ?: "slide"
-        _doubleTapEnabled.value = currentPrefs.getBoolean("double_tap_enabled", true)
-        _fadeSpeed.value = currentPrefs.getInt("fade_speed", 15)
-        _parallaxEnabled.value = currentPrefs.getBoolean("parallax_enabled", false)
-        _parallaxStrength.value = currentPrefs.getFloat("parallax_strength", 0.5f)
-        _shakeEnabled.value = currentPrefs.getBoolean("shake_enabled", false)
-        _smartCropEnabled.value = currentPrefs.getBoolean("smart_crop_enabled", true)
-        _lightModeEnabled.value = currentPrefs.getBoolean("light_mode_enabled", false)
-        _wallpaperQuality.value = currentPrefs.getString("wallpaper_quality", "NORMAL") ?: "NORMAL"
-        _aiAdvancedEnabled.value = currentPrefs.getBoolean("ai_advanced_enabled", false)
-        _aiZoomSlack.value = currentPrefs.getFloat("ai_zoom_slack", 1.45f)
-        _aiSensitivityX.value = currentPrefs.getFloat("ai_sensitivity_x", 0.9f)
-        _aiSensitivityY.value = currentPrefs.getFloat("ai_sensitivity_y", 0.4f)
-        _blurRadius.value = currentPrefs.getFloat("blur_radius", 0f)
-        _dimIntensity.value = currentPrefs.getFloat("dim_intensity", 0f)
-        _blurEnabled.value = currentPrefs.getBoolean("blur_enabled", false)
-        _dimEnabled.value = currentPrefs.getBoolean("dim_enabled", false)
-        _subjectFocusEnabled.value = currentPrefs.getBoolean("subject_focus_enabled", false)
-        _subjectFocusSmoothing.value = currentPrefs.getFloat("subject_focus_smoothing", 0.5f)
-        _smartAdjacencyEnabled.value = currentPrefs.getBoolean("smart_adjacency_enabled", true)
-        _rotationSortOrder.value = currentPrefs.getString("rotation_sort_order", "RANDOM") ?: "RANDOM"
-        _historyLimit.value = currentPrefs.getInt("history_limit", 150)
-        _autoLimitEnabled.value = currentPrefs.getBoolean("auto_limit_enabled", false)
-        _manualFocalX.value = currentPrefs.getFloat("manual_focal_x", 0.5f)
-        _manualFocalY.value = currentPrefs.getFloat("manual_focal_y", 0.4f)
+        val prefs = currentPrefs ?: return
+        _intervalSeconds.value = prefs.getFloat("interval_seconds", 60f)
+        _useFavoritesOnly.value = prefs.getBoolean("use_favorites_only", false)
+        _transitionType.value = prefs.getString("transition_type", "slide") ?: "slide"
+        _doubleTapEnabled.value = prefs.getBoolean("double_tap_enabled", true)
+        _fadeSpeed.value = prefs.getInt("fade_speed", 15)
+        _parallaxEnabled.value = prefs.getBoolean("parallax_enabled", false)
+        _parallaxStrength.value = prefs.getFloat("parallax_strength", 0.5f)
+        _shakeEnabled.value = prefs.getBoolean("shake_enabled", false)
+        _smartCropEnabled.value = prefs.getBoolean("smart_crop_enabled", true)
+        _lightModeEnabled.value = prefs.getBoolean("light_mode_enabled", false)
+        _wallpaperQuality.value = prefs.getString("wallpaper_quality", "NORMAL") ?: "NORMAL"
+        _aiAdvancedEnabled.value = prefs.getBoolean("ai_advanced_enabled", false)
+        _aiZoomSlack.value = prefs.getFloat("ai_zoom_slack", 1.45f)
+        _aiSensitivityX.value = prefs.getFloat("ai_sensitivity_x", 0.9f)
+        _aiSensitivityY.value = prefs.getFloat("ai_sensitivity_y", 0.4f)
+        _blurRadius.value = prefs.getFloat("blur_radius", 0f)
+        _dimIntensity.value = prefs.getFloat("dim_intensity", 0f)
+        _blurEnabled.value = prefs.getBoolean("blur_enabled", false)
+        _dimEnabled.value = prefs.getBoolean("dim_enabled", false)
+        _subjectFocusEnabled.value = prefs.getBoolean("subject_focus_enabled", false)
+        _subjectFocusSmoothing.value = prefs.getFloat("subject_focus_smoothing", 0.5f)
+        _vignetteModeEnabled.value = prefs.getBoolean("vignette_mode_enabled", false)
+        _vignetteSharpness.value = prefs.getFloat("vignette_sharpness", 0.5f)
+        _vignetteWidth.value = prefs.getFloat("vignette_width", 0.2f)
+        _smartAdjacencyEnabled.value = prefs.getBoolean("smart_adjacency_enabled", true)
+        _rotationSortOrder.value = prefs.getString("rotation_sort_order", "RANDOM") ?: "RANDOM"
+        _historyLimit.value = prefs.getInt("history_limit", 150)
+        _autoLimitEnabled.value = prefs.getBoolean("auto_limit_enabled", false)
+        _manualFocalX.value = prefs.getFloat("manual_focal_x", 0.5f)
+        _manualFocalY.value = prefs.getFloat("manual_focal_y", 0.4f)
         
         if (_autoLimitEnabled.value) {
             _historyLimit.value = _scannedImages.value.size.coerceAtLeast(150)
@@ -248,8 +266,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun copySettingsFromOther() {
         val otherPrefsName = if (_settingsTarget.value == SettingTarget.HOME) "multi_wallpaper_prefs_lock" else "multi_wallpaper_prefs"
         val otherPrefs = getApplication<Application>().getSharedPreferences(otherPrefsName, Context.MODE_PRIVATE)
+        val current = currentPrefs ?: return
         
-        currentPrefs.edit().apply {
+        current.edit().apply {
             putFloat("interval_seconds", otherPrefs.getFloat("interval_seconds", 60f))
             putBoolean("use_favorites_only", otherPrefs.getBoolean("use_favorites_only", false))
             putString("transition_type", otherPrefs.getString("transition_type", "slide"))
@@ -271,6 +290,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             putBoolean("dim_enabled", otherPrefs.getBoolean("dim_enabled", false))
             putBoolean("subject_focus_enabled", otherPrefs.getBoolean("subject_focus_enabled", false))
             putFloat("subject_focus_smoothing", otherPrefs.getFloat("subject_focus_smoothing", 0.5f))
+            putBoolean("vignette_mode_enabled", otherPrefs.getBoolean("vignette_mode_enabled", false))
+            putFloat("vignette_sharpness", otherPrefs.getFloat("vignette_sharpness", 0.5f))
+            putFloat("vignette_width", otherPrefs.getFloat("vignette_width", 0.2f))
             putBoolean("smart_adjacency_enabled", otherPrefs.getBoolean("smart_adjacency_enabled", true))
             putString("rotation_sort_order", otherPrefs.getString("rotation_sort_order", "RANDOM"))
             putInt("history_limit", otherPrefs.getInt("history_limit", 150))
@@ -285,10 +307,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setManualFocalPoint(x: Float, y: Float) {
-        currentPrefs.edit()
-            .putFloat("manual_focal_x", x)
-            .putFloat("manual_focal_y", y)
-            .apply()
+        currentPrefs?.edit()
+            ?.putFloat("manual_focal_x", x)
+            ?.putFloat("manual_focal_y", y)
+            ?.apply()
         _manualFocalX.value = x
         _manualFocalY.value = y
     }
@@ -298,15 +320,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     init {
         loadSettings()
         viewModelScope.launch {
-            scannedImageDao.getAllImages().collect { entities ->
+            settingsTarget.flatMapLatest { target ->
+                scannedImageDao.getAllImages(target.name)
+            }.collect { entities ->
+                val targetName = _settingsTarget.value.name
                 val favUris = withContext(Dispatchers.IO) {
-                    favoriteDao.getAllFavoritesSync().map { it.uriString }.toSet()
+                    favoriteDao.getAllFavoritesSync(targetName).map { it.uriString }.toSet()
                 }
                 val images = entities.map { 
                     WallpaperImg(it.uriString, it.folderUriString, it.displayName, favUris.contains(it.uriString))
                 }
                 _scannedImages.value = images
-                currentPrefs.edit().putInt("total_scanned_count", images.size).apply()
+                currentPrefs?.edit()?.putInt("total_scanned_count", images.size)?.apply()
                 
                 if (_autoLimitEnabled.value) {
                     _historyLimit.value = images.size.coerceAtLeast(150)
@@ -316,14 +341,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             @OptIn(FlowPreview::class)
-            folders.debounce(3000).collect { // Increased debounce to 3s to reduce boot contention
+            settingsTarget.flatMapLatest { target ->
+                folderDao.getAllFolders(target.name)
+            }.debounce(3000).collect {
                 scanFolders()
             }
         }
     }
 
     // File Explorer State
-    private val _currentPath = MutableStateFlow(Environment.getExternalStorageDirectory())
+    private val _currentPath = MutableStateFlow<File?>(Environment.getExternalStorageDirectory())
     val currentPath = _currentPath.asStateFlow()
 
     private val _currentPathItems = MutableStateFlow<List<FileItem>>(emptyList())
@@ -341,7 +368,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun navigateBack(): Boolean {
-        val parent = _currentPath.value.parentFile
+        val parent = _currentPath.value?.parentFile
         val root = Environment.getExternalStorageDirectory()
         if (parent != null && parent.absolutePath.startsWith(root.absolutePath) && parent.absolutePath != root.parentFile?.absolutePath) {
             navigateTo(parent)
@@ -354,7 +381,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val items = mutableListOf<FileItem>()
             try {
-                val files = _currentPath.value.listFiles()
+                val path = _currentPath.value ?: return@launch
+                val files = path.listFiles()
                 files?.forEach { file ->
                     if (file.isDirectory && !file.name.startsWith(".")) {
                         // Find a preview image for this folder
@@ -426,6 +454,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addSelectedToFavorites() {
         viewModelScope.launch(Dispatchers.IO) {
+            val targetName = _settingsTarget.value.name
             val uris = _selectedGalleryUris.value
             val images = _scannedImages.value.filter { uris.contains(it.uriString) }
 
@@ -435,7 +464,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         FavoriteImageEntity(
                             uriString = img.uriString,
                             folderUriString = img.folderUriString,
-                            displayName = img.displayName
+                            displayName = img.displayName,
+                            target = targetName
                         )
                     )
                 }
@@ -454,18 +484,20 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleFavoriteFolder(folderUri: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            val targetName = _settingsTarget.value.name
             val folderImages = _scannedImages.value.filter { it.folderUriString == folderUri }
             val isCurrentlyFavorite = folderImages.any { it.isFavorite }
 
             if (isCurrentlyFavorite) {
-                folderImages.forEach { favoriteDao.deleteFavoriteByUri(it.uriString) }
+                folderImages.forEach { favoriteDao.deleteFavoriteByUri(it.uriString, targetName) }
             } else {
                 folderImages.forEach { img ->
                     favoriteDao.insertFavorite(
                         FavoriteImageEntity(
                             uriString = img.uriString,
                             folderUriString = img.folderUriString,
-                            displayName = img.displayName
+                            displayName = img.displayName,
+                            target = targetName
                         )
                     )
                 }
@@ -489,140 +521,142 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setTransitionType(type: String) {
-        currentPrefs.edit().putString("transition_type", type).apply()
+        currentPrefs?.edit()?.putString("transition_type", type)?.apply()
         _transitionType.value = type
     }
 
     fun setIntervalSeconds(seconds: Float) {
         val capped = seconds.coerceAtLeast(5f)
-        currentPrefs.edit().putFloat("interval_seconds", capped).apply()
+        currentPrefs?.edit()?.putFloat("interval_seconds", capped)?.apply()
         _intervalSeconds.value = capped
     }
 
     fun setUseFavoritesOnly(enable: Boolean) {
-        currentPrefs.edit().putBoolean("use_favorites_only", enable)
-            .putBoolean("force_reload_trigger", true) // Force service to react
-            .apply()
+        currentPrefs?.edit()?.putBoolean("use_favorites_only", enable)
+            ?.putBoolean("force_reload_trigger", true) // Force service to react
+            ?.apply()
         _useFavoritesOnly.value = enable
     }
 
     fun setHistoryLimit(limit: Int) {
         if (!_autoLimitEnabled.value) {
             val cappedLimit = limit.coerceIn(10, 8000)
-            currentPrefs.edit().putInt("history_limit", cappedLimit).apply()
+            currentPrefs?.edit()?.putInt("history_limit", cappedLimit)?.apply()
             _historyLimit.value = cappedLimit
         }
     }
 
     fun setAutoLimitEnabled(enabled: Boolean) {
-        currentPrefs.edit().putBoolean("auto_limit_enabled", enabled).apply()
+        currentPrefs?.edit()?.putBoolean("auto_limit_enabled", enabled)?.apply()
         _autoLimitEnabled.value = enabled
         if (enabled) {
             _historyLimit.value = _scannedImages.value.size.coerceAtLeast(150)
         } else {
-            val savedLimit = currentPrefs.getInt("history_limit", 150)
+            val savedLimit = currentPrefs?.getInt("history_limit", 150) ?: 150
             _historyLimit.value = savedLimit
         }
     }
 
     fun removeFromHistory(uri: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            historyDao.deleteHistoryByUri(uri)
+            val targetName = _settingsTarget.value.name
+            historyDao.deleteHistoryByUri(uri, targetName)
         }
     }
 
     fun removeMultipleFromHistory(uris: List<String>) {
         viewModelScope.launch(Dispatchers.IO) {
-            historyDao.deleteMultipleHistoryByUri(uris)
+            val targetName = _settingsTarget.value.name
+            historyDao.deleteMultipleHistoryByUri(uris, targetName)
         }
     }
 
-    suspend fun getHistoryPaged(limit: Int, offset: Int): List<String> {
-        return historyDao.getHistoryPaged(limit, offset)
+    suspend fun getHistoryPaged(target: String, limit: Int, offset: Int): List<String> {
+        return historyDao.getHistoryPaged(target, limit, offset)
     }
 
     fun setDoubleTapEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("double_tap_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("double_tap_enabled", enable)?.apply()
         _doubleTapEnabled.value = enable
     }
 
     fun setFadeSpeed(speed: Int) {
-        currentPrefs.edit().putInt("fade_speed", speed).apply()
+        currentPrefs?.edit()?.putInt("fade_speed", speed)?.apply()
         _fadeSpeed.value = speed
     }
 
     fun setParallaxEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("parallax_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("parallax_enabled", enable)?.apply()
         _parallaxEnabled.value = enable
     }
 
     fun setParallaxStrength(strength: Float) {
-        currentPrefs.edit().putFloat("parallax_strength", strength).apply()
+        currentPrefs?.edit()?.putFloat("parallax_strength", strength)?.apply()
         _parallaxStrength.value = strength
     }
 
     fun setShakeEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("shake_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("shake_enabled", enable)?.apply()
         _shakeEnabled.value = enable
     }
 
     fun setSmartCropEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("smart_crop_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("smart_crop_enabled", enable)?.apply()
         _smartCropEnabled.value = enable
     }
 
     fun setLightModeEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("light_mode_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("light_mode_enabled", enable)?.apply()
         _lightModeEnabled.value = enable
     }
 
     fun setWallpaperQuality(quality: String) {
-        currentPrefs.edit().putString("wallpaper_quality", quality).apply()
+        currentPrefs?.edit()?.putString("wallpaper_quality", quality)?.apply()
         _wallpaperQuality.value = quality
     }
 
     fun setAiAdvancedEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("ai_advanced_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("ai_advanced_enabled", enable)?.apply()
         _aiAdvancedEnabled.value = enable
     }
 
     fun setAiZoomSlack(value: Float) {
-        currentPrefs.edit().putFloat("ai_zoom_slack", value).apply()
+        currentPrefs?.edit()?.putFloat("ai_zoom_slack", value)?.apply()
         _aiZoomSlack.value = value
     }
 
     fun setAiSensitivityX(value: Float) {
-        currentPrefs.edit().putFloat("ai_sensitivity_x", value).apply()
+        currentPrefs?.edit()?.putFloat("ai_sensitivity_x", value)?.apply()
         _aiSensitivityX.value = value
     }
 
     fun setAiSensitivityY(value: Float) {
-        currentPrefs.edit().putFloat("ai_sensitivity_y", value).apply()
+        currentPrefs?.edit()?.putFloat("ai_sensitivity_y", value)?.apply()
         _aiSensitivityY.value = value
     }
 
     fun setBlurRadius(value: Float) {
-        currentPrefs.edit().putFloat("blur_radius", value).apply()
+        currentPrefs?.edit()?.putFloat("blur_radius", value)?.apply()
         _blurRadius.value = value
     }
 
     fun setDimIntensity(value: Float) {
-        currentPrefs.edit().putFloat("dim_intensity", value).apply()
+        currentPrefs?.edit()?.putFloat("dim_intensity", value)?.apply()
         _dimIntensity.value = value
     }
 
     fun setBlurEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("blur_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("blur_enabled", enable)?.apply()
         _blurEnabled.value = enable
     }
 
     fun setDimEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("dim_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("dim_enabled", enable)?.apply()
         _dimEnabled.value = enable
     }
 
     fun setSmartAdjacencyEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("smart_adjacency_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("smart_adjacency_enabled", enable)?.apply()
         _smartAdjacencyEnabled.value = enable
         if (enable && _rotationSortOrder.value != "RANDOM") {
             setRotationSortOrder("RANDOM")
@@ -630,7 +664,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setRotationSortOrder(order: String) {
-        currentPrefs.edit().putString("rotation_sort_order", order).apply()
+        currentPrefs?.edit()?.putString("rotation_sort_order", order)?.apply()
         _rotationSortOrder.value = order
         if (order == "FOLDER" && _smartAdjacencyEnabled.value) {
             setSmartAdjacencyEnabled(false)
@@ -638,12 +672,33 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setSubjectFocusEnabled(enable: Boolean) {
-        currentPrefs.edit().putBoolean("subject_focus_enabled", enable).apply()
+        currentPrefs?.edit()?.putBoolean("subject_focus_enabled", enable)?.apply()
         _subjectFocusEnabled.value = enable
+        if (enable && _vignetteModeEnabled.value) {
+            setVignetteModeEnabled(false)
+        }
+    }
+
+    fun setVignetteModeEnabled(enable: Boolean) {
+        currentPrefs?.edit()?.putBoolean("vignette_mode_enabled", enable)?.apply()
+        _vignetteModeEnabled.value = enable
+        if (enable && _subjectFocusEnabled.value) {
+            setSubjectFocusEnabled(false)
+        }
+    }
+
+    fun setVignetteSharpness(value: Float) {
+        currentPrefs?.edit()?.putFloat("vignette_sharpness", value)?.apply()
+        _vignetteSharpness.value = value
+    }
+
+    fun setVignetteWidth(value: Float) {
+        currentPrefs?.edit()?.putFloat("vignette_width", value)?.apply()
+        _vignetteWidth.value = value
     }
 
     fun setSubjectFocusSmoothing(value: Float) {
-        currentPrefs.edit().putFloat("subject_focus_smoothing", value).apply()
+        currentPrefs?.edit()?.putFloat("subject_focus_smoothing", value)?.apply()
         _subjectFocusSmoothing.value = value
     }
 
@@ -701,14 +756,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun blacklistCurrentUri(uri: String, folderUri: String, displayName: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            val targetName = _settingsTarget.value.name
             blacklistedDao.insertBlacklist(BlacklistedImageEntity(uri, folderUri, displayName))
-            favoriteDao.deleteFavoriteByUriSync(uri)
-            scannedImageDao.deleteImageByUriSync(uri)
+            favoriteDao.deleteFavoriteByUriSync(uri, targetName)
+            scannedImageDao.deleteImageByUriSync(uri, targetName)
         }
     }
 
     fun blacklistSelectedImages() {
         viewModelScope.launch(Dispatchers.IO) {
+            val targetName = _settingsTarget.value.name
             val uris = _selectedGalleryUris.value
             val images = _scannedImages.value.filter { uris.contains(it.uriString) }
 
@@ -720,8 +777,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         displayName = img.displayName
                     )
                 )
-                favoriteDao.deleteFavoriteByUriSync(img.uriString)
-                scannedImageDao.deleteImageByUriSync(img.uriString)
+                favoriteDao.deleteFavoriteByUriSync(img.uriString, targetName)
+                scannedImageDao.deleteImageByUriSync(img.uriString, targetName)
             }
 
             withContext(Dispatchers.Main) {
@@ -739,23 +796,26 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    suspend fun saveCurrentAsPresetSuspend(name: String) {
-        val currentFolders = folders.value.map { it.uriString }
+    suspend fun saveCurrentAsPresetSuspend(name: String) = withContext(Dispatchers.IO) {
+        val targetName = _settingsTarget.value.name
+        val currentFolders = folderDao.getAllFoldersSync(targetName).map { it.uriString }
         // Fetch the ACTUAL current favorites from DB instead of relying on StateFlow which might be lagging
-        val currentFavs = withContext(Dispatchers.IO) { favoriteDao.getAllFavoritesSync() }
-        val thumb = currentFavs.firstOrNull()?.uriString ?: scannedImages.value.firstOrNull()?.uriString
+        val currentFavs = favoriteDao.getAllFavoritesSync(targetName)
+        val thumb = currentFavs.firstOrNull()?.uriString ?: _scannedImages.value.firstOrNull()?.uriString
 
         val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
         val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
         val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
         val favJson = adapter.toJson(currentFavs)
 
-        val existing = presets.value.find { it.name.equals(name, ignoreCase = true) }
+        val existingList = presetDao.getAllPresets(targetName).first()
+        val existing = existingList.find { it.name.equals(name, ignoreCase = true) }
         if (existing != null) {
             val updated = existing.copy(
                 thumbnailUri = thumb,
                 folderUris = currentFolders,
                 favoriteData = favJson,
+                target = targetName,
                 createdTime = System.currentTimeMillis()
             )
             presetDao.updatePreset(updated)
@@ -764,7 +824,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 name = name,
                 thumbnailUri = thumb,
                 folderUris = currentFolders,
-                favoriteData = favJson
+                favoriteData = favJson,
+                target = targetName
             )
             presetDao.insertPreset(preset)
         }
@@ -787,7 +848,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setGallerySortType(type: String) {
-        currentPrefs.edit().putString("gallery_sort_type", type).apply()
+        currentPrefs?.edit()?.putString("gallery_sort_type", type)?.apply()
         _gallerySortType.value = type
     }
 
@@ -828,52 +889,54 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun loadPreset(preset: PresetEntity) {
         viewModelScope.launch {
             _isLoadingPreset.value = true
+            val targetName = _settingsTarget.value.name
             try {
                 // Auto-save current state to the PREVIOUS active preset before switching
                 _activePresetName.value?.let { activeName ->
                     saveCurrentAsPresetSuspend(activeName)
                 }
 
-                _activePresetName.value = preset.name
-                folderDao.deleteAllFolders()
-                favoriteDao.deleteAllFavorites() // Fix: Clear previous favorites
-
-                val folderEntities = preset.folderUris.map { uri ->
-                    val name = try {
-                        val u = Uri.parse(uri)
-                        if (u.scheme == "file") File(u.path!!).name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder"
-                    } catch (e: Exception) { "Folder" }
-                    FolderEntity(uriString = uri, displayName = name)
-                }
-                folderDao.insertFolders(folderEntities)
-
-                // Restore Favorites
-                var favoriteCount = 0
-                try {
-                    val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
-                    val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
-                    val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
-                    val favs = adapter.fromJson(preset.favoriteData)
-
-                    if (favs != null) {
-                        favoriteDao.insertFavorites(favs)
-                        favoriteCount = favs.size
-                    }
-                } catch (e: Exception) {
-                    Log.e("HomeViewModel", "Error loading favorites from preset", e)
-                }
-
-                // Auto-Fallback: If preset has no favorites, disable "Use Favorites Only"
-                if (favoriteCount == 0 && _useFavoritesOnly.value) {
-                    setUseFavoritesOnly(false)
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(getApplication(), "Favorites Only turned OFF (No favorites in preset)", Toast.LENGTH_SHORT).show()
-                    }
-                }
-                
-                // Re-scan to update cached images for the new preset folders
-                // We await scanning to ensure sync with service trigger
                 withContext(Dispatchers.IO) {
+                    _activePresetName.value = preset.name
+                    folderDao.deleteAllFolders(targetName)
+                    favoriteDao.deleteAllFavorites(targetName) // Fix: Clear previous favorites
+
+                    val folderEntities = preset.folderUris.map { uri ->
+                        val name = try {
+                            val u = Uri.parse(uri)
+                            if (u.scheme == "file") java.io.File(u.path!!).name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder"
+                        } catch (e: Exception) { "Folder" }
+                        FolderEntity(uriString = uri, displayName = name, target = targetName)
+                    }
+                    folderDao.insertFolders(folderEntities)
+
+                    // Restore Favorites
+                    var favoriteCount = 0
+                    try {
+                        val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+                        val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
+                        val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
+                        val favs = adapter.fromJson(preset.favoriteData)
+
+                        if (favs != null) {
+                            // Ensure all restored favorites have the correct target
+                            val updatedFavs = favs.map { it.copy(target = targetName) }
+                            favoriteDao.insertFavorites(updatedFavs)
+                            favoriteCount = favs.size
+                        }
+                    } catch (e: Exception) {
+                        Log.e("HomeViewModel", "Error loading favorites from preset", e)
+                    }
+
+                    // Auto-Fallback: If preset has no favorites, disable "Use Favorites Only"
+                    if (favoriteCount == 0 && _useFavoritesOnly.value) {
+                        setUseFavoritesOnly(false)
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(getApplication(), "Favorites Only turned OFF (No favorites in preset)", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    
+                    // Re-scan to update cached images for the new preset folders
                     scanFoldersSync()
                 }
                 triggerReload()
@@ -884,11 +947,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun scanFoldersSync() {
-        val foldersList = folders.value
+        val targetName = _settingsTarget.value.name
+        val foldersList = folderDao.getAllFoldersSync(targetName)
         val tempImages = mutableListOf<WallpaperImg>()
         
         // Deep-Sync: Get all current entries to verify disk existence
-        val favoriteEntities = favoriteDao.getAllFavoritesSync()
+        val favoriteEntities = favoriteDao.getAllFavoritesSync(targetName)
         val blacklistedEntities = blacklistedDao.getAllBlacklistedSync()
         val contentResolver = getApplication<Application>().contentResolver
 
@@ -900,7 +964,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             if (verifyFileExists(Uri.parse(fav.uriString))) {
                 favoriteUris.add(fav.uriString)
             } else {
-                favoriteDao.deleteFavoriteByUriSync(fav.uriString)
+                favoriteDao.deleteFavoriteByUriSync(fav.uriString, targetName)
                 Log.d("HomeViewModel", "Deep-Sync: Removed orphaned favorite: ${fav.displayName}")
             }
         }
@@ -932,9 +996,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
         yield()
         // Sync with Database Cache
-        scannedImageDao.deleteAllImages()
+        scannedImageDao.deleteAllImages(targetName)
         scannedImageDao.insertImages(tempImages.map { 
-            ScannedImageEntity(it.uriString, it.folderUriString, it.displayName)
+            ScannedImageEntity(it.uriString, it.folderUriString, it.displayName, targetName)
         })
     }
 
@@ -952,26 +1016,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun exportPresets() {
-        viewModelScope.launch(Dispatchers.IO) {
+    suspend fun getPresetsJson(): String? {
+        return withContext(Dispatchers.IO) {
             try {
-                val allPresets = presetDao.getAllPresets().first()
+                val targetName = _settingsTarget.value.name
+                val allPresets = presetDao.getAllPresets(targetName).first()
                 val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
                 val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, PresetEntity::class.java)
                 val adapter = moshi.adapter<List<PresetEntity>>(type)
-                val json = adapter.toJson(allPresets)
-
-                val file = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "multi_wallpaper_presets.json")
-                file.writeText(json)
-
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), "Exported to Downloads/multi_wallpaper_presets.json", Toast.LENGTH_LONG).show()
-                }
+                adapter.toJson(allPresets)
             } catch (e: Exception) {
-                Log.e("HomeViewModel", "Export fail", e)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
+                Log.e("HomeViewModel", "Failed to generate presets JSON", e)
+                null
             }
         }
     }
@@ -979,6 +1035,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun importPresets(json: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                val targetName = _settingsTarget.value.name
                 val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
                 val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, PresetEntity::class.java)
                 val adapter = moshi.adapter<List<PresetEntity>>(type)
@@ -986,8 +1043,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
                 imported?.forEach {
                     // Check for duplicate names, maybe append (Imported) if exists
-                    val existing = presets.value.find { p -> p.name == it.name }
-                    val finalPreset = if (existing != null) it.copy(id = 0, name = "${it.name} (Imported)") else it.copy(id = 0)
+                    val existingList = presetDao.getAllPresets(targetName).first()
+                    val existing = existingList.find { p -> p.name == it.name }
+                    val finalPreset = if (existing != null) it.copy(id = 0, name = "${it.name} (Imported)", target = targetName) else it.copy(id = 0, target = targetName)
                     presetDao.insertPreset(finalPreset)
                 }
 
@@ -1005,7 +1063,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun triggerReload() {
         Log.d("MultiWallpaper", "ViewModel triggerReload for ${if (_settingsTarget.value == SettingTarget.HOME) "Home" else "Lock"}")
-        currentPrefs.edit().putBoolean("force_reload_trigger", true).apply()
+        currentPrefs?.edit()?.putBoolean("force_reload_trigger", true)?.apply()
         Toast.makeText(getApplication(), "Wallpaper reload triggered", Toast.LENGTH_SHORT).show()
     }
 
@@ -1017,8 +1075,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addFolders(uris: List<Uri>) {
         viewModelScope.launch(Dispatchers.IO) {
+            val targetName = _settingsTarget.value.name
             val contentResolver = getApplication<Application>().contentResolver
-            val currentFolderUris = folders.value.map { it.uriString }.toSet()
+            val currentFolderUris = folderDao.getAllFoldersSync(targetName).map { it.uriString }.toSet()
             val foldersToInsert = mutableListOf<FolderEntity>()
 
             uris.forEach { uri ->
@@ -1040,7 +1099,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         )
                         cursor?.use { c -> if (c.moveToFirst()) displayName = c.getString(0) ?: "Folder" }
                     }
-                    foldersToInsert.add(FolderEntity(uriString = uri.toString(), displayName = displayName))
+                    foldersToInsert.add(FolderEntity(uriString = uri.toString(), displayName = displayName, target = targetName))
                 } catch (e: Exception) {
                     Log.e("HomeViewModel", "Prepare folder fail: $uri", e)
                 }
@@ -1058,18 +1117,21 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteFolder(folder: FolderEntity) {
         viewModelScope.launch(Dispatchers.IO) {
+            val targetName = _settingsTarget.value.name
             folderDao.deleteFolder(folder)
-            favoriteDao.deleteFavoritesByFolderUri(folder.uriString)
+            favoriteDao.deleteFavoritesByFolderUri(folder.uriString, targetName)
         }
     }
 
     fun deleteSelectedFolders() {
         viewModelScope.launch(Dispatchers.IO) {
+            val targetName = _settingsTarget.value.name
             val selectedIds = _selectedFolderIds.value.toList()
-            val folderUrisToDelete = folders.value.filter { selectedIds.contains(it.id) }.map { it.uriString }
+            val currentFolders = folderDao.getAllFoldersSync(targetName)
+            val folderUrisToDelete = currentFolders.filter { selectedIds.contains(it.id) }.map { it.uriString }
 
             selectedIds.forEach { folderDao.deleteFolderById(it) }
-            folderUrisToDelete.forEach { uri -> favoriteDao.deleteFavoritesByFolderUri(uri) }
+            folderUrisToDelete.forEach { uri -> favoriteDao.deleteFavoritesByFolderUri(uri, targetName) }
 
             withContext(Dispatchers.Main) {
                 clearFolderIdSelection()
@@ -1079,9 +1141,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearAllFolders() {
         viewModelScope.launch(Dispatchers.IO) {
+            val targetName = _settingsTarget.value.name
             _activePresetName.value = null
-            folderDao.deleteAllFolders()
-            favoriteDao.deleteAllFavorites()
+            folderDao.deleteAllFolders(targetName)
+            favoriteDao.deleteAllFavorites(targetName)
             withContext(Dispatchers.Main) {
                 clearFolderIdSelection()
             }
@@ -1090,11 +1153,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleFavorite(img: WallpaperImg) {
         viewModelScope.launch(Dispatchers.IO) {
-            val exists = favoriteDao.isFavoriteSync(img.uriString)
+            val targetName = _settingsTarget.value.name
+            val exists = favoriteDao.isFavoriteSync(img.uriString, targetName)
             if (exists) {
-                favoriteDao.deleteFavoriteByUri(img.uriString)
+                favoriteDao.deleteFavoriteByUri(img.uriString, targetName)
             } else {
-                favoriteDao.insertFavorite(FavoriteImageEntity(img.uriString, img.folderUriString, img.displayName))
+                favoriteDao.insertFavorite(FavoriteImageEntity(img.uriString, img.folderUriString, img.displayName, targetName))
             }
             val currentList = _scannedImages.value.toMutableList()
             val index = currentList.indexOfFirst { it.uriString == img.uriString }
