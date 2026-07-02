@@ -20,6 +20,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.ScrollableDefaults
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -59,7 +60,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import gustian.multiwallpaper.data.FolderEntity
 import gustian.multiwallpaper.data.PresetEntity
+import gustian.multiwallpaper.data.ScheduleEntity
 import kotlin.math.roundToInt
+import java.util.Locale
 import gustian.multiwallpaper.ui.HomeViewModel
 import gustian.multiwallpaper.ui.WallpaperImg
 import gustian.multiwallpaper.ui.theme.MyApplicationTheme
@@ -996,6 +999,8 @@ fun SettingsScreen(viewModel: HomeViewModel) {
     val historyLimit by viewModel.historyLimit.collectAsState()
     val historyCount by viewModel.historyCount.collectAsState()
     val sortOrder by viewModel.rotationSortOrder.collectAsState()
+    val schedules by viewModel.schedules.collectAsState(initial = emptyList())
+    val presets by viewModel.presets.collectAsState(initial = emptyList())
     
     var unit by remember(totalSeconds) { 
         mutableStateOf(if (totalSeconds < 60) "Sec" else if (totalSeconds < 3600) "Min" else "Hour") 
@@ -1536,6 +1541,49 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                     color = if (autoLimitEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, 
                     modifier = Modifier.align(Alignment.End)
                 )
+
+                Spacer(modifier = Modifier.height(32.dp))
+                Text("AUTOMATION", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Schedules", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            var showScheduleEditor by remember { mutableStateOf(false) }
+                            IconButton(onClick = { showScheduleEditor = true }) {
+                                Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                            if (showScheduleEditor) {
+                                ScheduleEditorDialog(
+                                    presets = presets,
+                                    onDismiss = { showScheduleEditor = false },
+                                    onSave = { viewModel.addSchedule(it.copy(target = settingsTarget.name)) }
+                                )
+                            }
+                        }
+                        
+                        if (schedules.isEmpty()) {
+                            Text("No schedules set. Automate your settings by time.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                        } else {
+                            schedules.forEach { schedule ->
+                                ScheduleItem(
+                                    schedule = schedule,
+                                    presets = presets,
+                                    onToggle = { viewModel.toggleSchedule(schedule) },
+                                    onDelete = { viewModel.deleteSchedule(schedule) },
+                                    onEdit = { updated -> viewModel.updateSchedule(updated) }
+                                )
+                                if (schedule != schedules.last()) {
+                                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if (showCooldownDialog) {
                     val historyList by viewModel.historyList.collectAsState()
@@ -2600,6 +2648,346 @@ fun ManualFocalEditorDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
                         ) {
                             Text("Save Changes")
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ScheduleItem(
+    schedule: ScheduleEntity,
+    presets: List<PresetEntity>,
+    onToggle: () -> Unit,
+    onDelete: () -> Unit,
+    onEdit: (ScheduleEntity) -> Unit
+) {
+    var showEditDialog by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).clickable { showEditDialog = true }) {
+            Text(schedule.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+            Text("${schedule.startTime} - ${schedule.endTime}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            
+            val presetName = presets.find { it.id == schedule.presetId }?.name ?: "No Preset"
+            var effects = ""
+            if (schedule.blurEnabled == true) effects += "Blur (${schedule.blurRadius?.toInt()}px) "
+            if (schedule.dimEnabled == true) effects += "Dim (${((schedule.dimIntensity ?: 0f) * 100).toInt()}%) "
+            if (schedule.lightModeEnabled == true) effects += "PowerSaver "
+            
+            Text("Preset: $presetName", style = MaterialTheme.typography.labelSmall)
+            if (effects.isNotEmpty()) {
+                Text(effects, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        
+        Switch(
+            checked = schedule.isEnabled,
+            onCheckedChange = { onToggle() },
+            modifier = Modifier.graphicsLayer(scaleX = 0.8f, scaleY = 0.8f)
+        )
+        
+        IconButton(onClick = onDelete) {
+            Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+        }
+    }
+
+    if (showEditDialog) {
+        ScheduleEditorDialog(
+            schedule = schedule,
+            presets = presets,
+            onDismiss = { showEditDialog = false },
+            onSave = { onEdit(it); showEditDialog = false }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ScheduleEditorDialog(
+    schedule: ScheduleEntity? = null,
+    presets: List<PresetEntity>,
+    onDismiss: () -> Unit,
+    onSave: (ScheduleEntity) -> Unit
+) {
+    var name by remember { mutableStateOf(schedule?.name ?: "") }
+    var startTime by remember { mutableStateOf(schedule?.startTime ?: "08:00") }
+    var endTime by remember { mutableStateOf(schedule?.endTime ?: "17:00") }
+    var presetId by remember { mutableStateOf(schedule?.presetId) }
+    var blurEnabled by remember { mutableStateOf(schedule?.blurEnabled ?: false) }
+    var blurRadius by remember { mutableFloatStateOf(schedule?.blurRadius ?: 20f) }
+    var dimEnabled by remember { mutableStateOf(schedule?.dimEnabled ?: false) }
+    var dimIntensity by remember { mutableFloatStateOf(schedule?.dimIntensity ?: 0.3f) }
+    var lightModeEnabled by remember { mutableStateOf(schedule?.lightModeEnabled ?: false) }
+
+    var showStartPicker by remember { mutableStateOf(false) }
+    var showEndPicker by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (schedule == null) "New Schedule" else "Edit Schedule") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                
+                Spacer(modifier = Modifier.height(20.dp))
+                
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    TimePickerButton(
+                        label = "Start",
+                        time = startTime,
+                        onClick = { showStartPicker = true },
+                        modifier = Modifier.weight(1f)
+                    )
+                    TimePickerButton(
+                        label = "End",
+                        time = endTime,
+                        onClick = { showEndPicker = true },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Select Preset", style = MaterialTheme.typography.labelMedium)
+                
+                var expanded by remember { mutableStateOf(false) }
+                Box {
+                    val currentPreset = presets.find { it.id == presetId }?.name ?: "None"
+                    OutlinedButton(
+                        onClick = { expanded = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(currentPreset)
+                    }
+                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        DropdownMenuItem(text = { Text("None") }, onClick = { presetId = null; expanded = false })
+                        presets.forEach { p ->
+                            DropdownMenuItem(text = { Text(p.name) }, onClick = { presetId = p.id; expanded = false })
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                SettingRow(title = "Enable Blur Override", checked = blurEnabled, onCheckedChange = { blurEnabled = it })
+                if (blurEnabled) {
+                    Slider(value = blurRadius, onValueChange = { blurRadius = it }, valueRange = 0f..100f)
+                }
+
+                SettingRow(title = "Enable Dim Override", checked = dimEnabled, onCheckedChange = { dimEnabled = it })
+                if (dimEnabled) {
+                    Slider(value = dimIntensity, onValueChange = { dimIntensity = it }, valueRange = 0f..1f)
+                }
+
+                SettingRow(title = "Power Saver Mode", checked = lightModeEnabled, onCheckedChange = { lightModeEnabled = it })
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                onSave(
+                    ScheduleEntity(
+                        id = schedule?.id ?: 0,
+                        name = name.ifBlank { "Schedule" },
+                        startTime = startTime,
+                        endTime = endTime,
+                        presetId = presetId,
+                        blurEnabled = blurEnabled,
+                        blurRadius = blurRadius,
+                        dimEnabled = dimEnabled,
+                        dimIntensity = dimIntensity,
+                        lightModeEnabled = lightModeEnabled,
+                        target = schedule?.target ?: "HOME"
+                    )
+                )
+                onDismiss() // Automatically close dialog after saving
+            }) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+
+    if (showStartPicker) {
+        WheelTimePickerDialog(
+            initialTime = startTime,
+            onDismiss = { showStartPicker = false },
+            onConfirm = { 
+                startTime = it
+                showStartPicker = false
+            }
+        )
+    }
+
+    if (showEndPicker) {
+        WheelTimePickerDialog(
+            initialTime = endTime,
+            onDismiss = { showEndPicker = false },
+            onConfirm = { 
+                endTime = it
+                showEndPicker = false
+            }
+        )
+    }
+}
+
+@Composable
+fun TimePickerButton(
+    label: String,
+    time: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth().height(56.dp).clickable { onClick() },
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            color = Color.Transparent
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(time, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            }
+        }
+    }
+}
+
+@Composable
+fun WheelTimePickerDialog(
+    initialTime: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    val initialHour = initialTime.substringBefore(":").toIntOrNull() ?: 8
+    val initialMinute = initialTime.substringAfter(":").toIntOrNull() ?: 0
+
+    var selectedHour by remember { mutableIntStateOf(initialHour) }
+    var selectedMinute by remember { mutableIntStateOf(initialMinute) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Select Time", textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
+        text = {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                WheelPicker(
+                    count = 24,
+                    initialIndex = initialHour,
+                    onIndexSelected = { selectedHour = it },
+                    label = "H",
+                    modifier = Modifier.weight(1f)
+                )
+                Text(":", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.padding(horizontal = 8.dp))
+                WheelPicker(
+                    count = 60,
+                    initialIndex = initialMinute,
+                    onIndexSelected = { selectedMinute = it },
+                    label = "M",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { 
+                val timeStr = String.format(Locale.getDefault(), "%02d:%02d", selectedHour, selectedMinute)
+                onConfirm(timeStr) 
+            }) { Text("Confirm") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+fun WheelPicker(
+    count: Int,
+    initialIndex: Int,
+    onIndexSelected: (Int) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier
+) {
+    val itemHeight = 50.dp // Fixed height for absolute predictability
+    val visibleItems = 3   // Reduced to 3 for better focus and easier math
+    
+    // We want the target item to be exactly in the center (index 1 of 3)
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = (initialIndex + count * 100) - 1)
+    
+    // Force snapping to the middle of the container
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (!listState.isScrollInProgress) {
+            val layoutInfo = listState.layoutInfo
+            // Since all items have exact fixed height, we don't need viewport math
+            val firstVisibleIndex = listState.firstVisibleItemIndex
+            val firstVisibleOffset = listState.firstVisibleItemScrollOffset
+            
+            // If the first item is more than half hidden, snap to the next one
+            val finalIndex = if (firstVisibleOffset > 50) firstVisibleIndex + 1 else firstVisibleIndex
+            
+            listState.animateScrollToItem(finalIndex, 0)
+            // The selected index is always "firstVisible + 1" to be in the center bar
+            onIndexSelected((finalIndex + 1) % count)
+        }
+    }
+
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(8.dp))
+        Box(
+            modifier = Modifier
+                .height(itemHeight * visibleItems)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            // Highlight background - Fixed at exactly the middle item position
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(itemHeight),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
+            ) {}
+            
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                flingBehavior = ScrollableDefaults.flingBehavior()
+            ) {
+                items(Int.MAX_VALUE) { index ->
+                    val actualIndex = index % count
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(itemHeight),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val isSelected = remember {
+                            derivedStateOf {
+                                // In a 3-item view, the selected one is at index 'firstVisible + 1'
+                                index == listState.firstVisibleItemIndex + 1
+                            }
+                        }
+                        
+                        Text(
+                            text = String.format(Locale.getDefault(), "%02d", actualIndex),
+                            style = if (isSelected.value) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleMedium,
+                            color = if (isSelected.value) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                            fontWeight = if (isSelected.value) FontWeight.ExtraBold else FontWeight.Normal
+                        )
                     }
                 }
             }

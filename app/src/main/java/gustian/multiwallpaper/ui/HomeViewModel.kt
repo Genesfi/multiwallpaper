@@ -30,6 +30,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val scannedImageDao = db.scannedImageDao()
     private val blacklistedDao = db.blacklistedDao()
     private val historyDao = db.rotationHistoryDao()
+    private val scheduleDao = db.scheduleDao()
 
     private val _settingsTarget = MutableStateFlow(SettingTarget.HOME)
     val settingsTarget = _settingsTarget.asStateFlow()
@@ -46,6 +47,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     val presets: StateFlow<List<PresetEntity>> = settingsTarget.flatMapLatest { target ->
         presetDao.getAllPresets(target.name)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val schedules: StateFlow<List<ScheduleEntity>> = settingsTarget.flatMapLatest { target ->
+        scheduleDao.getAllSchedules(target.name)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val blacklisted: StateFlow<List<BlacklistedImageEntity>> = blacklistedDao.getAllBlacklisted()
@@ -1071,6 +1076,41 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             presetDao.deletePreset(preset)
         }
+    }
+
+    fun addSchedule(schedule: ScheduleEntity) {
+        viewModelScope.launch {
+            scheduleDao.insertSchedule(schedule)
+            triggerScheduleReload()
+        }
+    }
+
+    fun updateSchedule(schedule: ScheduleEntity) {
+        viewModelScope.launch {
+            scheduleDao.updateSchedule(schedule)
+            triggerScheduleReload()
+        }
+    }
+
+    fun deleteSchedule(schedule: ScheduleEntity) {
+        viewModelScope.launch {
+            scheduleDao.deleteSchedule(schedule)
+            triggerScheduleReload()
+        }
+    }
+
+    fun toggleSchedule(schedule: ScheduleEntity) {
+        viewModelScope.launch {
+            scheduleDao.updateSchedule(schedule.copy(isEnabled = !schedule.isEnabled))
+            triggerScheduleReload()
+        }
+    }
+
+    private fun triggerScheduleReload() {
+        val intent = Intent("gustian.multiwallpaper.RELOAD_SCHEDULES").apply {
+            setPackage(getApplication<Application>().packageName)
+        }
+        getApplication<Application>().sendBroadcast(intent)
     }
 
     fun addFolders(uris: List<Uri>) {

@@ -170,3 +170,24 @@ interface RotationHistoryDao {
     @Query("DELETE FROM rotation_history WHERE target = :target")
     suspend fun clearHistory(target: String)
 }
+
+@Dao
+interface ScheduleDao {
+    @Query("SELECT * FROM schedules WHERE target = :target ORDER BY startTime ASC")
+    fun getAllSchedules(target: String): Flow<List<ScheduleEntity>>
+
+    @Query("SELECT * FROM schedules WHERE target = :target AND isEnabled = 1")
+    fun getEnabledSchedulesSync(target: String): List<ScheduleEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSchedule(schedule: ScheduleEntity)
+
+    @Update
+    suspend fun updateSchedule(schedule: ScheduleEntity)
+
+    @Delete
+    suspend fun deleteSchedule(schedule: ScheduleEntity)
+
+    @Query("SELECT * FROM schedules WHERE id = :id")
+    suspend fun getScheduleById(id: Int): ScheduleEntity?
+}

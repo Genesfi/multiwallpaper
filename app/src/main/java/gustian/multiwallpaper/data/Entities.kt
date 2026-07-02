@@ -51,18 +51,28 @@ data class BlacklistedImageEntity(
     val addedTime: Long = System.currentTimeMillis()
 )
 
-@Entity(
-    tableName = "rotation_history",
-    indices = [
-        Index(value = ["timestamp"]),
-        Index(value = ["id"]),
-        Index(value = ["target"])
-    ]
-)
+@Entity(tableName = "rotation_history", indices = [Index(value = ["timestamp"]), Index(value = ["id"]), Index(value = ["target"])])
 data class RotationHistoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val uriString: String,
     val target: String = "HOME", // "HOME" or "LOCK"
     val timestamp: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "schedules")
+data class ScheduleEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val name: String,
+    val startTime: String, // HH:mm format
+    val endTime: String,   // HH:mm format
+    val target: String = "HOME", // "HOME" or "LOCK"
+    val isEnabled: Boolean = true,
+    val presetId: Int? = null,
+    val blurEnabled: Boolean? = null,
+    val blurRadius: Float? = null,
+    val dimEnabled: Boolean? = null,
+    val dimIntensity: Float? = null,
+    val lightModeEnabled: Boolean? = null,
+    val createdTime: Long = System.currentTimeMillis()
 )
 

@@ -1,6 +1,9 @@
 package gustian.multiwallpaper
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -36,12 +39,14 @@ import com.google.mlkit.vision.face.FaceDetectorOptions
 import gustian.multiwallpaper.data.AppDatabase
 import gustian.multiwallpaper.data.BlacklistedImageEntity
 import gustian.multiwallpaper.data.RotationHistoryEntity
+import gustian.multiwallpaper.data.ScheduleEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -180,6 +185,199 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             scheduleRotation()
         }
 
+        private val timeTickReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == Intent.ACTION_TIME_TICK) {
+                    checkSchedules()
+                }
+            }
+        }
+
+        private var currentActiveSchedule: ScheduleEntity? = null
+
+        private val scheduleReloadReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == "gustian.multiwallpaper.RELOAD_SCHEDULES") {
+                    checkSchedules()
+                }
+            }
+        }
+
+        private fun checkSchedules() {
+            val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
+            engineScope.launch(Dispatchers.IO) {
+                val db = AppDatabase.getDatabase(applicationContext)
+                val enabledSchedules = db.scheduleDao().getEnabledSchedulesSync(targetName)
+                val activeSchedule = ScheduleManager.getActiveSchedule(enabledSchedules)
+                
+                withContext(Dispatchers.Main) {
+                    if (activeSchedule?.id != currentActiveSchedule?.id) {
+                        applySchedule(activeSchedule)
+                    }
+                }
+            }
+        }
+
+        private fun applySchedule(schedule: ScheduleEntity?) {
+            val oldScheduleId = currentActiveSchedule?.id
+            currentActiveSchedule = schedule
+            updateSettings() // This will now incorporate currentActiveSchedule
+            
+            if (schedule != null) {
+                if (schedule.id != oldScheduleId) {
+                    Log.d("MultiWallpaper", "Applying schedule: ${schedule.name}")
+                    
+                    // Trigger preset load if specified
+                    schedule.presetId?.let { pid ->
+                        engineScope.launch(Dispatchers.IO) {
+                            val db = AppDatabase.getDatabase(applicationContext)
+                            
+                            // AUTO-BACKUP: Only save if we are switching FROM no schedule (original state)
+                            // or from a different schedule, AND we don't already have a valid backup session.
+                            if (oldScheduleId == null) {
+                                saveCurrentAsBackupPreset(if (prefsName.contains("lock")) "LOCK" else "HOME")
+                            }
+                            
+                            val preset = db.presetDao().getAllPresets(if (prefsName.contains("lock")) "LOCK" else "HOME").firstOrNull()?.find { it.id == pid }
+                            if (preset != null) {
+                                loadPresetToService(preset)
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (oldScheduleId != null) {
+                    Log.d("MultiWallpaper", "No active schedule, attempting to revert to Backup")
+                    engineScope.launch(Dispatchers.IO) {
+                        val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
+                        val db = AppDatabase.getDatabase(applicationContext)
+                        val backupPreset = db.presetDao().getAllPresets(targetName).firstOrNull()?.find { it.name == "System_AutoBackup" }
+                        if (backupPreset != null) {
+                            loadPresetToService(backupPreset)
+                            // After restoring, we should ideally delete the backup to prevent accidental reuse,
+                            // but for now, we just let it exist.
+                        } else {
+                            withContext(Dispatchers.Main) { 
+                                loadWallpapersForPages()
+                                rotateWallpapers() 
+                            }
+                        }
+                    }
+                }
+            }
+            requestDraw()
+        }
+
+        private suspend fun saveCurrentAsBackupPreset(targetName: String) {
+            val db = AppDatabase.getDatabase(applicationContext)
+            val currentFolders = db.folderDao().getAllFoldersSync(targetName).map { it.uriString }
+            if (currentFolders.isEmpty()) return // Don't backup empty state
+
+            val currentFavs = db.favoriteDao().getAllFavoritesSync(targetName)
+            
+            val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+            val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, gustian.multiwallpaper.data.FavoriteImageEntity::class.java)
+            val adapter = moshi.adapter<List<gustian.multiwallpaper.data.FavoriteImageEntity>>(type)
+            val favJson = adapter.toJson(currentFavs)
+
+            val existingBackup = db.presetDao().getAllPresets(targetName).firstOrNull()?.find { it.name == "System_AutoBackup" }
+            
+            if (existingBackup != null) {
+                db.presetDao().updatePreset(existingBackup.copy(
+                    folderUris = currentFolders,
+                    favoriteData = favJson,
+                    createdTime = System.currentTimeMillis()
+                ))
+            } else {
+                db.presetDao().insertPreset(gustian.multiwallpaper.data.PresetEntity(
+                    name = "System_AutoBackup",
+                    thumbnailUri = null,
+                    folderUris = currentFolders,
+                    favoriteData = favJson,
+                    target = targetName
+                ))
+            }
+            Log.d("MultiWallpaper", "System_AutoBackup updated for $targetName")
+        }
+
+        private suspend fun loadPresetToService(preset: gustian.multiwallpaper.data.PresetEntity) {
+            val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
+            val db = AppDatabase.getDatabase(applicationContext)
+            
+            Log.d("MultiWallpaper", "Service loading preset: ${preset.name} (Background)")
+            
+            // 1. Clear current Source
+            db.folderDao().deleteAllFolders(targetName)
+            db.favoriteDao().deleteAllFavorites(targetName)
+            
+            // 2. Insert new Source from Preset
+            val folderEntities = preset.folderUris.map { uri ->
+                val name = try {
+                    val u = Uri.parse(uri)
+                    if (u.scheme == "file") java.io.File(u.path!!).name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder"
+                } catch (e: Exception) { "Folder" }
+                gustian.multiwallpaper.data.FolderEntity(uriString = uri, displayName = name, target = targetName)
+            }
+            db.folderDao().insertFolders(folderEntities)
+            
+            // 3. Restore Favorites
+            try {
+                val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+                val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, gustian.multiwallpaper.data.FavoriteImageEntity::class.java)
+                val adapter = moshi.adapter<List<gustian.multiwallpaper.data.FavoriteImageEntity>>(type)
+                val favs = adapter.fromJson(preset.favoriteData)
+                if (favs != null) {
+                    val updatedFavs = favs.map { it.copy(target = targetName) }
+                    db.favoriteDao().insertFavorites(updatedFavs)
+                }
+            } catch (e: Exception) {
+                Log.e("MultiWallpaper", "Error loading favorites", e)
+            }
+
+            // 4. DEEP SCAN: We must scan files in background because loadWallpapersForPages 
+            // depends on the 'scanned_images' table being populated!
+            Log.d("MultiWallpaper", "Service performing background scan for preset...")
+            val tempImages = mutableListOf<gustian.multiwallpaper.ui.WallpaperImg>()
+            val favoriteUris = db.favoriteDao().getAllFavoritesSync(targetName).map { it.uriString }.toSet()
+            val blacklistedUris = db.blacklistedDao().getAllBlacklistedSync().map { it.uriString }.toSet()
+
+            for (folder in folderEntities) {
+                try {
+                    val uri = Uri.parse(folder.uriString)
+                    if (uri.scheme == "file") {
+                        val file = java.io.File(uri.path ?: "")
+                        if (file.exists() && file.isDirectory) scanRecursive(file, tempImages, favoriteUris, blacklistedUris)
+                    }
+                } catch (e: Exception) {}
+            }
+
+            db.scannedImageDao().deleteAllImages(targetName)
+            db.scannedImageDao().insertImages(tempImages.map { 
+                gustian.multiwallpaper.data.ScannedImageEntity(it.uriString, it.folderUriString, it.displayName, targetName)
+            })
+
+            // 5. Force Service to reload the new images and ROTATE IMMEDIATELY
+            withContext(Dispatchers.Main) {
+                loadWallpapersForPages()
+                rotateWallpapers()
+            }
+        }
+
+        private fun scanRecursive(file: java.io.File, list: MutableList<gustian.multiwallpaper.ui.WallpaperImg>, favoriteUris: Set<String>, blacklistedUris: Set<String>) {
+            val files = file.listFiles()
+            files?.forEach { f ->
+                if (f.isFile && (f.name.endsWith(".jpg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true))) {
+                    val fileUriStr = Uri.fromFile(f).toString()
+                    if (!blacklistedUris.contains(fileUriStr)) {
+                        val parentUriStr = Uri.fromFile(f.parentFile).toString()
+                        list.add(gustian.multiwallpaper.ui.WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr)))
+                    }
+                } else if (f.isDirectory && !f.name.startsWith(".")) {
+                    scanRecursive(f, list, favoriteUris, blacklistedUris)
+                }
+            }
+        }
+
         // Parallax sensor properties
         private var sensorManager: SensorManager? = null
         private var accelerometer: Sensor? = null
@@ -286,7 +484,23 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             prefs.registerOnSharedPreferenceChangeListener(prefsListener)
             
+            val filter = IntentFilter()
+            filter.addAction(Intent.ACTION_TIME_TICK)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(timeTickReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(timeTickReceiver, filter)
+            }
+
+            val reloadFilter = IntentFilter("gustian.multiwallpaper.RELOAD_SCHEDULES")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(scheduleReloadReceiver, reloadFilter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(scheduleReloadReceiver, reloadFilter)
+            }
+            
             updateSettings()
+            checkSchedules()
         }
 
         private fun updateSettings() {
@@ -335,7 +549,27 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             dimIntensity = prefs.getFloat("dim_intensity", 0f)
             blurEnabled = prefs.getBoolean("blur_enabled", false)
             dimEnabled = prefs.getBoolean("dim_enabled", false)
-            subjectFocusEnabled = prefs.getBoolean("subject_focus_enabled", false)
+
+            // --- APPLY SCHEDULE OVERRIDES ---
+            currentActiveSchedule?.let { schedule ->
+                // Overriding main effects
+                schedule.blurEnabled?.let { blurEnabled = it }
+                schedule.blurRadius?.let { blurRadius = it }
+                schedule.dimEnabled?.let { dimEnabled = it }
+                schedule.dimIntensity?.let { dimIntensity = it }
+                schedule.lightModeEnabled?.let { lightModeEnabled = it }
+                
+                // CRITICAL FIX: If schedule has Dim/Blur enabled, we DISABLE special focus modes
+                // so that the wallpaper is FULLY dimmed/blurred (Spotlight OFF).
+                if ((schedule.dimEnabled == true && schedule.dimIntensity != null && schedule.dimIntensity!! > 0f) || 
+                    (schedule.blurEnabled == true && schedule.blurRadius != null && schedule.blurRadius!! > 0f)) {
+                    subjectFocusEnabled = false
+                    vignetteModeEnabled = false
+                }
+            }
+
+            subjectFocusEnabled = prefs.getBoolean("subject_focus_enabled", false) && currentActiveSchedule == null
+            vignetteModeEnabled = prefs.getBoolean("vignette_mode_enabled", false) && currentActiveSchedule == null
             subjectFocusSmoothing = prefs.getFloat("subject_focus_smoothing", 0.5f)
             vignetteModeEnabled = prefs.getBoolean("vignette_mode_enabled", false)
             vignetteSharpness = prefs.getFloat("vignette_sharpness", 0.5f)
@@ -449,6 +683,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
         override fun onDestroy() {
             super.onDestroy()
+            unregisterReceiver(timeTickReceiver)
+            unregisterReceiver(scheduleReloadReceiver)
             engineScope.cancel()
             handler.removeCallbacks(drawRunnable)
             handler.removeCallbacks(rotationRunnable)
@@ -557,57 +793,56 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val validXOffset = if (xOffset.isNaN()) 0f else xOffset
             val validXStep = if (xStep.isNaN()) 0f else xStep
             
+            // IGNORE TRANSIENT 0.0 JUMPS (HyperOS/Poco Fix):
+            // On Poco/HyperOS, the system often sends a fake (0.0, 0.0) offset when entering
+            // Recents or just randomly. If we act on this while NOT visible, it causes the 
+            // wallpaper to jump to Page 1 or trigger a false "static launcher" detection.
+            if (!visible && validXOffset == 0f && validXStep == 0f) return
+
             // Detect Static Launcher (Poco/HyperOS)
+            // Once we detect a static launcher, we lock it in to prevent the "3-page reset" glitch
             if (!hasDetectedLauncher && (validXStep == 0f || validXStep == 1f)) {
                 isStaticLauncher = true
                 hasDetectedLauncher = true
+                detectedPages = 20 // Enforce 20 pages loop for Poco
                 updateWallpaperDimensions(surfaceWidth, surfaceHeight)
+                Log.d("MultiWallpaper", "Static Launcher Detected (Poco/HyperOS) - Locking 20 pages")
             } else if (!hasDetectedLauncher && validXStep > 0f && validXStep < 1f) {
                 isStaticLauncher = false
                 hasDetectedLauncher = true
                 updateWallpaperDimensions(surfaceWidth * 5, surfaceHeight)
             }
 
-            // LAUNCHER AUTO-RECOVERY: 
-            if (validXStep <= 0f) {
-                if (detectedPages != 20) {
-                    detectedPages = 20
-                    val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-                    prefs.edit().putBoolean("force_reload_trigger", true).apply()
-                    updateSettings()
-                }
-                this.xStep = 0f
-            } else {
-                val newDetectedPages = (1f / validXStep).roundToInt() + 1
-                if (newDetectedPages != detectedPages && newDetectedPages in 1..50) {
-                    val oldPages = detectedPages
-                    detectedPages = newDetectedPages
-                    if (newDetectedPages != oldPages || pageBitmaps.isEmpty()) {
+            // LAUNCHER AUTO-RECOVERY & PROTECTION:
+            // If we are already in static mode (isStaticLauncher), we IGNORE validXStep changes
+            // sent by the system to prevent it from resetting our 20-page loop to a small number.
+            if (!isStaticLauncher) {
+                if (validXStep <= 0f) {
+                    if (detectedPages != 20) {
+                        detectedPages = 20
+                        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+                        prefs.edit().putBoolean("force_reload_trigger", true).apply()
+                        updateSettings()
+                    }
+                    this.xStep = 0f
+                } else {
+                    val newDetectedPages = (1f / validXStep).roundToInt() + 1
+                    if (newDetectedPages != detectedPages && newDetectedPages in 1..50) {
+                        detectedPages = newDetectedPages
                         handler.removeCallbacks(reloadRunnable)
                         handler.postDelayed(reloadRunnable, 500)
                     }
+                    this.xStep = validXStep
                 }
-                this.xStep = validXStep
             }
 
-            // SYSTEM UI OFFSET GUARD (HYPEROS):
-            // HyperOS often resets xOffset to 0.0 when entering Recents/Multitasking.
-            // If the offset jumps to exactly 0 while we are NOT visible or during a sudden leap,
-            // we ignore it to prevent the wallpaper from jumping to Page 1.
-            if (!visible && validXOffset == 0f) return 
-
-            // Only redraw if the offset changed significantly
+            // Redraw only if visible and offset changed significantly
             val offsetDelta = kotlin.math.abs(this.xOffset - validXOffset)
-            if (offsetDelta > 0.0001f || this.xStep != validXStep) {
+            if (visible && (offsetDelta > 0.0001f || this.xStep != validXStep)) {
                 this.xOffset = validXOffset
-                
-                val numBitmaps = pageBitmaps.size
-                if (numBitmaps > 0) {
-                    // CRITICAL FIX FOR HYPEROS RECENTS:
-                    // If xStep is 0 (Poco/HyperOS), we DO NOT update manualPageIndex from xOffset.
-                    // Instead, we rely 100% on the swipe gestures in onTouchEvent.
-                    // This prevents the system from forcing us back to Page 1 during Recents.
-                    if (this.xStep > 0f) {
+                if (pageBitmaps.isNotEmpty()) {
+                    // Only update index if we are NOT in manual/static mode
+                    if (!isStaticLauncher && this.xStep > 0f) {
                         val targetIndex = (validXOffset / this.xStep).roundToInt()
                         val clampedIndex = targetIndex.coerceIn(0, detectedPages - 1)
                         if (manualPageIndex != clampedIndex) {
