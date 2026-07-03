@@ -31,6 +31,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val blacklistedDao = db.blacklistedDao()
     private val historyDao = db.rotationHistoryDao()
     private val scheduleDao = db.scheduleDao()
+    private val customPaletteDao = db.customPaletteDao()
 
     private val _settingsTarget = MutableStateFlow(SettingTarget.HOME)
     val settingsTarget = _settingsTarget.asStateFlow()
@@ -187,6 +188,23 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _manualFocalY = MutableStateFlow(0.4f)
     val manualFocalY = _manualFocalY.asStateFlow()
 
+    private val _filterType = MutableStateFlow("NONE")
+    val filterType = _filterType.asStateFlow()
+
+    val customPalettes: StateFlow<List<CustomPaletteEntity>> = _filterType.flatMapLatest { type ->
+        if (type == "DUOTONE" || type == "TRITONE") customPaletteDao.getPalettesByType(type)
+        else flowOf(emptyList())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _filterColor1 = MutableStateFlow(0xFF000000.toInt()) // Default Black
+    val filterColor1 = _filterColor1.asStateFlow()
+
+    private val _filterColor2 = MutableStateFlow(0xFFFFFFFF.toInt()) // Default White
+    val filterColor2 = _filterColor2.asStateFlow()
+
+    private val _filterColor3 = MutableStateFlow(0xFF808080.toInt()) // Default Gray (for Tritone Midtone)
+    val filterColor3 = _filterColor3.asStateFlow()
+
     private val _historyList = MutableStateFlow<List<String>>(emptyList())
     val historyList: StateFlow<List<String>> = _historyList.asStateFlow()
 
@@ -262,6 +280,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _autoLimitEnabled.value = prefs.getBoolean("auto_limit_enabled", false)
         _manualFocalX.value = prefs.getFloat("manual_focal_x", 0.5f)
         _manualFocalY.value = prefs.getFloat("manual_focal_y", 0.4f)
+        _filterType.value = prefs.getString("filter_type", "NONE") ?: "NONE"
+        _filterColor1.value = prefs.getInt("filter_color_1", 0xFF000000.toInt())
+        _filterColor2.value = prefs.getInt("filter_color_2", 0xFFFFFFFF.toInt())
+        _filterColor3.value = prefs.getInt("filter_color_3", 0xFF808080.toInt())
         
         if (_autoLimitEnabled.value) {
             _historyLimit.value = _scannedImages.value.size.coerceAtLeast(150)
@@ -304,6 +326,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             putBoolean("auto_limit_enabled", otherPrefs.getBoolean("auto_limit_enabled", false))
             putFloat("manual_focal_x", otherPrefs.getFloat("manual_focal_x", 0.5f))
             putFloat("manual_focal_y", otherPrefs.getFloat("manual_focal_y", 0.4f))
+            putString("filter_type", otherPrefs.getString("filter_type", "NONE"))
+            putInt("filter_color_1", otherPrefs.getInt("filter_color_1", 0xFF000000.toInt()))
+            putInt("filter_color_2", otherPrefs.getInt("filter_color_2", 0xFFFFFFFF.toInt()))
             putBoolean("force_reload_trigger", true)
             apply()
         }
@@ -705,6 +730,47 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setSubjectFocusSmoothing(value: Float) {
         currentPrefs?.edit()?.putFloat("subject_focus_smoothing", value)?.apply()
         _subjectFocusSmoothing.value = value
+    }
+
+    fun setFilterType(type: String) {
+        currentPrefs?.edit()?.putString("filter_type", type)?.apply()
+        _filterType.value = type
+    }
+
+    fun setFilterColor1(color: Int) {
+        currentPrefs?.edit()?.putInt("filter_color_1", color)?.apply()
+        _filterColor1.value = color
+    }
+
+    fun setFilterColor2(color: Int) {
+        currentPrefs?.edit()?.putInt("filter_color_2", color)?.apply()
+        _filterColor2.value = color
+    }
+
+    fun setFilterColor3(color: Int) {
+        currentPrefs?.edit()?.putInt("filter_color_3", color)?.apply()
+        _filterColor3.value = color
+    }
+
+    fun saveCustomPalette(name: String) {
+        viewModelScope.launch {
+            val type = _filterType.value
+            if (type == "DUOTONE" || type == "TRITONE") {
+                customPaletteDao.insertPalette(CustomPaletteEntity(
+                    name = name,
+                    color1 = _filterColor1.value,
+                    color2 = _filterColor2.value,
+                    color3 = if (type == "TRITONE") _filterColor3.value else null,
+                    type = type
+                ))
+            }
+        }
+    }
+
+    fun deleteCustomPalette(palette: CustomPaletteEntity) {
+        viewModelScope.launch {
+            customPaletteDao.deletePalette(palette)
+        }
     }
 
     fun checkForUpdates() {

@@ -44,6 +44,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -692,6 +693,28 @@ fun PresetManagerDialog(
     onClearAllFolders: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var presetToDelete by remember { mutableStateOf<PresetEntity?>(null) }
+    
+    if (presetToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { presetToDelete = null },
+            title = { Text("Delete Preset?") },
+            text = { Text("Are you sure you want to delete '${presetToDelete?.name}'? This cannot be undone.") },
+            confirmButton = {
+                Button(
+                    onClick = { 
+                        onDeletePreset(presetToDelete!!)
+                        presetToDelete = null 
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { presetToDelete = null }) { Text("Cancel") }
+            }
+        )
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -746,7 +769,7 @@ fun PresetManagerDialog(
                                     }
                                     Text("${preset.folderUris.size} folders • $totalImgs images", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                IconButton(onClick = { onDeletePreset(preset) }) {
+                                IconButton(onClick = { presetToDelete = preset }) {
                                     Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
                                 }
                             }
@@ -1071,6 +1094,11 @@ fun SettingsScreen(viewModel: HomeViewModel) {
     val vignetteModeEnabled by viewModel.vignetteModeEnabled.collectAsState()
     val vignetteSharpness by viewModel.vignetteSharpness.collectAsState()
     val vignetteWidth by viewModel.vignetteWidth.collectAsState()
+    val filterType by viewModel.filterType.collectAsState()
+    val filterColor1 by viewModel.filterColor1.collectAsState()
+    val filterColor2 by viewModel.filterColor2.collectAsState()
+    val filterColor3 by viewModel.filterColor3.collectAsState()
+    val customPalettes by viewModel.customPalettes.collectAsState()
     val latestVersionInfo by viewModel.latestVersionInfo.collectAsState()
     val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
     val updateMessage by viewModel.updateMessage.collectAsState()
@@ -1621,6 +1649,236 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 )
 
                 Spacer(modifier = Modifier.height(32.dp))
+                Text("COLOR FILTERS", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("NONE" to "Off", "GRAYSCALE" to "B&W", "DUOTONE" to "2-tone", "TRITONE" to "3-tone").forEach { (type, label) ->
+                                val selected = filterType == type
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = { viewModel.setFilterType(type) },
+                                    label = { Text(label, fontSize = 11.sp) },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                        selectedLabelColor = MaterialTheme.colorScheme.primary
+                                    )
+                                )
+                            }
+                        }
+
+                        if (filterType == "DUOTONE" || filterType == "TRITONE") {
+                            var showPicker1 by remember { mutableStateOf(false) }
+                            var showPicker2 by remember { mutableStateOf(false) }
+                            var showPicker3 by remember { mutableStateOf(false) }
+
+                            if (showPicker1) {
+                                ColorPickerDialog(
+                                    initialColor = Color(filterColor1),
+                                    onDismiss = { showPicker1 = false },
+                                    onColorSelected = { 
+                                        viewModel.setFilterColor1(it.toArgb())
+                                        showPicker1 = false
+                                    }
+                                )
+                            }
+                            if (showPicker2) {
+                                ColorPickerDialog(
+                                    initialColor = Color(filterColor2),
+                                    onDismiss = { showPicker2 = false },
+                                    onColorSelected = { 
+                                        viewModel.setFilterColor2(it.toArgb())
+                                        showPicker2 = false
+                                    }
+                                )
+                            }
+                            if (showPicker3) {
+                                ColorPickerDialog(
+                                    initialColor = Color(filterColor3),
+                                    onDismiss = { showPicker3 = false },
+                                    onColorSelected = { 
+                                        viewModel.setFilterColor3(it.toArgb())
+                                        showPicker3 = false
+                                    }
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Dark/Shadow", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    Spacer(Modifier.height(4.dp))
+                                    ColorPickerButton(color = Color(filterColor1), onClick = { showPicker1 = true })
+                                }
+                                
+                                if (filterType == "TRITONE") {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Midtone", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                        Spacer(Modifier.height(4.dp))
+                                        ColorPickerButton(color = Color(filterColor3), onClick = { showPicker3 = true })
+                                    }
+                                }
+                                
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Light/Highlight", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    Spacer(Modifier.height(4.dp))
+                                    ColorPickerButton(color = Color(filterColor2), onClick = { showPicker2 = true })
+                                }
+                            }
+                            
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Text("Saved Palettes", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                Row {
+                                    TextButton(onClick = { 
+                                        val randomColor1 = (0xFF000000..0xFFFFFFFF).random().toInt()
+                                        val randomColor2 = (0xFF000000..0xFFFFFFFF).random().toInt()
+                                        viewModel.setFilterColor1(randomColor1)
+                                        viewModel.setFilterColor2(randomColor2)
+                                        if (filterType == "TRITONE") {
+                                            val randomColor3 = (0xFF000000..0xFFFFFFFF).random().toInt()
+                                            viewModel.setFilterColor3(randomColor3)
+                                        }
+                                    }) {
+                                        Icon(Icons.Default.Casino, null, modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Randomize", fontSize = 10.sp)
+                                    }
+                                    
+                                    var showSaveDialog by remember { mutableStateOf(false) }
+                                    TextButton(onClick = { showSaveDialog = true }) {
+                                        Icon(Icons.Default.Save, null, modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Save Current", fontSize = 10.sp)
+                                    }
+                                    
+                                    if (showSaveDialog) {
+                                        var paletteName by remember { mutableStateOf("") }
+                                        AlertDialog(
+                                            onDismissRequest = { showSaveDialog = false },
+                                            title = { Text("Save Palette") },
+                                            text = {
+                                                OutlinedTextField(
+                                                    value = paletteName,
+                                                    onValueChange = { paletteName = it },
+                                                    label = { Text("Palette Name") },
+                                                    singleLine = true
+                                                )
+                                            },
+                                            confirmButton = {
+                                                Button(onClick = {
+                                                    if (paletteName.isNotBlank()) {
+                                                        viewModel.saveCustomPalette(paletteName)
+                                                        showSaveDialog = false
+                                                    }
+                                                }) { Text("Save") }
+                                            },
+                                            dismissButton = {
+                                                TextButton(onClick = { showSaveDialog = false }) { Text("Cancel") }
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                            
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                                // 1. Custom Saved Palettes
+                                    items(customPalettes) { palette ->
+                                        val isSelected = filterColor1 == palette.color1 && filterColor2 == palette.color2 && (filterType == "DUOTONE" || filterColor3 == palette.color3)
+                                        var showDeleteConfirm by remember { mutableStateOf(false) }
+
+                                        if (showDeleteConfirm) {
+                                            AlertDialog(
+                                                onDismissRequest = { showDeleteConfirm = false },
+                                                title = { Text("Delete Palette?") },
+                                                text = { Text("Delete '${palette.name}' palette?") },
+                                                confirmButton = {
+                                                    Button(onClick = { viewModel.deleteCustomPalette(palette); showDeleteConfirm = false }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+                                                },
+                                                dismissButton = {
+                                                    TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+                                                }
+                                            )
+                                        }
+
+                                        Card(
+                                            onClick = { 
+                                                viewModel.setFilterColor1(palette.color1)
+                                                viewModel.setFilterColor2(palette.color2)
+                                                palette.color3?.let { viewModel.setFilterColor3(it) }
+                                            },
+                                            modifier = Modifier.width(100.dp),
+                                            shape = RoundedCornerShape(8.dp),
+                                            border = if (isSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+                                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                                        ) {
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(6.dp)) {
+                                                Row(modifier = Modifier.height(20.dp).fillMaxWidth().clip(RoundedCornerShape(4.dp))) {
+                                                    Box(modifier = Modifier.weight(1f).fillMaxHeight().background(Color(palette.color1)))
+                                                    if (palette.color3 != null) Box(modifier = Modifier.weight(1f).fillMaxHeight().background(Color(palette.color3)))
+                                                    Box(modifier = Modifier.weight(1f).fillMaxHeight().background(Color(palette.color2)))
+                                                }
+                                                Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(palette.name, fontSize = 9.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                                    IconButton(onClick = { showDeleteConfirm = true }, modifier = Modifier.size(16.dp)) {
+                                                        Icon(Icons.Default.Close, null, modifier = Modifier.size(10.dp), tint = MaterialTheme.colorScheme.error)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                // 2. Default Palettes
+                                val palettes = if (filterType == "TRITONE") listOf(
+                                    listOf(0xFF000000, 0xFFFFFFFF, 0xFF808080) to "Classic",
+                                    listOf(0xFF1A1F2C, 0xFFD8B4FE, 0xFF6D28D9) to "Cyber",
+                                    listOf(0xFF2D1B69, 0xFFFB7185, 0xFFBE123C) to "Neon",
+                                    listOf(0xFF1E1B4B, 0xFF38BDF8, 0xFF1D4ED8) to "Ocean",
+                                    listOf(0xFF431407, 0xFFFCD34D, 0xFFB91C1C) to "Sunset"
+                                ) else listOf(
+                                    listOf(0xFF000000, 0xFFFFFFFF) to "Classic",
+                                    listOf(0xFF1A1F2C, 0xFFD8B4FE) to "Cyber",
+                                    listOf(0xFF2D1B69, 0xFFFB7185) to "Neon",
+                                    listOf(0xFF1E1B4B, 0xFF38BDF8) to "Ocean",
+                                    listOf(0xFF431407, 0xFFFCD34D) to "Sunset"
+                                )
+
+                                items(palettes) { (colors, name) ->
+                                    val isSelected = filterColor1 == colors[0].toInt() && filterColor2 == colors[1].toInt() && (filterType == "DUOTONE" || filterColor3 == colors[2].toInt())
+                                    Card(
+                                        onClick = { 
+                                            viewModel.setFilterColor1(colors[0].toInt())
+                                            viewModel.setFilterColor2(colors[1].toInt())
+                                            if (filterType == "TRITONE") viewModel.setFilterColor3(colors[2].toInt())
+                                        },
+                                        modifier = Modifier.width(100.dp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        border = if (isSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                                    ) {
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(6.dp)) {
+                                            Row(modifier = Modifier.height(20.dp).fillMaxWidth().clip(RoundedCornerShape(4.dp))) {
+                                                Box(modifier = Modifier.weight(1f).fillMaxHeight().background(Color(colors[0])))
+                                                if (filterType == "TRITONE") Box(modifier = Modifier.weight(1f).fillMaxHeight().background(Color(colors[2])))
+                                                Box(modifier = Modifier.weight(1f).fillMaxHeight().background(Color(colors[1])))
+                                            }
+                                            Text(name, fontSize = 10.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(32.dp))
                 Text("AUTOMATION", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                 Spacer(modifier = Modifier.height(12.dp))
                 
@@ -1637,6 +1895,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                             }
                             if (showScheduleEditor) {
                                 ScheduleEditorDialog(
+                                    viewModel = viewModel,
                                     presets = presets,
                                     onDismiss = { showScheduleEditor = false },
                                     onSave = { viewModel.addSchedule(it.copy(target = settingsTarget.name)) }
@@ -1649,6 +1908,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                         } else {
                             schedules.forEach { schedule ->
                                 ScheduleItem(
+                                    viewModel = viewModel,
                                     schedule = schedule,
                                     presets = presets,
                                     onToggle = { viewModel.toggleSchedule(schedule) },
@@ -2735,6 +2995,7 @@ fun ManualFocalEditorDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
 
 @Composable
 fun ScheduleItem(
+    viewModel: HomeViewModel,
     schedule: ScheduleEntity,
     presets: List<PresetEntity>,
     onToggle: () -> Unit,
@@ -2742,6 +3003,22 @@ fun ScheduleItem(
     onEdit: (ScheduleEntity) -> Unit
 ) {
     var showEditDialog by remember { mutableStateOf(false) }
+
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Delete Schedule?") },
+            text = { Text("Delete '${schedule.name}' schedule?") },
+            confirmButton = {
+                Button(onClick = { onDelete(); showDeleteConfirm = false }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -2762,6 +3039,7 @@ fun ScheduleItem(
             var effects = ""
             if (schedule.blurEnabled == true) effects += "Blur (${schedule.blurRadius?.toInt()}px) "
             if (schedule.dimEnabled == true) effects += "Dim (${((schedule.dimIntensity ?: 0f) * 100).toInt()}%) "
+            if (schedule.filterType != null && schedule.filterType != "NONE") effects += "Filter (${schedule.filterType}) "
             if (schedule.lightModeEnabled == true) effects += "PowerSaver "
             
             Text("Preset: $presetName", style = MaterialTheme.typography.labelSmall)
@@ -2776,13 +3054,14 @@ fun ScheduleItem(
             modifier = Modifier.graphicsLayer(scaleX = 0.8f, scaleY = 0.8f)
         )
         
-        IconButton(onClick = onDelete) {
+        IconButton(onClick = { showDeleteConfirm = true }) {
             Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
         }
     }
 
     if (showEditDialog) {
         ScheduleEditorDialog(
+            viewModel = viewModel,
             schedule = schedule,
             presets = presets,
             onDismiss = { showEditDialog = false },
@@ -2794,6 +3073,7 @@ fun ScheduleItem(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScheduleEditorDialog(
+    viewModel: HomeViewModel,
     schedule: ScheduleEntity? = null,
     presets: List<PresetEntity>,
     onDismiss: () -> Unit,
@@ -2809,6 +3089,14 @@ fun ScheduleEditorDialog(
     var dimIntensity by remember { mutableFloatStateOf(schedule?.dimIntensity ?: 0.3f) }
     var lightModeEnabled by remember { mutableStateOf(schedule?.lightModeEnabled ?: false) }
     
+    var filterType by remember { mutableStateOf(schedule?.filterType ?: "NONE") }
+    var filterColor1 by remember { mutableIntStateOf(schedule?.filterColor1 ?: 0xFF000000.toInt()) }
+    var filterColor2 by remember { mutableIntStateOf(schedule?.filterColor2 ?: 0xFFFFFFFF.toInt()) }
+    var filterColor3 by remember { mutableIntStateOf(schedule?.filterColor3 ?: 0xFF808080.toInt()) }
+
+    // Fetch custom palettes for the picker
+    val customPalettes by viewModel.customPalettes.collectAsState(initial = emptyList())
+
     val dayNames = listOf("S", "M", "T", "W", "T", "F", "S")
     var selectedDays by remember { 
         mutableStateOf(schedule?.selectedDays?.split(",")?.filter { it.isNotEmpty() }?.map { it.toInt() }?.toSet() ?: setOf(1,2,3,4,5,6,7)) 
@@ -2909,6 +3197,79 @@ fun ScheduleEditorDialog(
                 }
 
                 SettingRow(title = "Power Saver Mode", checked = lightModeEnabled, onCheckedChange = { lightModeEnabled = it })
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Color Filter Override", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                
+                Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf("NONE" to "Off", "GRAYSCALE" to "B&W", "DUOTONE" to "Duo", "TRITONE" to "Tri").forEach { (type, label) ->
+                        FilterChip(
+                            selected = filterType == type,
+                            onClick = { filterType = type },
+                            label = { Text(label, fontSize = 10.sp) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                    }
+                }
+
+                if (filterType == "DUOTONE" || filterType == "TRITONE") {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Select Colors", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    
+                    var showS1 by remember { mutableStateOf(false) }
+                    var showS2 by remember { mutableStateOf(false) }
+                    var showS3 by remember { mutableStateOf(false) }
+
+                    if (showS1) ColorPickerDialog(initialColor = Color(filterColor1), onDismiss = { showS1 = false }, onColorSelected = { filterColor1 = it.toArgb(); showS1 = false })
+                    if (showS2) ColorPickerDialog(initialColor = Color(filterColor2), onDismiss = { showS2 = false }, onColorSelected = { filterColor2 = it.toArgb(); showS2 = false })
+                    if (showS3) ColorPickerDialog(initialColor = Color(filterColor3), onDismiss = { showS3 = false }, onColorSelected = { filterColor3 = it.toArgb(); showS3 = false })
+
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(modifier = Modifier.size(32.dp).clip(CircleShape).background(Color(filterColor1)).border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape).clickable { showS1 = true })
+                        if (filterType == "TRITONE") {
+                            Box(modifier = Modifier.size(32.dp).clip(CircleShape).background(Color(filterColor3)).border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape).clickable { showS3 = true })
+                        }
+                        Box(modifier = Modifier.size(32.dp).clip(CircleShape).background(Color(filterColor2)).border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape).clickable { showS2 = true })
+                        
+                        Spacer(modifier = Modifier.weight(1f))
+                        
+                        // Mini Palettes inside Schedule
+                        TextButton(onClick = { 
+                            // Quick Cyberpunk Palette
+                            filterColor1 = 0xFF1A1F2C.toInt()
+                            filterColor2 = 0xFFD8B4FE.toInt()
+                            filterColor3 = 0xFF6D28D9.toInt()
+                        }) {
+                            Text("Cyber", fontSize = 10.sp)
+                        }
+                    }
+
+                    if (customPalettes.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Your Palettes", style = MaterialTheme.typography.labelSmall)
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                            items(customPalettes) { p ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp, 20.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .clickable {
+                                            filterColor1 = p.color1
+                                            filterColor2 = p.color2
+                                            p.color3?.let { filterColor3 = it }
+                                        }
+                                ) {
+                                    Row(modifier = Modifier.fillMaxSize()) {
+                                        Box(modifier = Modifier.weight(1f).fillMaxHeight().background(Color(p.color1)))
+                                        if (p.color3 != null) Box(modifier = Modifier.weight(1f).fillMaxHeight().background(Color(p.color3)))
+                                        Box(modifier = Modifier.weight(1f).fillMaxHeight().background(Color(p.color2)))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         },
         confirmButton = {
@@ -2925,6 +3286,10 @@ fun ScheduleEditorDialog(
                         dimEnabled = dimEnabled,
                         dimIntensity = dimIntensity,
                         lightModeEnabled = lightModeEnabled,
+                        filterType = if (filterType == "NONE") null else filterType,
+                        filterColor1 = if (filterType == "NONE") null else filterColor1,
+                        filterColor2 = if (filterType == "NONE") null else filterColor2,
+                        filterColor3 = if (filterType == "TRITONE") filterColor3 else null,
                         selectedDays = selectedDays.sorted().joinToString(","),
                         target = schedule?.target ?: "HOME"
                     )
@@ -3113,6 +3478,215 @@ fun WheelPicker(
             }
         }
     }
+}
+
+@Composable
+fun ColorPickerButton(
+    color: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .clickable { onClick() },
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        color = Color.Transparent
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .background(color)
+                    .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = String.format("#%06X", (0xFFFFFF and color.toArgb())),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
+            )
+            Icon(Icons.Default.ColorLens, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+@Composable
+fun ColorPickerDialog(
+    initialColor: Color,
+    onDismiss: () -> Unit,
+    onColorSelected: (Color) -> Unit
+) {
+    val hsv = remember { 
+        val arr = FloatArray(3)
+        android.graphics.Color.colorToHSV(initialColor.toArgb(), arr)
+        arr
+    }
+    
+    var hue by remember { mutableFloatStateOf(hsv[0]) }
+    var saturation by remember { mutableFloatStateOf(hsv[1]) }
+    var value by remember { mutableFloatStateOf(hsv[2]) }
+
+    val currentColor = remember(hue, saturation, value) {
+        Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, saturation, value)))
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        confirmButton = {
+            Button(onClick = { onColorSelected(currentColor) }, modifier = Modifier.padding(end = 16.dp, bottom = 16.dp)) { Text("Select") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, modifier = Modifier.padding(bottom = 16.dp)) { Text("Cancel") }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("Pick Color", fontWeight = FontWeight.ExtraBold, fontSize = 18.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 1. Photoshop-style Saturation/Value Box
+                Box(
+                    modifier = Modifier
+                        .size(240.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .pointerInput(hue) {
+                            detectTapGestures { offset ->
+                                saturation = (offset.x / size.width).coerceIn(0f, 1f)
+                                value = (1f - (offset.y / size.height)).coerceIn(0f, 1f)
+                            }
+                        }
+                        .pointerInput(hue) {
+                            detectTransformGestures { _, pan, _, _ ->
+                                saturation = (saturation + pan.x / size.width).coerceIn(0f, 1f)
+                                value = (value - pan.y / size.height).coerceIn(0f, 1f)
+                            }
+                        }
+                ) {
+                    // Base color (Hue)
+                    val baseColor = Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, 1f, 1f)))
+                    Box(modifier = Modifier.fillMaxSize().background(baseColor))
+                    
+                    // Horizontal White Gradient (Saturation)
+                    Box(modifier = Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color.White, Color.Transparent))))
+                    
+                    // Vertical Black Gradient (Value/Brightness)
+                    Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black))))
+                    
+                    // Selection Cursor (Photoshop Circle)
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val cursorX = saturation * size.width
+                        val cursorY = (1f - value) * size.height
+                        drawCircle(
+                            color = if (value > 0.5f) Color.Black else Color.White,
+                            radius = 8.dp.toPx(),
+                            center = Offset(cursorX, cursorY),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // 2. Hue Bar
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(32.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(Color.Red, Color.Yellow, Color.Green, Color.Cyan, Color.Blue, Color.Magenta, Color.Red)
+                            )
+                        )
+                        .pointerInput(Unit) {
+                            detectTapGestures { offset ->
+                                hue = (offset.x / size.width * 360f).coerceIn(0f, 360f)
+                            }
+                        }
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, pan, _, _ ->
+                                hue = (hue + (pan.x / size.width * 360f)).coerceIn(0f, 360f)
+                            }
+                        }
+                ) {
+                    // Hue Cursor
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val cursorX = (hue / 360f) * size.width
+                        drawRect(
+                            color = Color.White,
+                            topLeft = Offset(cursorX - 2.dp.toPx(), 0f),
+                            size = androidx.compose.ui.geometry.Size(4.dp.toPx(), size.height),
+                            style = androidx.compose.ui.graphics.drawscope.Fill
+                        )
+                        drawRect(
+                            color = Color.Black,
+                            topLeft = Offset(cursorX - 2.dp.toPx(), 0f),
+                            size = androidx.compose.ui.geometry.Size(4.dp.toPx(), size.height),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx())
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // 3. Final Result & Hex Input
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(currentColor)
+                            .border(2.dp, MaterialTheme.colorScheme.outline, CircleShape)
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    
+                    var hexInput by remember(currentColor) { 
+                        mutableStateOf(String.format("%06X", (0xFFFFFF and currentColor.toArgb()))) 
+                    }
+                    
+                    OutlinedTextField(
+                        value = hexInput,
+                        onValueChange = { input ->
+                            val clean = input.replace("#", "").uppercase().take(6)
+                            hexInput = clean
+                            if (clean.length == 6) {
+                                try {
+                                    val parsed = android.graphics.Color.parseColor("#$clean")
+                                    val newHsv = FloatArray(3)
+                                    android.graphics.Color.colorToHSV(parsed, newHsv)
+                                    hue = newHsv[0]
+                                    saturation = newHsv[1]
+                                    value = newHsv[2]
+                                } catch (e: Exception) {}
+                            }
+                        },
+                        prefix = { Text("#") },
+                        label = { Text("HEX Code", fontSize = 10.sp) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    )
+                }
+            }
+        }
+    )
 }
 
 private fun triggerLiveWallpaperSelection(context: Context, serviceClass: Class<*> = MultiWallpaperHomeService::class.java) {

@@ -74,7 +74,21 @@ data class ScheduleEntity(
     val dimEnabled: Boolean? = null,
     val dimIntensity: Float? = null,
     val lightModeEnabled: Boolean? = null,
+    val filterType: String? = null,
+    val filterColor1: Int? = null,
+    val filterColor2: Int? = null,
+    val filterColor3: Int? = null,
     val selectedDays: String = "1,2,3,4,5,6,7", // Comma-separated days 1-7 (Sun-Sat)
     val createdTime: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "custom_palettes")
+data class CustomPaletteEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val name: String,
+    val color1: Int,
+    val color2: Int,
+    val color3: Int? = null,
+    val type: String, // "DUOTONE" or "TRITONE"
+    val createdTime: Long = System.currentTimeMillis()
+)

@@ -175,6 +175,18 @@ interface RotationHistoryDao {
 }
 
 @Dao
+interface CustomPaletteDao {
+    @Query("SELECT * FROM custom_palettes WHERE type = :type ORDER BY createdTime DESC")
+    fun getPalettesByType(type: String): Flow<List<CustomPaletteEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPalette(palette: CustomPaletteEntity)
+
+    @Delete
+    suspend fun deletePalette(palette: CustomPaletteEntity)
+}
+
+@Dao
 interface ScheduleDao {
     @Query("SELECT * FROM schedules WHERE target = :target ORDER BY startTime ASC")
     fun getAllSchedules(target: String): Flow<List<ScheduleEntity>>

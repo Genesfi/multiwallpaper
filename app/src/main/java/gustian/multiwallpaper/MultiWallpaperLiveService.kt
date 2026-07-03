@@ -9,6 +9,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PointF
@@ -403,6 +405,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var vignetteWidth = 0.2f
         private var smartAdjacencyEnabled = true
         private var wallpaperQuality = "NORMAL"
+        private var filterType = "NONE"
+        private var filterColor1 = Color.BLACK
+        private var filterColor2 = Color.WHITE
+        private var filterColor3 = Color.GRAY
         private var useFavoritesOnly = false
         private var currentRoll = 0f
         private var currentPitch = 0f
@@ -484,6 +490,14 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             prefs.registerOnSharedPreferenceChangeListener(prefsListener)
             
+            // RESTORE PERSISTED POCO MODE
+            if (prefs.getBoolean("is_poco_mode", false)) {
+                isStaticLauncher = true
+                hasDetectedLauncher = true
+                detectedPages = 20
+                Log.d("MultiWallpaper", "Engine Restored Poco Mode from SharedPreferences")
+            }
+
             val filter = IntentFilter()
             filter.addAction(Intent.ACTION_TIME_TICK)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -559,6 +573,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 schedule.dimIntensity?.let { dimIntensity = it }
                 schedule.lightModeEnabled?.let { lightModeEnabled = it }
                 
+                // Color Filter Overrides
+                schedule.filterType?.let { filterType = it }
+                schedule.filterColor1?.let { filterColor1 = it }
+                schedule.filterColor2?.let { filterColor2 = it }
+                schedule.filterColor3?.let { filterColor3 = it }
+                
                 // CRITICAL FIX: If schedule has Dim/Blur enabled, we DISABLE special focus modes
                 // so that the wallpaper is FULLY dimmed/blurred (Spotlight OFF).
                 if ((schedule.dimEnabled == true && schedule.dimIntensity != null && schedule.dimIntensity!! > 0f) || 
@@ -575,6 +595,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             vignetteSharpness = prefs.getFloat("vignette_sharpness", 0.5f)
             vignetteWidth = prefs.getFloat("vignette_width", 0.2f)
             smartAdjacencyEnabled = prefs.getBoolean("smart_adjacency_enabled", true)
+            filterType = prefs.getString("filter_type", "NONE") ?: "NONE"
+            filterColor1 = prefs.getInt("filter_color_1", Color.BLACK)
+            filterColor2 = prefs.getInt("filter_color_2", Color.WHITE)
+            filterColor3 = prefs.getInt("filter_color_3", Color.GRAY)
             
             if (useFavChanged || forceReload || oldQuality != wallpaperQuality) {
                 loadWallpapersForPages()
@@ -805,8 +829,13 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 isStaticLauncher = true
                 hasDetectedLauncher = true
                 detectedPages = 20 // Enforce 20 pages loop for Poco
+                
+                // PERSIST POCO MODE: Remember this across engine recreations!
+                val p = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+                p.edit().putBoolean("is_poco_mode", true).apply()
+                
                 updateWallpaperDimensions(surfaceWidth, surfaceHeight)
-                Log.d("MultiWallpaper", "Static Launcher Detected (Poco/HyperOS) - Locking 20 pages")
+                Log.d("MultiWallpaper", "Static Launcher Detected (Poco/HyperOS) - Locking 20 pages and Persisting")
             } else if (!hasDetectedLauncher && validXStep > 0f && validXStep < 1f) {
                 isStaticLauncher = false
                 hasDetectedLauncher = true
@@ -1762,6 +1791,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         private fun drawWallpaperContent(canvas: Canvas, w: Int, h: Int) {
+            // Apply Visual Filter
+            updateFilter()
+
             val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
             val pos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
             val maxIdx = (detectedPages - 1).coerceAtLeast(0)
@@ -1813,6 +1845,77 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 } else drawSingleBitmap(canvas, curr, w, h)
             } else {
                 drawLoadingState(canvas, w, h)
+            }
+        }
+
+        private fun updateFilter() {
+            when (filterType) {
+                "GRAYSCALE" -> {
+                    val cm = ColorMatrix()
+                    cm.setSaturation(0f)
+                    bitmapPaint.colorFilter = ColorMatrixColorFilter(cm)
+                }
+                "DUOTONE" -> {
+                    // Custom Duotone Matrix: Maps Luminance to a Gradient between Color 1 (Dark) and Color 2 (Light)
+                    val r1 = Color.red(filterColor1) / 255f
+                    val g1 = Color.green(filterColor1) / 255f
+                    val b1 = Color.blue(filterColor1) / 255f
+                    
+                    val r2 = Color.red(filterColor2) / 255f
+                    val g2 = Color.green(filterColor2) / 255f
+                    val b2 = Color.blue(filterColor2) / 255f
+                    
+                    val lr = 0.2126f; val lg = 0.7152f; val lb = 0.0722f
+                    
+                    val matrix = floatArrayOf(
+                        (r2 - r1) * lr, (r2 - r1) * lg, (r2 - r1) * lb, 0f, r1 * 255f,
+                        (g2 - g1) * lr, (g2 - g1) * lg, (g2 - g1) * lb, 0f, g1 * 255f,
+                        (b2 - b1) * lr, (b2 - b1) * lg, (b2 - b1) * lb, 0f, b1 * 255f,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                    bitmapPaint.colorFilter = ColorMatrixColorFilter(matrix)
+                }
+                "TRITONE" -> {
+                    // Custom Tritone Matrix: Maps Dark -> Color 1, Mid -> Color 3, Light -> Color 2
+                    // This is an approximation using a quadratic-like mapping for better control over midtones.
+                    val r1 = Color.red(filterColor1) / 255f
+                    val g1 = Color.green(filterColor1) / 255f
+                    val b1 = Color.blue(filterColor1) / 255f
+                    
+                    val r2 = Color.red(filterColor2) / 255f
+                    val g2 = Color.green(filterColor2) / 255f
+                    val b2 = Color.blue(filterColor2) / 255f
+
+                    val rM = Color.red(filterColor3) / 255f
+                    val gM = Color.green(filterColor3) / 255f
+                    val bM = Color.blue(filterColor3) / 255f
+                    
+                    val lr = 0.2126f; val lg = 0.7152f; val lb = 0.0722f
+
+                    // We calculate constants for a curve that passes through C1 at L=0, CM at L=0.5, and C2 at L=1
+                    // f(L) = aL^2 + bL + c
+                    // L=0 -> c = C1
+                    // L=1 -> a + b + C1 = C2 -> a + b = C2 - C1
+                    // L=0.5 -> 0.25a + 0.5b + C1 = CM -> 0.25a + 0.5b = CM - C1
+                    // Solving for a and b:
+                    // 0.5a + b = 2(CM - C1)
+                    // (a + b) - (0.5a + b) = (C2 - C1) - 2(CM - C1) -> 0.5a = C2 + C1 - 2CM -> a = 2C2 + 2C1 - 4CM
+                    // b = (C2 - C1) - a = C2 - C1 - (2C2 + 2C1 - 4CM) = 4CM - 3C1 - C2
+                    
+                    // Since ColorMatrix is linear (ax+by+cz+dw+e), we can't do L^2 perfectly in one pass,
+                    // but we can simulate a very strong Tritone using a segmented linear approach or weighted luminance.
+                    // For best performance and "pop", we use a 3-color weighted blend.
+                    val matrix = floatArrayOf(
+                        (r2 - r1) * lr, (r2 - r1) * lg, (r2 - r1) * lb, 0f, (r1 + (rM - (r1+r2)/2f) * 0.5f) * 255f,
+                        (g2 - g1) * lr, (g2 - g1) * lg, (g2 - g1) * lb, 0f, (g1 + (gM - (g1+g2)/2f) * 0.5f) * 255f,
+                        (b2 - b1) * lr, (b2 - b1) * lg, (b2 - b1) * lb, 0f, (b1 + (bM - (b1+b2)/2f) * 0.5f) * 255f,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                    bitmapPaint.colorFilter = ColorMatrixColorFilter(matrix)
+                }
+                else -> {
+                    bitmapPaint.colorFilter = null
+                }
             }
         }
 
