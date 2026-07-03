@@ -801,17 +801,60 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    suspend fun saveCurrentAsBackupPreset(targetName: String) {
+        val currentFolders = folderDao.getAllFoldersSync(targetName).map { it.uriString }
+        if (currentFolders.isEmpty()) return
+
+        val currentFavs = favoriteDao.getAllFavoritesSync(targetName)
+        val currentBlacklist = blacklistedDao.getAllBlacklistedSync()
+        
+        val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+        
+        val favType = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
+        val favAdapter = moshi.adapter<List<FavoriteImageEntity>>(favType)
+        val favJson = favAdapter.toJson(currentFavs)
+
+        val blType = com.squareup.moshi.Types.newParameterizedType(List::class.java, BlacklistedImageEntity::class.java)
+        val blAdapter = moshi.adapter<List<BlacklistedImageEntity>>(blType)
+        val blJson = blAdapter.toJson(currentBlacklist)
+
+        val existingBackup = presetDao.getAllPresets(targetName).first().find { it.name == "System_AutoBackup" }
+        
+        if (existingBackup != null) {
+            presetDao.updatePreset(existingBackup.copy(
+                folderUris = currentFolders,
+                favoriteData = favJson,
+                blacklistData = blJson,
+                createdTime = System.currentTimeMillis()
+            ))
+        } else {
+            presetDao.insertPreset(PresetEntity(
+                name = "System_AutoBackup",
+                thumbnailUri = null,
+                folderUris = currentFolders,
+                favoriteData = favJson,
+                blacklistData = blJson,
+                target = targetName
+            ))
+        }
+    }
+
     suspend fun saveCurrentAsPresetSuspend(name: String) = withContext(Dispatchers.IO) {
         val targetName = _settingsTarget.value.name
         val currentFolders = folderDao.getAllFoldersSync(targetName).map { it.uriString }
-        // Fetch the ACTUAL current favorites from DB instead of relying on StateFlow which might be lagging
         val currentFavs = favoriteDao.getAllFavoritesSync(targetName)
+        val currentBlacklist = blacklistedDao.getAllBlacklistedSync()
         val thumb = currentFavs.firstOrNull()?.uriString ?: _scannedImages.value.firstOrNull()?.uriString
 
         val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
-        val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
-        val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
-        val favJson = adapter.toJson(currentFavs)
+        
+        val favType = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
+        val favAdapter = moshi.adapter<List<FavoriteImageEntity>>(favType)
+        val favJson = favAdapter.toJson(currentFavs)
+
+        val blType = com.squareup.moshi.Types.newParameterizedType(List::class.java, BlacklistedImageEntity::class.java)
+        val blAdapter = moshi.adapter<List<BlacklistedImageEntity>>(blType)
+        val blJson = blAdapter.toJson(currentBlacklist)
 
         val existingList = presetDao.getAllPresets(targetName).first()
         val existing = existingList.find { it.name.equals(name, ignoreCase = true) }
@@ -820,6 +863,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 thumbnailUri = thumb,
                 folderUris = currentFolders,
                 favoriteData = favJson,
+                blacklistData = blJson,
                 target = targetName,
                 createdTime = System.currentTimeMillis()
             )
@@ -830,6 +874,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 thumbnailUri = thumb,
                 folderUris = currentFolders,
                 favoriteData = favJson,
+                blacklistData = blJson,
                 target = targetName
             )
             presetDao.insertPreset(preset)
@@ -904,7 +949,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.IO) {
                     _activePresetName.value = preset.name
                     folderDao.deleteAllFolders(targetName)
-                    favoriteDao.deleteAllFavorites(targetName) // Fix: Clear previous favorites
+                    favoriteDao.deleteAllFavorites(targetName)
+                    blacklistedDao.deleteAllBlacklisted() // Option 1: Clear current blacklist when loading preset
 
                     val folderEntities = preset.folderUris.map { uri ->
                         val name = try {
@@ -915,22 +961,36 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     folderDao.insertFolders(folderEntities)
 
+                    val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+
                     // Restore Favorites
                     var favoriteCount = 0
                     try {
-                        val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
-                        val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
-                        val adapter = moshi.adapter<List<FavoriteImageEntity>>(type)
-                        val favs = adapter.fromJson(preset.favoriteData)
+                        val favType = com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java)
+                        val favAdapter = moshi.adapter<List<FavoriteImageEntity>>(favType)
+                        val favs = favAdapter.fromJson(preset.favoriteData)
 
                         if (favs != null) {
-                            // Ensure all restored favorites have the correct target
                             val updatedFavs = favs.map { it.copy(target = targetName) }
                             favoriteDao.insertFavorites(updatedFavs)
                             favoriteCount = favs.size
                         }
                     } catch (e: Exception) {
                         Log.e("HomeViewModel", "Error loading favorites from preset", e)
+                    }
+
+                    // Restore Blacklist
+                    try {
+                        preset.blacklistData?.let { blJson ->
+                            val blType = com.squareup.moshi.Types.newParameterizedType(List::class.java, BlacklistedImageEntity::class.java)
+                            val blAdapter = moshi.adapter<List<BlacklistedImageEntity>>(blType)
+                            val bls = blAdapter.fromJson(blJson)
+                            if (bls != null) {
+                                bls.forEach { blacklistedDao.insertBlacklist(it) }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("HomeViewModel", "Error loading blacklist from preset", e)
                     }
 
                     // Auto-Fallback: If preset has no favorites, disable "Use Favorites Only"

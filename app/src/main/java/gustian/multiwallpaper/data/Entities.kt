@@ -39,6 +39,7 @@ data class PresetEntity(
     val thumbnailUri: String?,
     val folderUris: List<String>,
     val favoriteData: String, // Store full FavoriteImageEntity list as JSON string
+    val blacklistData: String? = null, // Store full BlacklistedImageEntity list as JSON string
     val target: String = "HOME", // "HOME" or "LOCK"
     val createdTime: Long = System.currentTimeMillis()
 )

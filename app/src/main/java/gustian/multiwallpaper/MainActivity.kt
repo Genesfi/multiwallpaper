@@ -35,6 +35,7 @@ import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -813,30 +814,6 @@ fun GalleryScreen(viewModel: HomeViewModel) {
 
         if (isScanning) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
-        // Header for toggling Blacklist view
-        if (blacklisted.isNotEmpty()) {
-            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Blacklisted Images (${blacklisted.size})", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.weight(1f))
-                TextButton(onClick = { showBlacklistSection = !showBlacklistSection }) {
-                    Text(if (showBlacklistSection) "Hide" else "Show")
-                }
-            }
-            if (showBlacklistSection) {
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.height(100.dp)) {
-                    items(blacklisted, key = { it.uriString }) { item ->
-                        Box(modifier = Modifier.width(80.dp).fillMaxHeight().clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.errorContainer)) {
-                            AsyncImage(model = Uri.parse(item.uriString), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(0.6f), contentScale = ContentScale.Crop)
-                            IconButton(onClick = { viewModel.restoreBlacklistedImage(item) }, modifier = Modifier.align(Alignment.Center)) {
-                                Icon(Icons.Default.RestoreFromTrash, null, tint = MaterialTheme.colorScheme.onErrorContainer)
-                            }
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-            }
-        }
-
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             grouped.forEach { (uri, imgs) ->
                 val isExp = expanded[uri] ?: false
@@ -925,28 +902,118 @@ fun GalleryScreen(viewModel: HomeViewModel) {
 fun FavoritesScreen(viewModel: HomeViewModel) {
     val settingsTarget by viewModel.settingsTarget.collectAsState()
     val favorites by viewModel.favorites.collectAsState(initial = emptyList())
+    val blacklisted by viewModel.blacklisted.collectAsState(initial = emptyList())
     var selectedFavIndex by remember { mutableIntStateOf(-1) }
+    var selectedBlIndex by remember { mutableIntStateOf(-1) }
     
+    // Sub-tab state
+    var selectedSubTab by remember { mutableIntStateOf(0) } // 0 for Favorites, 1 for Blacklist
+
     Column(modifier = Modifier.fillMaxSize()) {
         TargetSwitcher(
             selectedTarget = settingsTarget,
             onTargetSelected = { viewModel.setSettingsTarget(it) }
         )
 
-        Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            Text("FAVORITES (${favorites.size})", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (favorites.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No Favorites yet", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            else LazyVerticalGrid(columns = GridCells.Adaptive(100.dp), modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                itemsIndexed(favorites) { index, f ->
-                    Box(modifier = Modifier.aspectRatio(0.85f).clip(RoundedCornerShape(16.dp)).clickable { selectedFavIndex = index }) {
-                        AsyncImage(model = Uri.parse(f.uriString), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                        IconButton(onClick = { viewModel.toggleFavorite(WallpaperImg(f.uriString, f.folderUriString, f.displayName, true)) }, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f), RoundedCornerShape(8.dp)).size(32.dp)) { Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308), modifier = Modifier.size(18.dp)) }
+        // --- SUB-TABS NAVIGATION ---
+        TabRow(
+            selectedTabIndex = selectedSubTab,
+            containerColor = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.primary,
+            indicator = { tabPositions ->
+                TabRowDefaults.SecondaryIndicator(
+                    Modifier.tabIndicatorOffset(tabPositions[selectedSubTab]),
+                    color = MaterialTheme.colorScheme.primary
+                )
+            },
+            divider = {}
+        ) {
+            Tab(
+                selected = selectedSubTab == 0,
+                onClick = { selectedSubTab = 0 },
+                text = { 
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Star, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Favorites (${favorites.size})", fontSize = 13.sp, fontWeight = FontWeight.Bold) 
+                    }
+                }
+            )
+            Tab(
+                selected = selectedSubTab == 1,
+                onClick = { selectedSubTab = 1 },
+                text = { 
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Block, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Blacklist (${blacklisted.size})", fontSize = 13.sp, fontWeight = FontWeight.Bold) 
+                    }
+                }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Box(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+            if (selectedSubTab == 0) {
+                // --- FAVORITES TAB ---
+                if (favorites.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { 
+                        Text("No Favorites yet", color = MaterialTheme.colorScheme.onSurfaceVariant) 
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(100.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        contentPadding = PaddingValues(bottom = 32.dp)
+                    ) {
+                        itemsIndexed(favorites) { index, f ->
+                            Box(modifier = Modifier.aspectRatio(0.85f).clip(RoundedCornerShape(16.dp)).clickable { selectedFavIndex = index }) {
+                                AsyncImage(model = Uri.parse(f.uriString), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                IconButton(
+                                    onClick = { viewModel.toggleFavorite(WallpaperImg(f.uriString, f.folderUriString, f.displayName, true)) },
+                                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f), RoundedCornerShape(8.dp)).size(32.dp)
+                                ) { 
+                                    Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308), modifier = Modifier.size(18.dp)) 
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // --- BLACKLIST TAB ---
+                if (blacklisted.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { 
+                        Text("No blacklisted images", color = MaterialTheme.colorScheme.onSurfaceVariant) 
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(100.dp),
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        contentPadding = PaddingValues(bottom = 32.dp)
+                    ) {
+                        itemsIndexed(blacklisted) { index, bl ->
+                            Box(modifier = Modifier.aspectRatio(0.85f).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.errorContainer).clickable { selectedBlIndex = index }) {
+                                AsyncImage(model = Uri.parse(bl.uriString), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(0.6f), contentScale = ContentScale.Crop)
+                                IconButton(
+                                    onClick = { viewModel.restoreBlacklistedImage(bl) },
+                                    modifier = Modifier.align(Alignment.Center).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.8f), CircleShape).size(32.dp)
+                                ) {
+                                    Icon(Icons.Default.RestoreFromTrash, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
     
+    // --- DIALOGS ---
     if (selectedFavIndex != -1) {
         val favImgs = favorites.map { WallpaperImg(it.uriString, it.folderUriString, it.displayName, true) }
         ImageDetailDialog(
@@ -958,6 +1025,17 @@ fun FavoritesScreen(viewModel: HomeViewModel) {
                 viewModel.blacklistCurrentUri(img.uriString, img.folderUriString, img.displayName)
                 selectedFavIndex = -1
             }
+        )
+    }
+
+    if (selectedBlIndex != -1) {
+        val blImgs = blacklisted.map { WallpaperImg(it.uriString, it.folderUriString, it.displayName, false) }
+        ImageDetailDialog(
+            images = blImgs,
+            initialIndex = selectedBlIndex,
+            onDismiss = { selectedBlIndex = -1 },
+            onToggleFavorite = { viewModel.toggleFavorite(it) },
+            onBlacklist = { /* Already blacklisted */ }
         )
     }
 }

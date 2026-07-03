@@ -136,6 +136,9 @@ interface BlacklistedDao {
 
     @Query("SELECT EXISTS(SELECT 1 FROM blacklisted_images WHERE uriString = :uriString)")
     suspend fun isBlacklistedSync(uriString: String): Boolean
+
+    @Query("DELETE FROM blacklisted_images")
+    suspend fun deleteAllBlacklisted()
 }
 
 @Dao
