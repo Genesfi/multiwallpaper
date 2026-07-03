@@ -10,6 +10,11 @@ object ScheduleManager {
     fun isScheduleActive(schedule: ScheduleEntity, currentTime: Calendar = Calendar.getInstance()): Boolean {
         if (!schedule.isEnabled) return false
 
+        // Check if current day is selected
+        val currentDay = currentTime.get(Calendar.DAY_OF_WEEK).toString()
+        val days = schedule.selectedDays.split(",")
+        if (!days.contains(currentDay)) return false
+
         val currentStr = timeFormat.format(currentTime.time)
         val startStr = schedule.startTime
         val endStr = schedule.endTime

@@ -2749,7 +2749,14 @@ fun ScheduleItem(
     ) {
         Column(modifier = Modifier.weight(1f).clickable { showEditDialog = true }) {
             Text(schedule.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
-            Text("${schedule.startTime} - ${schedule.endTime}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            
+            // Format time and days
+            val dayNames = listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+            val selected = schedule.selectedDays.split(",").filter { it.isNotEmpty() }.map { it.toInt() }
+            val dayText = if (selected.size == 7) "Everyday" 
+                          else selected.sorted().joinToString(", ") { dayNames[it - 1] }
+            
+            Text("${schedule.startTime} - ${schedule.endTime} • $dayText", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             
             val presetName = presets.find { it.id == schedule.presetId }?.name ?: "No Preset"
             var effects = ""
@@ -2801,6 +2808,11 @@ fun ScheduleEditorDialog(
     var dimEnabled by remember { mutableStateOf(schedule?.dimEnabled ?: false) }
     var dimIntensity by remember { mutableFloatStateOf(schedule?.dimIntensity ?: 0.3f) }
     var lightModeEnabled by remember { mutableStateOf(schedule?.lightModeEnabled ?: false) }
+    
+    val dayNames = listOf("S", "M", "T", "W", "T", "F", "S")
+    var selectedDays by remember { 
+        mutableStateOf(schedule?.selectedDays?.split(",")?.filter { it.isNotEmpty() }?.map { it.toInt() }?.toSet() ?: setOf(1,2,3,4,5,6,7)) 
+    }
 
     var showStartPicker by remember { mutableStateOf(false) }
     var showEndPicker by remember { mutableStateOf(false) }
@@ -2818,7 +2830,36 @@ fun ScheduleEditorDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // DAY PICKER UI
+                Text("Repeat", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    dayNames.forEachIndexed { index, name ->
+                        val dayNum = index + 1
+                        val isSelected = selectedDays.contains(dayNum)
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .clickable {
+                                    val newSet = selectedDays.toMutableSet()
+                                    if (isSelected) {
+                                        if (newSet.size > 1) newSet.remove(dayNum)
+                                    } else {
+                                        newSet.add(dayNum)
+                                    }
+                                    selectedDays = newSet
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(name, color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
                 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     TimePickerButton(
@@ -2884,6 +2925,7 @@ fun ScheduleEditorDialog(
                         dimEnabled = dimEnabled,
                         dimIntensity = dimIntensity,
                         lightModeEnabled = lightModeEnabled,
+                        selectedDays = selectedDays.sorted().joinToString(","),
                         target = schedule?.target ?: "HOME"
                     )
                 )

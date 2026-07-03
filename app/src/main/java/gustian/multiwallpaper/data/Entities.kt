@@ -74,6 +74,7 @@ data class ScheduleEntity(
     val dimEnabled: Boolean? = null,
     val dimIntensity: Float? = null,
     val lightModeEnabled: Boolean? = null,
+    val selectedDays: String = "1,2,3,4,5,6,7", // Comma-separated days 1-7 (Sun-Sat)
     val createdTime: Long = System.currentTimeMillis()
 )
 
