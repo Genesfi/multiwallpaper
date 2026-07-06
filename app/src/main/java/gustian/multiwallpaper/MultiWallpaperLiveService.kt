@@ -101,6 +101,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var lastX = 0f
         private var manualPageIndex = 0
         private val swipeThreshold = 150f
+        
+        private var isSwiping = false
+        private var swipeOffset = 0f // Current drag progress (-1.0 to 1.0)
 
         private var lastTapTime: Long = 0
         private val doubleTapThreshold = 500L
@@ -132,12 +135,23 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         db.scannedImageDao().deleteImageByUriSync(currentUri, targetName)
                         
                         withContext(Dispatchers.Main) {
-                            // Visual feedback: brief red flash
+                            // 1. Visual feedback: brief red flash
                             showBlacklistFeedback = true
                             requestDraw()
                             delay(150)
                             showBlacklistFeedback = false
-                            rotateWallpapers() // Immediately change
+                            
+                            // 2. CRITICAL: Remove from current memory cache immediately
+                            // so rotateWallpapers() doesn't accidentally re-use it.
+                            synchronized(bitmapLock) {
+                                pageBitmaps[manualPageIndex]?.recycle()
+                                pageBitmaps.remove(manualPageIndex)
+                                pageUris.remove(manualPageIndex)
+                                pageFocalPoints.remove(manualPageIndex)
+                            }
+                            
+                            // 3. Force immediate change to a NEW image
+                            rotateWallpapers()
                         }
                     }
                 }
@@ -233,14 +247,18 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     schedule.presetId?.let { pid ->
                         engineScope.launch(Dispatchers.IO) {
                             val db = AppDatabase.getDatabase(applicationContext)
+                            val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
                             
-                            // AUTO-BACKUP: Only save if we are switching FROM no schedule (original state)
-                            // or from a different schedule, AND we don't already have a valid backup session.
-                            if (oldScheduleId == null) {
-                                saveCurrentAsBackupPreset(if (prefsName.contains("lock")) "LOCK" else "HOME")
+                            // 1. SMART BACKUP: Only backup if a backup doesn't already exist.
+                            // This prevents overwriting the original state if the phone restarts
+                            // while a schedule is already active.
+                            val existingBackup = db.presetDao().getAllPresets(targetName).firstOrNull()?.find { it.name == "System_AutoBackup" }
+                            if (existingBackup == null) {
+                                saveCurrentAsBackupPreset(targetName)
                             }
                             
-                            val preset = db.presetDao().getAllPresets(if (prefsName.contains("lock")) "LOCK" else "HOME").firstOrNull()?.find { it.id == pid }
+                            // 2. Load the scheduled preset
+                            val preset = db.presetDao().getAllPresets(targetName).firstOrNull()?.find { it.id == pid }
                             if (preset != null) {
                                 loadPresetToService(preset)
                             }
@@ -256,8 +274,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         val backupPreset = db.presetDao().getAllPresets(targetName).firstOrNull()?.find { it.name == "System_AutoBackup" }
                         if (backupPreset != null) {
                             loadPresetToService(backupPreset)
-                            // After restoring, we should ideally delete the backup to prevent accidental reuse,
-                            // but for now, we just let it exist.
+                            // 3. CLEANUP: Delete the backup after successful restore.
+                            // This allows the next schedule to create a fresh backup.
+                            db.presetDao().deletePreset(backupPreset)
+                            Log.d("MultiWallpaper", "System_AutoBackup restored and deleted.")
                         } else {
                             withContext(Dispatchers.Main) { 
                                 loadWallpapersForPages()
@@ -564,30 +584,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             blurEnabled = prefs.getBoolean("blur_enabled", false)
             dimEnabled = prefs.getBoolean("dim_enabled", false)
 
-            // --- APPLY SCHEDULE OVERRIDES ---
-            currentActiveSchedule?.let { schedule ->
-                // Overriding main effects
-                schedule.blurEnabled?.let { blurEnabled = it }
-                schedule.blurRadius?.let { blurRadius = it }
-                schedule.dimEnabled?.let { dimEnabled = it }
-                schedule.dimIntensity?.let { dimIntensity = it }
-                schedule.lightModeEnabled?.let { lightModeEnabled = it }
-                
-                // Color Filter Overrides
-                schedule.filterType?.let { filterType = it }
-                schedule.filterColor1?.let { filterColor1 = it }
-                schedule.filterColor2?.let { filterColor2 = it }
-                schedule.filterColor3?.let { filterColor3 = it }
-                
-                // CRITICAL FIX: If schedule has Dim/Blur enabled, we DISABLE special focus modes
-                // so that the wallpaper is FULLY dimmed/blurred (Spotlight OFF).
-                if ((schedule.dimEnabled == true && schedule.dimIntensity != null && schedule.dimIntensity!! > 0f) || 
-                    (schedule.blurEnabled == true && schedule.blurRadius != null && schedule.blurRadius!! > 0f)) {
-                    subjectFocusEnabled = false
-                    vignetteModeEnabled = false
-                }
-            }
-
             subjectFocusEnabled = prefs.getBoolean("subject_focus_enabled", false) && currentActiveSchedule == null
             vignetteModeEnabled = prefs.getBoolean("vignette_mode_enabled", false) && currentActiveSchedule == null
             subjectFocusSmoothing = prefs.getFloat("subject_focus_smoothing", 0.5f)
@@ -600,6 +596,33 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             filterColor2 = prefs.getInt("filter_color_2", Color.WHITE)
             filterColor3 = prefs.getInt("filter_color_3", Color.GRAY)
             
+            // --- MANDATORY SCHEDULE OVERRIDES (Apply Last to ensure Priority) ---
+            currentActiveSchedule?.let { schedule ->
+                Log.d("MultiWallpaper", "updateSettings: Applying Schedule Overrides for ${schedule.name}")
+                // Overriding main effects
+                schedule.blurEnabled?.let { blurEnabled = it }
+                schedule.blurRadius?.let { blurRadius = it }
+                schedule.dimEnabled?.let { dimEnabled = it }
+                schedule.dimIntensity?.let { dimIntensity = it }
+                schedule.lightModeEnabled?.let { lightModeEnabled = it }
+                
+                // Color Filter Overrides (MANDATORY Priority)
+                if (schedule.filterType != null && schedule.filterType != "NONE") {
+                    filterType = schedule.filterType!!
+                    schedule.filterColor1?.let { filterColor1 = it }
+                    schedule.filterColor2?.let { filterColor2 = it }
+                    schedule.filterColor3?.let { filterColor3 = it }
+                    Log.d("MultiWallpaper", "updateSettings: Filter forced to $filterType by schedule")
+                }
+                
+                // If schedule has Dim/Blur enabled, we DISABLE special focus modes
+                if ((schedule.dimEnabled == true && schedule.dimIntensity != null && schedule.dimIntensity!! > 0f) || 
+                    (schedule.blurEnabled == true && schedule.blurRadius != null && schedule.blurRadius!! > 0f)) {
+                    subjectFocusEnabled = false
+                    vignetteModeEnabled = false
+                }
+            }
+
             if (useFavChanged || forceReload || oldQuality != wallpaperQuality) {
                 loadWallpapersForPages()
             } else if (strengthChanged || oldSmartCrop != smartCropEnabled ||
@@ -733,6 +756,14 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             when (action) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     lastX = event.x
+                    isSwiping = true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (isSwiping && isStaticLauncher && transitionType == "fade") {
+                        // Track drag distance relative to screen width
+                        swipeOffset = (event.x - lastX) / surfaceWidth.toFloat()
+                        requestDraw()
+                    }
                 }
                 android.view.MotionEvent.ACTION_POINTER_DOWN -> {
                     // TWO-FINGER TAP DETECTION WITH DEBOUNCE (150ms)
@@ -749,6 +780,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
                 android.view.MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(blacklistRunnable)
+                    isSwiping = false
+                    
                     val currTime = System.currentTimeMillis()
                     val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                     val doubleTapEnabled = prefs.getBoolean("double_tap_enabled", true)
@@ -769,8 +802,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         } else {
                             if (manualPageIndex < detectedPages - 1) manualPageIndex + 1 else 0
                         }
-                        requestDraw()
                     }
+                    
+                    // Reset swipe offset and force redraw to final state
+                    swipeOffset = 0f
+                    requestDraw()
                 }
             }
         }
@@ -1581,8 +1617,19 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 return
             }
 
-            val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
-            val pos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
+            val isFluid = if (xStep > 0f) {
+                kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f
+            } else {
+                isSwiping // In Poco mode, we are fluid while finger is down
+            }
+            
+            val pos = if (xStep > 0f) {
+                xOffset / xStep
+            } else {
+                // Combine manual index with finger drag progress
+                (manualPageIndex.toFloat() - swipeOffset).coerceIn(0f, (detectedPages - 1).toFloat())
+            }
+            
             val maxIdx = (detectedPages - 1).coerceAtLeast(0)
             val idx = if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
 
@@ -1794,8 +1841,18 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             // Apply Visual Filter
             updateFilter()
 
-            val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
-            val pos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
+            val isFluid = if (xStep > 0f) {
+                kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f
+            } else {
+                isSwiping
+            }
+
+            val pos = if (xStep > 0f) {
+                xOffset / xStep
+            } else {
+                (manualPageIndex.toFloat() - swipeOffset).coerceIn(0f, (detectedPages - 1).toFloat())
+            }
+
             val maxIdx = (detectedPages - 1).coerceAtLeast(0)
             
             // HYPEROS REPETITION FIX: 
@@ -1821,10 +1878,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     canvas.drawBitmap(nextBitmap!!, nextSrcRect, nextDstRect, bitmapPaint)
                     bitmapPaint.alpha = oldAlpha
                 } else if (transitionType == "fade" && isFluid) {
-                    val floatPos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
-                    val l = floatPos.toInt().coerceIn(0, maxIdx)
+                    val l = pos.toInt().coerceIn(0, maxIdx)
                     val r = (l + 1).coerceAtMost(maxIdx)
-                    val f = floatPos - l
+                    val f = pos - l
                     
                     val lb = pageBitmaps[l]; val rb = pageBitmaps[r]
                     if (lb != null && rb != null && l != r) {

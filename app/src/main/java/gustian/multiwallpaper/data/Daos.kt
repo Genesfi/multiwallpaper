@@ -115,6 +115,9 @@ interface PresetDao {
 
     @Update
     suspend fun updatePreset(preset: PresetEntity)
+
+    @Query("DELETE FROM presets WHERE target = :target")
+    suspend fun deleteAllPresets(target: String)
 }
 
 @Dao

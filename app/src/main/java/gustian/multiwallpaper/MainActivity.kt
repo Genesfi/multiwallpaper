@@ -2218,8 +2218,8 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                     }
                 }
                 
-                Spacer(modifier = Modifier.height(32.dp))
-                Text("DATA MANAGEMENT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // --- PRESET MANAGEMENT ---
+                Text("PRESET MANAGEMENT", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(modifier = Modifier.height(12.dp))
                 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2262,7 +2262,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                     ) {
                         Icon(Icons.Default.Upload, null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Export")
+                        Text("Export Presets")
                     }
                     
                     OutlinedButton(
@@ -2272,7 +2272,69 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                     ) {
                         Icon(Icons.Default.Download, null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Import")
+                        Text("Import Presets")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                // --- FULL BACKUP (Total Sync) ---
+                Text("DATA MANAGEMENT (TOTAL BACKUP)", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val scope = rememberCoroutineScope()
+                    
+                    val fullExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+                        uri?.let {
+                            scope.launch {
+                                val json = viewModel.getFullBackupJson()
+                                if (json != null) {
+                                    try {
+                                        context.contentResolver.openOutputStream(it)?.use { output ->
+                                            output.write(json.toByteArray())
+                                        }
+                                        Toast.makeText(context, "Full Backup exported!", Toast.LENGTH_SHORT).show()
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    val fullImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                        uri?.let {
+                            context.contentResolver.openInputStream(it)?.use { input ->
+                                val json = input.bufferedReader().use { r -> r.readText() }
+                                viewModel.importFullBackup(json)
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = { 
+                            val targetName = settingsTarget.name.lowercase()
+                            fullExportLauncher.launch("multi_wallpaper_full_backup_$targetName.json") 
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Icon(Icons.Default.Backup, null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Backup All")
+                    }
+                    
+                    Button(
+                        onClick = { fullImportLauncher.launch("application/json") },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Icon(Icons.Default.Restore, null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Restore All")
                     }
                 }
 

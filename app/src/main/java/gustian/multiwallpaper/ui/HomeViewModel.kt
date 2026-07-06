@@ -1147,19 +1147,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    suspend fun getPresetsJson(): String? {
-        return withContext(Dispatchers.IO) {
-            try {
-                val targetName = _settingsTarget.value.name
-                val allPresets = presetDao.getAllPresets(targetName).first()
-                val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
-                val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, PresetEntity::class.java)
-                val adapter = moshi.adapter<List<PresetEntity>>(type)
-                adapter.toJson(allPresets)
-            } catch (e: Exception) {
-                Log.e("HomeViewModel", "Failed to generate presets JSON", e)
-                null
-            }
+    suspend fun getPresetsJson(): String? = withContext(Dispatchers.IO) {
+        try {
+            val targetName = _settingsTarget.value.name
+            val allPresets = presetDao.getAllPresets(targetName).first()
+            val moshi = com.squareup.moshi.Moshi.Builder()
+                .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                .build()
+            val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, PresetEntity::class.java)
+            moshi.adapter<List<PresetEntity>>(type).toJson(allPresets)
+        } catch (e: Exception) {
+            Log.e("HomeViewModel", "Failed to generate presets JSON", e)
+            null
         }
     }
 
@@ -1167,27 +1166,119 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val targetName = _settingsTarget.value.name
-                val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+                val moshi = com.squareup.moshi.Moshi.Builder()
+                    .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                    .build()
                 val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, PresetEntity::class.java)
-                val adapter = moshi.adapter<List<PresetEntity>>(type)
-                val imported = adapter.fromJson(json)
+                val imported = moshi.adapter<List<PresetEntity>>(type).fromJson(json)
 
                 imported?.forEach {
-                    // Check for duplicate names, maybe append (Imported) if exists
-                    val existingList = presetDao.getAllPresets(targetName).first()
-                    val existing = existingList.find { p -> p.name == it.name }
-                    val finalPreset = if (existing != null) it.copy(id = 0, name = "${it.name} (Imported)", target = targetName) else it.copy(id = 0, target = targetName)
-                    presetDao.insertPreset(finalPreset)
+                    presetDao.insertPreset(it.copy(id = 0, target = targetName))
                 }
-
                 withContext(Dispatchers.Main) {
                     Toast.makeText(getApplication(), "Imported ${imported?.size ?: 0} presets", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 Log.e("HomeViewModel", "Import fail", e)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(getApplication(), "Import failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    suspend fun getFullBackupJson(): String? = withContext(Dispatchers.IO) {
+        try {
+            val targetName = _settingsTarget.value.name
+            val prefs = currentPrefs ?: return@withContext null
+            
+            val backupMap = mutableMapOf<String, Any>()
+            
+            // 1. All Presets
+            val allPresets = presetDao.getAllPresets(targetName).first()
+            backupMap["presets"] = allPresets
+            
+            // 2. Global Settings (SharedPreferences)
+            val settingsMap = mutableMapOf<String, Any>()
+            prefs.all.forEach { (key, value) -> settingsMap[key] = value ?: "" }
+            backupMap["settings"] = settingsMap
+            
+            // 3. Custom Palettes
+            val palettes = customPaletteDao.getPalettesByType("DUOTONE").first() + 
+                           customPaletteDao.getPalettesByType("TRITONE").first()
+            backupMap["palettes"] = palettes
+            
+            // 4. Schedules
+            val schedulesList = scheduleDao.getAllSchedules(targetName).first()
+            backupMap["schedules"] = schedulesList
+
+            val moshi = com.squareup.moshi.Moshi.Builder()
+                .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                .build()
+            val adapter = moshi.adapter(Any::class.java)
+            adapter.toJson(backupMap)
+        } catch (e: Exception) {
+            Log.e("HomeViewModel", "Failed to generate full backup", e)
+            null
+        }
+    }
+
+    fun importFullBackup(json: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val targetName = _settingsTarget.value.name
+                val moshi = com.squareup.moshi.Moshi.Builder()
+                    .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
+                    .build()
+                val map = moshi.adapter(Map::class.java).fromJson(json) as? Map<String, Any> ?: return@launch
+
+                // 1. Restore Presets
+                (map["presets"] as? List<*>)?.let { list ->
+                    presetDao.deleteAllPresets(targetName)
+                    val adapter = moshi.adapter(PresetEntity::class.java)
+                    list.forEach { item ->
+                        val p = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
+                        if (p != null) presetDao.insertPreset(p.copy(id = 0, target = targetName))
+                    }
                 }
+
+                // 2. Restore Palettes
+                (map["palettes"] as? List<*>)?.let { list ->
+                    val adapter = moshi.adapter(CustomPaletteEntity::class.java)
+                    list.forEach { item ->
+                        val p = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
+                        if (p != null) customPaletteDao.insertPalette(p.copy(id = 0))
+                    }
+                }
+
+                // 3. Restore Schedules
+                (map["schedules"] as? List<*>)?.let { list ->
+                    val adapter = moshi.adapter(ScheduleEntity::class.java)
+                    list.forEach { item ->
+                        val s = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
+                        if (s != null) scheduleDao.insertSchedule(s.copy(id = 0, target = targetName))
+                    }
+                }
+
+                // 4. Restore Settings
+                (map["settings"] as? Map<*, *>)?.let { settings ->
+                    val editor = currentPrefs?.edit() ?: return@let
+                    settings.forEach { (k, v) ->
+                        val key = k.toString()
+                        when (v) {
+                            is Boolean -> editor.putBoolean(key, v)
+                            is Float -> editor.putFloat(key, v)
+                            is Int -> editor.putInt(key, v)
+                            is Long -> editor.putLong(key, v)
+                            is String -> editor.putString(key, v)
+                        }
+                    }
+                    editor.apply()
+                }
+
+                withContext(Dispatchers.Main) {
+                    loadSettings()
+                    Toast.makeText(getApplication(), "Full Data Restored!", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e("HomeViewModel", "Import fail", e)
             }
         }
     }
