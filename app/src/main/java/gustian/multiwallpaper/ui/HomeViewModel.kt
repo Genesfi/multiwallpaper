@@ -127,6 +127,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _activePresetName = MutableStateFlow<String?>(null)
     val activePresetName = _activePresetName.asStateFlow()
 
+    private val prefsListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+        if (key == "active_preset_name") {
+            _activePresetName.value = prefs.getString("active_preset_name", null)
+        }
+    }
+
     private val _isLoadingPreset = MutableStateFlow(false)
     val isLoadingPreset = _isLoadingPreset.asStateFlow()
 
@@ -241,15 +247,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun hasMoreHistory(): Boolean = hasMoreHistory
 
     fun setSettingsTarget(target: SettingTarget) {
+        currentPrefs?.unregisterOnSharedPreferenceChangeListener(prefsListener)
         _settingsTarget.value = target
         val prefsName = if (target == SettingTarget.HOME) "multi_wallpaper_prefs" else "multi_wallpaper_prefs_lock"
         Log.d("MultiWallpaper", "ViewModel setSettingsTarget: $target using $prefsName")
         currentPrefs = getApplication<Application>().getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        currentPrefs?.registerOnSharedPreferenceChangeListener(prefsListener)
         loadSettings()
     }
 
     private fun loadSettings() {
         val prefs = currentPrefs ?: return
+        _activePresetName.value = prefs.getString("active_preset_name", null)
         _intervalSeconds.value = prefs.getFloat("interval_seconds", 60f)
         _useFavoritesOnly.value = prefs.getBoolean("use_favorites_only", false)
         _transitionType.value = prefs.getString("transition_type", "slide") ?: "slide"
@@ -951,6 +960,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun saveCurrentAsPreset(name: String) {
         viewModelScope.launch {
             saveCurrentAsPresetSuspend(name)
+            currentPrefs?.edit()?.putString("active_preset_name", name)?.apply()
+            _activePresetName.value = name
             triggerReload()
             withContext(Dispatchers.Main) {
                 Toast.makeText(getApplication(), "Preset '$name' saved", Toast.LENGTH_SHORT).show()
@@ -1013,6 +1024,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 withContext(Dispatchers.IO) {
+                    currentPrefs?.edit()?.putString("active_preset_name", preset.name)?.apply()
                     _activePresetName.value = preset.name
                     folderDao.deleteAllFolders(targetName)
                     favoriteDao.deleteAllFavorites(targetName)
@@ -1289,6 +1301,38 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         Toast.makeText(getApplication(), "Wallpaper reload triggered", Toast.LENGTH_SHORT).show()
     }
 
+    private val _selectedPresetIds = MutableStateFlow<Set<Int>>(emptySet())
+    val selectedPresetIds = _selectedPresetIds.asStateFlow()
+
+    fun togglePresetSelection(id: Int) {
+        val current = _selectedPresetIds.value.toMutableSet()
+        if (current.contains(id)) current.remove(id) else current.add(id)
+        _selectedPresetIds.value = current
+    }
+
+    fun clearPresetSelection() {
+        _selectedPresetIds.value = emptySet()
+    }
+
+    fun deleteSelectedPresets() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ids = _selectedPresetIds.value
+            ids.forEach { id ->
+                val preset = presets.value.find { it.id == id }
+                if (preset != null) {
+                    if (_activePresetName.value == preset.name) {
+                        _activePresetName.value = null
+                        currentPrefs?.edit()?.remove("active_preset_name")?.apply()
+                    }
+                    presetDao.deletePreset(preset)
+                }
+            }
+            withContext(Dispatchers.Main) {
+                clearPresetSelection()
+            }
+        }
+    }
+
     fun deletePreset(preset: PresetEntity) {
         viewModelScope.launch {
             presetDao.deletePreset(preset)
@@ -1399,6 +1443,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun clearAllFolders() {
         viewModelScope.launch(Dispatchers.IO) {
             val targetName = _settingsTarget.value.name
+            currentPrefs?.edit()?.remove("active_preset_name")?.apply()
             _activePresetName.value = null
             folderDao.deleteAllFolders(targetName)
             favoriteDao.deleteAllFavorites(targetName)

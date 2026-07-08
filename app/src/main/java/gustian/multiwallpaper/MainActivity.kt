@@ -386,6 +386,7 @@ fun FolderScreen(viewModel: HomeViewModel) {
     val scannedImages by viewModel.scannedImages.collectAsState()
     val presets by viewModel.presets.collectAsState(initial = emptyList())
     val activePresetName by viewModel.activePresetName.collectAsState()
+    val selectedPresetIds by viewModel.selectedPresetIds.collectAsState()
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Target Switcher at Top
@@ -409,6 +410,10 @@ fun FolderScreen(viewModel: HomeViewModel) {
             onSavePreset = { viewModel.saveCurrentAsPreset(it) },
             onLoadPreset = { viewModel.loadPreset(it) },
             onDeletePreset = { viewModel.deletePreset(it) },
+            selectedPresetIds = selectedPresetIds,
+            onTogglePresetSelection = { viewModel.togglePresetSelection(it) },
+            onDeleteSelectedPresets = { viewModel.deleteSelectedPresets() },
+            onClearPresetSelection = { viewModel.clearPresetSelection() },
             onAddClick = null
         )
     }
@@ -471,7 +476,11 @@ fun FolderScreen(
     onUpdateActivePreset: () -> Unit = {},
     onSavePreset: (String) -> Unit = {},
     onLoadPreset: (PresetEntity) -> Unit = {},
-    onDeletePreset: (PresetEntity) -> Unit = {}
+    onDeletePreset: (PresetEntity) -> Unit = {},
+    selectedPresetIds: Set<Int> = emptySet(),
+    onTogglePresetSelection: (Int) -> Unit = {},
+    onDeleteSelectedPresets: () -> Unit = {},
+    onClearPresetSelection: () -> Unit = {}
 ) {
     var showPresetDialog by remember { mutableStateOf(false) }
     var showSavePresetDialog by remember { mutableStateOf(false) }
@@ -610,10 +619,16 @@ fun FolderScreen(
             PresetManagerDialog(
                 presets = presets,
                 scannedImages = scannedImages,
+                selectedIds = selectedPresetIds,
+                onToggleSelection = onTogglePresetSelection,
+                onDeleteSelected = onDeleteSelectedPresets,
                 onLoadPreset = onLoadPreset,
                 onDeletePreset = onDeletePreset,
                 onClearAllFolders = onClearAllFolders,
-                onDismiss = { showPresetDialog = false }
+                onDismiss = { 
+                    onClearPresetSelection()
+                    showPresetDialog = false 
+                }
             )
         }
 
@@ -674,26 +689,59 @@ fun FolderScreen(
 fun PresetManagerDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
     val presets by viewModel.presets.collectAsState(initial = emptyList())
     val scannedImages by viewModel.scannedImages.collectAsState()
+    val selectedIds by viewModel.selectedPresetIds.collectAsState()
+    
     PresetManagerDialog(
         presets = presets,
         scannedImages = scannedImages,
+        selectedIds = selectedIds,
+        onToggleSelection = { viewModel.togglePresetSelection(it) },
+        onDeleteSelected = { viewModel.deleteSelectedPresets() },
         onLoadPreset = { viewModel.loadPreset(it) },
         onDeletePreset = { viewModel.deletePreset(it) },
         onClearAllFolders = { viewModel.clearAllFolders() },
-        onDismiss = onDismiss
+        onDismiss = {
+            viewModel.clearPresetSelection()
+            onDismiss()
+        }
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PresetManagerDialog(
     presets: List<PresetEntity>,
     scannedImages: List<WallpaperImg>,
+    selectedIds: Set<Int>,
+    onToggleSelection: (Int) -> Unit,
+    onDeleteSelected: () -> Unit,
     onLoadPreset: (PresetEntity) -> Unit,
     onDeletePreset: (PresetEntity) -> Unit,
     onClearAllFolders: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var presetToDelete by remember { mutableStateOf<PresetEntity?>(null) }
+    var showBulkDeleteConfirm by remember { mutableStateOf(false) }
+
+    if (showBulkDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showBulkDeleteConfirm = false },
+            title = { Text("Delete Selected Presets?") },
+            text = { Text("Are you sure you want to delete ${selectedIds.size} selected presets? This cannot be undone.") },
+            confirmButton = {
+                Button(
+                    onClick = { 
+                        onDeleteSelected()
+                        showBulkDeleteConfirm = false 
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBulkDeleteConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
     
     if (presetToDelete != null) {
         AlertDialog(
@@ -723,14 +771,26 @@ fun PresetManagerDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Presets")
-                TextButton(onClick = { 
-                    onClearAllFolders()
-                    onDismiss()
-                }) {
-                    Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("New Preset")
+                if (selectedIds.isNotEmpty()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { onDeleteSelected() }) { // Shortcut delete or just use long text?
+                             Icon(Icons.Default.Delete, "Bulk Delete", tint = MaterialTheme.colorScheme.error)
+                        }
+                        Text("${selectedIds.size} Selected", style = MaterialTheme.typography.titleMedium)
+                    }
+                    TextButton(onClick = { showBulkDeleteConfirm = true }) {
+                         Text("Delete", color = MaterialTheme.colorScheme.error)
+                    }
+                } else {
+                    Text("Presets")
+                    TextButton(onClick = { 
+                        onClearAllFolders()
+                        onDismiss()
+                    }) {
+                        Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("New Preset")
+                    }
                 }
             }
         },
@@ -741,13 +801,23 @@ fun PresetManagerDialog(
                 }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(presets) { preset ->
+                    items(presets, key = { it.id ?: 0 }) { preset ->
+                        val isSelected = selectedIds.contains(preset.id)
                         Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                onLoadPreset(preset)
-                                onDismiss()
-                            }
+                            modifier = Modifier.fillMaxWidth().combinedClickable(
+                                onClick = {
+                                    if (selectedIds.isNotEmpty()) {
+                                        onToggleSelection(preset.id!!)
+                                    } else {
+                                        onLoadPreset(preset)
+                                        onDismiss()
+                                    }
+                                },
+                                onLongClick = {
+                                    onToggleSelection(preset.id!!)
+                                }
+                            ),
+                            colors = if (isSelected) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer) else CardDefaults.cardColors()
                         ) {
                             Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
@@ -761,6 +831,11 @@ fun PresetManagerDialog(
                                     } else {
                                         Icon(Icons.Default.Collections, null, modifier = Modifier.align(Alignment.Center), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
+                                    if (isSelected) {
+                                        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.4f))) {
+                                            Icon(Icons.Default.Check, null, modifier = Modifier.align(Alignment.Center), tint = MaterialTheme.colorScheme.onPrimary)
+                                        }
+                                    }
                                 }
                                 Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
                                     Text(preset.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
@@ -769,8 +844,10 @@ fun PresetManagerDialog(
                                     }
                                     Text("${preset.folderUris.size} folders • $totalImgs images", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                IconButton(onClick = { presetToDelete = preset }) {
-                                    Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                                if (selectedIds.isEmpty()) {
+                                    IconButton(onClick = { presetToDelete = preset }) {
+                                        Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                                    }
                                 }
                             }
                         }

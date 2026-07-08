@@ -99,6 +99,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var lastSuggestedWidth = -1
 
         private var lastX = 0f
+        private var lastY = 0f
         private var manualPageIndex = 0
         private val swipeThreshold = 150f
         
@@ -253,7 +254,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             // This prevents overwriting the original state if the phone restarts
                             // while a schedule is already active.
                             val existingBackup = db.presetDao().getAllPresets(targetName).firstOrNull()?.find { it.name == "System_AutoBackup" }
+                            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                             if (existingBackup == null) {
+                                val originalName = prefs.getString("active_preset_name", null)
+                                prefs.edit().putString("original_preset_name", originalName).apply()
                                 saveCurrentAsBackupPreset(targetName)
                             }
                             
@@ -261,6 +265,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             val preset = db.presetDao().getAllPresets(targetName).firstOrNull()?.find { it.id == pid }
                             if (preset != null) {
                                 loadPresetToService(preset)
+                                prefs.edit().putString("active_preset_name", preset.name).apply()
                             }
                         }
                     }
@@ -274,6 +279,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         val backupPreset = db.presetDao().getAllPresets(targetName).firstOrNull()?.find { it.name == "System_AutoBackup" }
                         if (backupPreset != null) {
                             loadPresetToService(backupPreset)
+                            
+                            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+                            val originalName = prefs.getString("original_preset_name", null)
+                            prefs.edit().putString("active_preset_name", originalName).remove("original_preset_name").apply()
+
                             // 3. CLEANUP: Delete the backup after successful restore.
                             // This allows the next schedule to create a fresh backup.
                             db.presetDao().deletePreset(backupPreset)
@@ -756,6 +766,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             when (action) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     lastX = event.x
+                    lastY = event.y
                     isSwiping = true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
@@ -787,7 +798,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     val doubleTapEnabled = prefs.getBoolean("double_tap_enabled", true)
                     
                     val deltaX = event.x - lastX
-                    val isSwipe = kotlin.math.abs(deltaX) > swipeThreshold
+                    val deltaY = event.y - lastY
+                    val isSwipe = kotlin.math.abs(deltaX) > swipeThreshold && kotlin.math.abs(deltaX) > kotlin.math.abs(deltaY) * 1.5f
 
                     if (doubleTapEnabled && !isSwipe && (currTime - lastTapTime) < doubleTapThreshold) {
                         rotateWallpapers() // Trigger change
