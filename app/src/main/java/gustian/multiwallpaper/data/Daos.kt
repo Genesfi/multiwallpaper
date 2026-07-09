@@ -50,6 +50,15 @@ interface FavoriteDao {
     @Query("SELECT uriString FROM favorites WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
     suspend fun getRandomFavoriteUrisExcludingHistory(target: String, limit: Int): List<String>
 
+    @Query("SELECT DISTINCT folderUriString FROM favorites WHERE target = :target")
+    suspend fun getDistinctFavoriteFolders(target: String): List<String>
+
+    @Query("SELECT uriString FROM favorites WHERE target = :target AND folderUriString = :folderUri AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun getRandomFavoriteUrisFromFolderExcludingHistory(target: String, folderUri: String, limit: Int): List<String>
+
+    @Query("SELECT uriString FROM favorites WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT :limit")
+    suspend fun getOrderedFavoriteUrisExcludingHistory(target: String, limit: Int): List<String>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFavorite(favorite: FavoriteImageEntity)
 
@@ -100,6 +109,15 @@ interface ScannedImageDao {
 
     @Query("SELECT uriString FROM scanned_images WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
     suspend fun getRandomUrisExcludingHistory(target: String, limit: Int): List<String>
+
+    @Query("SELECT DISTINCT folderUriString FROM scanned_images WHERE target = :target")
+    suspend fun getDistinctFolders(target: String): List<String>
+
+    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND folderUriString = :folderUri AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun getRandomUrisFromFolderExcludingHistory(target: String, folderUri: String, limit: Int): List<String>
+
+    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT :limit")
+    suspend fun getOrderedUrisExcludingHistory(target: String, limit: Int): List<String>
 }
 
 @Dao

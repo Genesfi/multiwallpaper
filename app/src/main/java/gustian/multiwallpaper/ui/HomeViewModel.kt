@@ -94,6 +94,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _shakeEnabled = MutableStateFlow(false)
     val shakeEnabled = _shakeEnabled.asStateFlow()
 
+    private val _shakeSensitivity = MutableStateFlow(0.9f)
+    val shakeSensitivity = _shakeSensitivity.asStateFlow()
+
     private val _smartCropEnabled = MutableStateFlow(true)
     val smartCropEnabled = _smartCropEnabled.asStateFlow()
 
@@ -270,6 +273,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _parallaxEnabled.value = prefs.getBoolean("parallax_enabled", false)
         _parallaxStrength.value = prefs.getFloat("parallax_strength", 0.5f)
         _shakeEnabled.value = prefs.getBoolean("shake_enabled", false)
+        _shakeSensitivity.value = prefs.getFloat("shake_sensitivity", 0.9f)
         _smartCropEnabled.value = prefs.getBoolean("smart_crop_enabled", true)
         _lightModeEnabled.value = prefs.getBoolean("light_mode_enabled", false)
         _wallpaperQuality.value = prefs.getString("wallpaper_quality", "NORMAL") ?: "NORMAL"
@@ -318,6 +322,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             putBoolean("parallax_enabled", otherPrefs.getBoolean("parallax_enabled", false))
             putFloat("parallax_strength", otherPrefs.getFloat("parallax_strength", 0.5f))
             putBoolean("shake_enabled", otherPrefs.getBoolean("shake_enabled", false))
+            putFloat("shake_sensitivity", otherPrefs.getFloat("shake_sensitivity", 0.9f))
             putBoolean("smart_crop_enabled", otherPrefs.getBoolean("smart_crop_enabled", true))
             putBoolean("light_mode_enabled", otherPrefs.getBoolean("light_mode_enabled", false))
             putString("wallpaper_quality", otherPrefs.getString("wallpaper_quality", "NORMAL"))
@@ -642,6 +647,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setShakeEnabled(enable: Boolean) {
         currentPrefs?.edit()?.putBoolean("shake_enabled", enable)?.apply()
         _shakeEnabled.value = enable
+    }
+
+    fun setShakeSensitivity(value: Float) {
+        currentPrefs?.edit()?.putFloat("shake_sensitivity", value)?.apply()
+        _shakeSensitivity.value = value
     }
 
     fun setSmartCropEnabled(enable: Boolean) {

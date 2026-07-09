@@ -440,6 +440,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var filterColor2 = Color.WHITE
         private var filterColor3 = Color.GRAY
         private var useFavoritesOnly = false
+        private var currentSortOrder = "RANDOM"
         private var currentRoll = 0f
         private var currentPitch = 0f
         private var smoothingFactor = 0.10f // More responsive for 30fps
@@ -458,7 +459,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var lastSensorDrawTime = 0L
         private val sensorThrottleMs = 33L // Balanced throttling (30fps) for smoothness
         private var lastShakeTime = 0L
-        private val shakeThreshold = 14f // m/s^2 above gravity
+        private var shakeThreshold = 14f // m/s^2 above gravity, now adjustable
         private var lastRotationTime = 0L
         
         private val bitmapPaint = Paint().apply { isFilterBitmap = true }
@@ -493,6 +494,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         override fun onCreate(surfaceHolder: SurfaceHolder?) {
             super.onCreate(surfaceHolder)
             setTouchEventsEnabled(true)
+
+            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            currentSortOrder = prefs.getString("rotation_sort_order", "RANDOM") ?: "RANDOM"
             
             sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
             accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -517,7 +521,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
             }
             
-            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             prefs.registerOnSharedPreferenceChangeListener(prefsListener)
             
             // RESTORE PERSISTED POCO MODE
@@ -552,6 +555,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             val newUseFav = prefs.getBoolean("use_favorites_only", false)
             val useFavChanged = useFavoritesOnly != newUseFav
+
+            val newSortOrder = prefs.getString("rotation_sort_order", "RANDOM") ?: "RANDOM"
+            val sortOrderChanged = currentSortOrder != newSortOrder
+            currentSortOrder = newSortOrder
             
             // Force reload if requested via a "force_reload" flag
             val forceReload = prefs.getBoolean("force_reload_trigger", false)
@@ -580,6 +587,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             parallaxStrength = newStrength
 
             shakeEnabled = prefs.getBoolean("shake_enabled", false)
+            val shakeSensitivity = prefs.getFloat("shake_sensitivity", 0.9f)
+            // Range: 10.0 (High Sensitivity) to 50.0 (Low Sensitivity)
+            shakeThreshold = 50.0f - (shakeSensitivity * 40.0f)
+
             smartCropEnabled = prefs.getBoolean("smart_crop_enabled", true)
             lightModeEnabled = prefs.getBoolean("light_mode_enabled", false)
             wallpaperQuality = prefs.getString("wallpaper_quality", "NORMAL") ?: "NORMAL"
@@ -633,7 +644,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
             }
 
-            if (useFavChanged || forceReload || oldQuality != wallpaperQuality) {
+            if (useFavChanged || forceReload || oldQuality != wallpaperQuality || sortOrderChanged) {
                 loadWallpapersForPages()
             } else if (strengthChanged || oldSmartCrop != smartCropEnabled ||
                        oldAiAdv != aiAdvancedEnabled || 
@@ -972,37 +983,77 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             val useFavorites = prefs.getBoolean("use_favorites_only", false)
             val sortOrder = prefs.getString("rotation_sort_order", "RANDOM")
-            
-            // Resolve target string based on prefsName
             val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
-            
-            // HISTORY EXHAUSTION FIX:
-            // If history is full (e.g. 10k photos), zero photos will be returned.
-            // We check if available photos are low and auto-clear history if needed.
+
+            // 1. Check History Exhaustion
             val totalImages = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
             val historyCount = db.rotationHistoryDao().getHistoryCountSync(targetName)
             
             if (totalImages > 0 && historyCount >= totalImages - 10) {
-                Log.d("MultiWallpaper", "History Exhaustion Detected for $targetName: Full clearing history")
-                db.rotationHistoryDao().clearHistory(targetName) // FULL CLEAR as requested
+                Log.d("MultiWallpaper", "History Exhaustion for $targetName: clearing history")
+                db.rotationHistoryDao().clearHistory(targetName)
                 synchronized(recentHistories) { recentHistories[targetName]?.clear() }
             }
 
-            return try {
-                val finalUris = if (useFavorites) {
-                    if (sortOrder == "FOLDER") {
-                        listOfNotNull(db.favoriteDao().getOrderedFavoriteUriExcludingHistorySubquery(targetName))
-                    } else {
-                        db.favoriteDao().getRandomFavoriteUrisExcludingHistory(targetName, count)
+            val finalUris = mutableListOf<String>()
+
+            try {
+                if (sortOrder == "RANDOM") {
+                    // BALANCED RANDOM LOGIC (DIVERSITY ACROSS SUB-FOLDERS)
+                    val folders = if (useFavorites) db.favoriteDao().getDistinctFavoriteFolders(targetName) 
+                                 else db.scannedImageDao().getDistinctFolders(targetName)
+                    
+                    if (folders.isNotEmpty()) {
+                        // Shuffle the list of sub-folders to keep rotation source random
+                        val shuffledFolders = folders.shuffled().toMutableList()
+                        var folderIdx = 0
+                        
+                        // Attempt to pick 1 image from each sub-folder until count is met
+                        while (finalUris.size < count) {
+                            if (shuffledFolders.isEmpty()) break
+                            
+                            val targetFolder = shuffledFolders[folderIdx % shuffledFolders.size]
+                            val picked = if (useFavorites) 
+                                db.favoriteDao().getRandomFavoriteUrisFromFolderExcludingHistory(targetName, targetFolder, 1)
+                            else 
+                                db.scannedImageDao().getRandomUrisFromFolderExcludingHistory(targetName, targetFolder, 1)
+                            
+                            if (picked.isNotEmpty()) {
+                                finalUris.add(picked[0])
+                            } else {
+                                // If this sub-folder is exhausted (all in history), remove it from candidates for this batch
+                                shuffledFolders.removeAt(folderIdx % shuffledFolders.size)
+                                if (shuffledFolders.isEmpty()) break
+                                folderIdx-- // Compensate for removal
+                            }
+                            
+                            folderIdx++
+                            // Safety break
+                            if (folderIdx > 500) break 
+                        }
+                    }
+                    
+                    // Fallback: If Balanced picking didn't fill the count (e.g., all folders mostly in history)
+                    if (finalUris.size < count) {
+                        val remaining = count - finalUris.size
+                        val fallback = if (useFavorites) 
+                            db.favoriteDao().getRandomFavoriteUrisExcludingHistory(targetName, remaining)
+                        else 
+                            db.scannedImageDao().getRandomUrisExcludingHistory(targetName, remaining)
+                        
+                        fallback.forEach { if (!finalUris.contains(it)) finalUris.add(it) }
                     }
                 } else {
-                    if (sortOrder == "FOLDER") {
-                        listOfNotNull(db.scannedImageDao().getOrderedUriExcludingHistorySubquery(targetName))
-                    } else {
-                        db.scannedImageDao().getRandomUrisExcludingHistory(targetName, count)
-                    }
+                    // BY FOLDER (ORDERED) MODE
+                    val ordered = if (useFavorites)
+                        db.favoriteDao().getOrderedFavoriteUrisExcludingHistory(targetName, count)
+                    else
+                        db.scannedImageDao().getOrderedUrisExcludingHistory(targetName, count)
+                    
+                    finalUris.addAll(ordered)
                 }
-                
+
+                // Update history for all picked URIs
                 finalUris.forEach { uri ->
                     synchronized(recentHistories) {
                         val isAuto = prefs.getBoolean("auto_limit_enabled", false)
@@ -1015,27 +1066,23 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         
                         engineScope.launch(Dispatchers.IO) {
                             db.rotationHistoryDao().insertHistory(RotationHistoryEntity(uriString = uri, target = targetName))
-                            // Only trim if we actually exceed the limit to save DB cycles
-                            val historyCount = db.rotationHistoryDao().getHistoryCountSync(targetName)
-                            if (historyCount > currentMax + 10) {
+                            val hCount = db.rotationHistoryDao().getHistoryCountSync(targetName)
+                            if (hCount > currentMax + 10) {
                                 db.rotationHistoryDao().trimHistory(targetName, currentMax)
                             }
                         }
 
                         if (history.size > currentMax) {
-                            val iterator = history.iterator()
-                            if (iterator.hasNext()) {
-                                iterator.next()
-                                iterator.remove()
-                            }
+                            val it = history.iterator()
+                            if (it.hasNext()) { it.next(); it.remove() }
                         }
                     }
                 }
-                finalUris
-            } catch (e: Exception) { 
-                Log.e("MultiWallpaper", "Batch fetch database error", e)
-                emptyList() 
+            } catch (e: Exception) {
+                Log.e("MultiWallpaper", "Rotation fetch error", e)
             }
+            
+            return finalUris
         }
 
         private fun rotateWallpapers() {

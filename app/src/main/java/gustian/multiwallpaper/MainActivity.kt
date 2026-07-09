@@ -1188,6 +1188,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
     val parallaxEnabled by viewModel.parallaxEnabled.collectAsState()
     val parallaxStrength by viewModel.parallaxStrength.collectAsState()
     val shakeEnabled by viewModel.shakeEnabled.collectAsState()
+    val shakeSensitivity by viewModel.shakeSensitivity.collectAsState()
     val smartCropEnabled by viewModel.smartCropEnabled.collectAsState()
     val lightModeEnabled by viewModel.lightModeEnabled.collectAsState()
     val wallpaperQuality by viewModel.wallpaperQuality.collectAsState()
@@ -1318,6 +1319,18 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                         SettingRow(title = "Double Tap to Change", checked = doubleTap, onCheckedChange = { viewModel.setDoubleTapEnabled(it) })
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         SettingRow(title = "Shake to Change", checked = shakeEnabled, onCheckedChange = { viewModel.setShakeEnabled(it) })
+                        
+                        if (shakeEnabled) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Shake Sensitivity", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            Slider(
+                                value = shakeSensitivity,
+                                onValueChange = { viewModel.setShakeSensitivity(it) },
+                                valueRange = 0.0f..1.0f,
+                                steps = 9
+                            )
+                            Text("${(shakeSensitivity * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                        }
                     }
                 }
 
