@@ -1198,6 +1198,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
     val aiSensitivityY by viewModel.aiSensitivityY.collectAsState()
     val manualFocalX by viewModel.manualFocalX.collectAsState()
     val manualFocalY by viewModel.manualFocalY.collectAsState()
+    val manualPageCount by viewModel.manualPageCount.collectAsState()
     val smartAdjacencyEnabled by viewModel.smartAdjacencyEnabled.collectAsState()
     val blurRadius by viewModel.blurRadius.collectAsState()
     val dimIntensity by viewModel.dimIntensity.collectAsState()
@@ -1330,6 +1331,46 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                                 steps = 9
                             )
                             Text("${(shakeSensitivity * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("PAGE CONFIGURATION", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        val isAuto = manualPageCount == 0
+                        SettingRow(
+                            title = "Auto-detect Page Count",
+                            subtitle = if (isAuto) "System will try to detect pages automatically" else "Using manual count: $manualPageCount pages",
+                            checked = isAuto,
+                            onCheckedChange = { if (it) viewModel.setManualPageCount(0) else viewModel.setManualPageCount(20) }
+                        )
+                        
+                        if (!isAuto) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Manual Page Count", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            Slider(
+                                value = manualPageCount.toFloat(),
+                                onValueChange = { viewModel.setManualPageCount(it.roundToInt()) },
+                                valueRange = 1f..50f,
+                                steps = 49
+                            )
+                            Text("$manualPageCount Pages", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                            
+                            if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK && manualPageCount > 1) {
+                                Text(
+                                    "Note: Lock screens usually only have 1 page.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
                         }
                     }
                 }

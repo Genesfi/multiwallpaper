@@ -200,6 +200,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _manualFocalY = MutableStateFlow(0.4f)
     val manualFocalY = _manualFocalY.asStateFlow()
 
+    private val _manualPageCount = MutableStateFlow(0)
+    val manualPageCount = _manualPageCount.asStateFlow()
+
     private val _filterType = MutableStateFlow("NONE")
     val filterType = _filterType.asStateFlow()
 
@@ -298,6 +301,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _autoLimitEnabled.value = prefs.getBoolean("auto_limit_enabled", false)
         _manualFocalX.value = prefs.getFloat("manual_focal_x", 0.5f)
         _manualFocalY.value = prefs.getFloat("manual_focal_y", 0.4f)
+        _manualPageCount.value = prefs.getInt("manual_page_count", 0)
         _filterType.value = prefs.getString("filter_type", "NONE") ?: "NONE"
         _filterColor1.value = prefs.getInt("filter_color_1", 0xFF000000.toInt())
         _filterColor2.value = prefs.getInt("filter_color_2", 0xFFFFFFFF.toInt())
@@ -348,6 +352,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             putString("filter_type", otherPrefs.getString("filter_type", "NONE"))
             putInt("filter_color_1", otherPrefs.getInt("filter_color_1", 0xFF000000.toInt()))
             putInt("filter_color_2", otherPrefs.getInt("filter_color_2", 0xFFFFFFFF.toInt()))
+            putInt("manual_page_count", otherPrefs.getInt("manual_page_count", 0))
             putBoolean("force_reload_trigger", true)
             apply()
         }
@@ -362,6 +367,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             ?.apply()
         _manualFocalX.value = x
         _manualFocalY.value = y
+    }
+
+    fun setManualPageCount(count: Int) {
+        currentPrefs?.edit()
+            ?.putInt("manual_page_count", count)
+            ?.putBoolean("force_reload_trigger", true)
+            ?.apply()
+        _manualPageCount.value = count
     }
 
     private var scanJob: Job? = null
