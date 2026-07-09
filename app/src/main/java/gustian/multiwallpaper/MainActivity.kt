@@ -130,6 +130,8 @@ fun MainLayout() {
     val selectedGalleryUris by viewModel.selectedGalleryUris.collectAsState()
     val selectedGalleryFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
     val gallerySearchQuery by viewModel.gallerySearchQuery.collectAsState()
+    val gallerySortType by viewModel.gallerySortType.collectAsState()
+    val gallerySortOrder by viewModel.gallerySortOrder.collectAsState()
     val isLoadingPreset by viewModel.isLoadingPreset.collectAsState()
     val latestVersionInfo by viewModel.latestVersionInfo.collectAsState()
     val updateMessage by viewModel.updateMessage.collectAsState()
@@ -186,12 +188,34 @@ fun MainLayout() {
                             IconButton(onClick = { showSearch = true }) { Icon(Icons.Default.Search, null, tint = MaterialTheme.colorScheme.primary) }
                         }
                         
+                        IconButton(onClick = { 
+                            val nextOrder = if (gallerySortOrder == "DESC") "ASC" else "DESC"
+                            viewModel.setGallerySortOrder(nextOrder)
+                        }) { 
+                            Icon(
+                                if (gallerySortOrder == "DESC") Icons.Default.VerticalAlignBottom else Icons.Default.VerticalAlignTop, 
+                                null, 
+                                tint = MaterialTheme.colorScheme.primary
+                            ) 
+                        }
+
                         var showSortMenu by remember { mutableStateOf(false) }
                         Box {
                             IconButton(onClick = { showSortMenu = true }) { Icon(Icons.AutoMirrored.Filled.Sort, null, tint = MaterialTheme.colorScheme.primary) }
                             DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
                                 listOf("NAME" to "Name", "DATE" to "Date Added", "STAR" to "Star First").forEach { (type, label) ->
-                                    DropdownMenuItem(text = { Text(label) }, onClick = { viewModel.setGallerySortType(type); showSortMenu = false })
+                                    DropdownMenuItem(
+                                        text = { 
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(label)
+                                                if (gallerySortType == type) {
+                                                    Spacer(Modifier.width(8.dp))
+                                                    Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                                }
+                                            }
+                                        }, 
+                                        onClick = { viewModel.setGallerySortType(type); showSortMenu = false }
+                                    )
                                 }
                             }
                         }
@@ -872,12 +896,13 @@ fun GalleryScreen(viewModel: HomeViewModel) {
     val selectedUris by viewModel.selectedGalleryUris.collectAsState()
     val selectedFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
     val sortType by viewModel.gallerySortType.collectAsState()
+    val sortOrder by viewModel.gallerySortOrder.collectAsState()
     val searchQuery by viewModel.gallerySearchQuery.collectAsState()
 
     var selectedImgUri by remember { mutableStateOf<String?>(null) }
     var activeFolderUri by remember { mutableStateOf<String?>(null) }
     
-    val grouped = remember(images, sortType, searchQuery) {
+    val grouped = remember(images, sortType, sortOrder, searchQuery) {
         val filtered = if (searchQuery.isBlank()) images 
                        else images.filter { img ->
                            val folderName = try {
@@ -892,12 +917,23 @@ fun GalleryScreen(viewModel: HomeViewModel) {
         
         val groups = filtered.groupBy { it.folderUriString }
         val sorted = when (sortType) {
-            "NAME" -> groups.entries.sortedBy { entry -> 
-                val uri = Uri.parse(entry.key)
-                if (uri.scheme == "file") java.io.File(uri.path ?: "").name else Uri.decode(entry.key).split("/").lastOrNull() ?: "Folder"
+            "NAME" -> groups.entries.toList().let { list ->
+                if (sortOrder == "DESC") list.sortedByDescending { entry -> 
+                    val uri = Uri.parse(entry.key)
+                    if (uri.scheme == "file") java.io.File(uri.path ?: "").name else Uri.decode(entry.key).split("/").lastOrNull() ?: "Folder"
+                } else list.sortedBy { entry -> 
+                    val uri = Uri.parse(entry.key)
+                    if (uri.scheme == "file") java.io.File(uri.path ?: "").name else Uri.decode(entry.key).split("/").lastOrNull() ?: "Folder"
+                }
             }
-            "DATE" -> groups.entries.toList() // Scan order is basically date added
-            "STAR" -> groups.entries.sortedByDescending { it.value.any { img -> img.isFavorite } }
+            "DATE" -> groups.entries.toList().let { list ->
+                if (sortOrder == "DESC") list.sortedByDescending { it.value.maxOfOrNull { img -> img.date } ?: 0L }
+                else list.sortedBy { it.value.maxOfOrNull { img -> img.date } ?: 0L }
+            }
+            "STAR" -> groups.entries.toList().let { list ->
+                if (sortOrder == "DESC") list.sortedByDescending { it.value.any { img -> img.isFavorite } }
+                else list.sortedBy { it.value.any { img -> img.isFavorite } }
+            }
             else -> groups.entries.toList()
         }
         sorted.associate { it.key to it.value }

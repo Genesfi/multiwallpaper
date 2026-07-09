@@ -29,7 +29,8 @@ data class ScannedImageEntity(
     val folderUriString: String,
     val displayName: String,
     val target: String = "HOME", // "HOME" or "LOCK"
-    val lastScanned: Long = System.currentTimeMillis()
+    val lastScanned: Long = System.currentTimeMillis(),
+    val dateModified: Long = 0
 )
 
 @Entity(tableName = "presets")

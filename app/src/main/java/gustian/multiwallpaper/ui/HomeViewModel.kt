@@ -118,6 +118,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _gallerySortType = MutableStateFlow("NAME")
     val gallerySortType = _gallerySortType.asStateFlow()
 
+    private val _gallerySortOrder = MutableStateFlow("DESC")
+    val gallerySortOrder = _gallerySortOrder.asStateFlow()
+
     private val _selectedGalleryFolderUris = MutableStateFlow<Set<String>>(emptySet())
     val selectedGalleryFolderUris = _selectedGalleryFolderUris.asStateFlow()
 
@@ -274,6 +277,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _aiZoomSlack.value = prefs.getFloat("ai_zoom_slack", 1.45f)
         _aiSensitivityX.value = prefs.getFloat("ai_sensitivity_x", 0.9f)
         _aiSensitivityY.value = prefs.getFloat("ai_sensitivity_y", 0.4f)
+        _gallerySortType.value = prefs.getString("gallery_sort_type", "NAME") ?: "NAME"
+        _gallerySortOrder.value = prefs.getString("gallery_sort_order", "DESC") ?: "DESC"
         _blurRadius.value = prefs.getFloat("blur_radius", 0f)
         _dimIntensity.value = prefs.getFloat("dim_intensity", 0f)
         _blurEnabled.value = prefs.getBoolean("blur_enabled", false)
@@ -367,7 +372,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     favoriteDao.getAllFavoritesSync(targetName).map { it.uriString }.toSet()
                 }
                 val images = entities.map { 
-                    WallpaperImg(it.uriString, it.folderUriString, it.displayName, favUris.contains(it.uriString))
+                    WallpaperImg(it.uriString, it.folderUriString, it.displayName, favUris.contains(it.uriString), it.dateModified)
                 }
                 _scannedImages.value = images
                 currentPrefs?.edit()?.putInt("total_scanned_count", images.size)?.apply()
@@ -979,6 +984,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _gallerySortType.value = type
     }
 
+    fun setGallerySortOrder(order: String) {
+        currentPrefs?.edit()?.putString("gallery_sort_order", order)?.apply()
+        _gallerySortOrder.value = order
+    }
+
     fun setGallerySearchQuery(query: String) {
         _gallerySearchQuery.value = query
     }
@@ -1141,7 +1151,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         // Sync with Database Cache
         scannedImageDao.deleteAllImages(targetName)
         scannedImageDao.insertImages(tempImages.map { 
-            ScannedImageEntity(it.uriString, it.folderUriString, it.displayName, targetName)
+            ScannedImageEntity(it.uriString, it.folderUriString, it.displayName, targetName, dateModified = it.date)
         })
     }
 
@@ -1491,7 +1501,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 if (!blacklistedUris.contains(fileUriStr)) {
                     // Use immediate parent as folderUriString for better search/grouping
                     val parentUriStr = Uri.fromFile(f.parentFile).toString()
-                    list.add(WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr)))
+                    list.add(WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr), f.lastModified()))
                 }
             } else if (f.isDirectory && !f.name.startsWith(".")) {
                 scanRecursive(f, rootUri, list, favoriteUris, blacklistedUris)
@@ -1509,12 +1519,24 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 else DocumentsContract.getDocumentId(currentUri)
                 val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeId)
                 val context = getApplication<Application>()
-                val cursor = context.contentResolver.query(childrenUri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE), null, null, null)
+                val cursor = context.contentResolver.query(
+                    childrenUri, 
+                    arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID, 
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME, 
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.COLUMN_LAST_MODIFIED
+                    ), 
+                    null, 
+                    null, 
+                    null
+                )
                 cursor?.use { c ->
                     while (c.moveToNext()) {
                         val docId = c.getString(0)
                         val name = c.getString(1) ?: "Image"
                         val mimeType = c.getString(2)
+                        val lastMod = c.getLong(3)
                         if (mimeType != null) {
                             if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
                                 folderQueue.add(DocumentsContract.buildDocumentUriUsingTree(treeUri, docId))
@@ -1522,7 +1544,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                 val childUriStr = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId).toString()
                                 if (!blacklistedUris.contains(childUriStr)) {
                                     // For SAF, the currentUri is the immediate parent
-                                    list.add(WallpaperImg(childUriStr, currentUri.toString(), name, favoriteUris.contains(childUriStr)))
+                                    list.add(WallpaperImg(childUriStr, currentUri.toString(), name, favoriteUris.contains(childUriStr), lastMod))
                                 }
                             }
                         }
@@ -1537,7 +1559,8 @@ data class WallpaperImg(
     val uriString: String,
     val folderUriString: String,
     val displayName: String,
-    val isFavorite: Boolean
+    val isFavorite: Boolean,
+    val date: Long = 0
 )
 
 data class FileItem(
