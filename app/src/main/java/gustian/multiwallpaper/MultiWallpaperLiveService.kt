@@ -200,8 +200,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
         private val rotationRunnable = Runnable { 
             rotateWallpapers()
-            // Always ensure the next rotation is scheduled
-            scheduleRotation()
         }
 
         private val timeTickReceiver = object : BroadcastReceiver() {
@@ -232,6 +230,14 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 withContext(Dispatchers.Main) {
                     if (activeSchedule?.id != currentActiveSchedule?.id) {
                         applySchedule(activeSchedule)
+                    } else {
+                        // Extra insurance: Check if we missed a rotation
+                        val currentTime = System.currentTimeMillis()
+                        val intervalMs = getRotationIntervalMs()
+                        if (currentTime - lastRotationTime >= intervalMs) {
+                            Log.d("MultiWallpaper", "TimeTick catch-up rotation triggered for $prefsName")
+                            rotateWallpapers()
+                        }
                     }
                 }
             }
@@ -570,6 +576,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             
             updateSettings()
             checkSchedules()
+
+            // Restore last rotation time from prefs
+            lastRotationTime = prefs.getLong("last_rotation_time", 0L)
         }
 
         private fun updateSettings() {
@@ -1057,7 +1066,16 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private fun scheduleRotation() {
             handler.removeCallbacks(rotationRunnable)
             val intervalMs = getRotationIntervalMs()
-            handler.postDelayed(rotationRunnable, intervalMs)
+            val currentTime = System.currentTimeMillis()
+            
+            // PERSISTENT TIMER FIX: 
+            // Calculate remaining time instead of always resetting to full intervalMs.
+            // This prevents frequent screen on/off from indefinitely postponing rotation.
+            val elapsed = currentTime - lastRotationTime
+            val remainingMs = (intervalMs - elapsed).coerceIn(0L, intervalMs)
+            
+            Log.d("MultiWallpaper", "Engine scheduleRotation ($prefsName): next in ${remainingMs/1000}s (interval: ${intervalMs/1000}s, elapsed: ${elapsed/1000}s)")
+            handler.postDelayed(rotationRunnable, remainingMs)
         }
 
         private suspend fun getNextWallpaperUriBatch(count: Int = 1): List<String> {
@@ -1142,7 +1160,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         private fun rotateWallpapers() {
-            lastRotationTime = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            lastRotationTime = now
+            getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().putLong("last_rotation_time", now).apply()
+
             synchronized(bitmapLock) {
                 if (isTransitioning) return // Avoid overlapping transitions
 
@@ -1473,6 +1494,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         }
                         if (firstBitmap != null) {
                             addToHistory(visibleUri)
+                            // Update rotation time because we just refreshed the wallpapers
+                            val now = System.currentTimeMillis()
+                            lastRotationTime = now
+                            getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().putLong("last_rotation_time", now).apply()
                         }
                         // SHOW FIRST IMAGE IMMEDIATELY
                         isLoading = false
