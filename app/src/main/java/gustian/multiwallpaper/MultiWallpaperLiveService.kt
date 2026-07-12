@@ -1027,18 +1027,23 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         // Track recently added URIs to prevent duplicates from concurrent jobs
-        private val recentAddedUris = mutableMapOf<String, Pair<String, Long>>()
+        // Use a set per target to allow multiple unique images (like 20 pages) to be added at once
+        private val recentAddedUris = mutableMapOf<String, MutableSet<String>>()
 
         private suspend fun addToHistory(uri: String) {
             val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
             val now = System.currentTimeMillis()
             
             synchronized(recentAddedUris) {
-                val last = recentAddedUris[targetName]
-                if (last != null && last.first == uri && (now - last.second) < 5000) {
+                val lastSet = recentAddedUris.getOrPut(targetName) { mutableSetOf() }
+                if (lastSet.contains(uri)) {
                     return
                 }
-                recentAddedUris[targetName] = Pair(uri, now)
+                lastSet.add(uri)
+                // Clear the set periodically (every 5 seconds) to allow rotation to re-add later
+                handler.postDelayed({ 
+                    synchronized(recentAddedUris) { recentAddedUris[targetName]?.remove(uri) }
+                }, 5000)
             }
 
             withContext(Dispatchers.IO) {
@@ -1087,10 +1092,22 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
             // 1. Check History Exhaustion
             val totalImages = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
-            val historyCount = db.rotationHistoryDao().getHistoryCountSync(targetName)
             
-            if (totalImages > 0 && historyCount >= totalImages - 10) {
-                Log.d("MultiWallpaper", "History Exhaustion for $targetName: clearing history")
+            // SMART EXHAUSTION PROTECTION:
+            // Instead of just comparing counts (which breaks when switching from 12000 to 300 photos),
+            // we check if the CURRENT set actually has any images that ARE NOT in history.
+            // This allows history to accumulate across different presets without being wiped.
+            
+            val hasAvailableImages = withContext(Dispatchers.IO) {
+                if (useFavorites) {
+                    db.favoriteDao().getRandomFavoriteUrisExcludingHistory(targetName, 1).isNotEmpty()
+                } else {
+                    db.scannedImageDao().getRandomUrisExcludingHistory(targetName, 1).isNotEmpty()
+                }
+            }
+            
+            if (totalImages > 0 && !hasAvailableImages) {
+                Log.d("MultiWallpaper", "History Exhaustion for $targetName: No unique images left in current preset, clearing history")
                 db.rotationHistoryDao().clearHistory(targetName)
                 synchronized(recentHistories) { recentHistories[targetName]?.clear() }
             }
@@ -1268,6 +1285,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             old?.recycle()
                             requestDraw()
                         }
+                        addToHistory(nextUri!!)
                     }
                     delay(100) // Yield for UI smoothness
                 }
@@ -1516,24 +1534,45 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             Math.min(dist, circularDist)
                         }
 
-                    // Load neighbors in parallel chunks (3 at a time to avoid memory spikes)
-                    priorityOrder.chunked(3).forEach { chunk ->
-                        if (!isActive) return@forEach
+                    // STAGGERED PARALLEL LOADING:
+                    // We load in chunks of 3 (as user liked).
+                    val chunks = priorityOrder.chunked(3)
+                    chunks.forEachIndexed { chunkIndex, chunk ->
+                        if (!isActive) return@launch
                         
+                        // DELAY FOR REBOOT:
+                        // After loading the FIRST chunk (immediate neighbors), if the phone just started (< 3 mins),
+                        // wait 10 seconds to let the system finish its startup tasks.
+                        if (chunkIndex == 1 && android.os.SystemClock.elapsedRealtime() < 180000) {
+                            Log.d("MultiWallpaper", "Reboot startup detected: Delaying remaining background pages 10s...")
+                            delay(10000)
+                        }
+
+                        if (!isActive) return@launch
+
                         val jobs = chunk.map { p ->
                             async(Dispatchers.IO) {
                                 if (!isActive) return@async
                                 
                                 var selectedUri: String? = null
-                                synchronized(pageUris) {
-                                    val prevPageFolder = pageUris[p - 1]?.let { Uri.parse(it).path?.substringBeforeLast('/') }
-                                    val candIdx = uriCandidates.indexOfFirst { 
-                                        !smartAdjacencyEnabled || Uri.parse(it).path?.substringBeforeLast('/') != prevPageFolder 
-                                    }
-                                    if (candIdx != -1) {
-                                        selectedUri = uriCandidates.removeAt(candIdx)
-                                    } else if (uriCandidates.isNotEmpty()) {
-                                        selectedUri = uriCandidates.removeAt(0)
+                                synchronized(uriCandidates) { // Sync on the candidate list
+                                    if (uriCandidates.isNotEmpty()) {
+                                        // Try to pick one that respects smart adjacency
+                                        var candIdx = -1
+                                        val prevPageUri = synchronized(pageUris) { pageUris[p - 1] }
+                                        val prevPageFolder = prevPageUri?.let { Uri.parse(it).path?.substringBeforeLast('/') }
+                                        
+                                        if (smartAdjacencyEnabled && prevPageFolder != null) {
+                                            candIdx = uriCandidates.indexOfFirst { 
+                                                Uri.parse(it).path?.substringBeforeLast('/') != prevPageFolder 
+                                            }
+                                        }
+                                        
+                                        selectedUri = if (candIdx != -1) {
+                                            uriCandidates.removeAt(candIdx)
+                                        } else {
+                                            uriCandidates.removeAt(0)
+                                        }
                                     }
                                 }
 
@@ -1547,7 +1586,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                         synchronized(bitmapLock) {
                                             val old = pageBitmaps[p]
                                             pageBitmaps[p] = b
-                                            pageUris[p] = uri
+                                            synchronized(pageUris) { pageUris[p] = uri }
                                             pageFocalPoints[p] = focal
                                             old?.recycle()
                                         }
@@ -1555,10 +1594,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                     }
                                     addToHistory(uri)
                                 }
-                                delay(50) // Tiny breath for CPU
                             }
                         }
                         jobs.awaitAll()
+                        
+                        // Yield between chunks to keep UI thread responsive
+                        delay(100)
                     }
                     
                     System.gc() // Final cleanup after batch load

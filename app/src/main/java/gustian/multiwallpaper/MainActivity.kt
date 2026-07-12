@@ -2792,15 +2792,7 @@ fun ImageDetailDialog(
     onBlacklist: (WallpaperImg) -> Unit
 ) {
     val context = LocalContext.current
-    var currentIndex by remember { mutableIntStateOf(initialIndex) }
-    val img = images.getOrNull(currentIndex) ?: run { onDismiss(); return }
-
-    // Animation states for opening/closing
-    var isVisible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { isVisible = true }
-    
-    val dialogAlpha by animateFloatAsState(if (isVisible) 1f else 0f, tween(300))
-    val dialogScale by animateFloatAsState(if (isVisible) 1f else 0.9f, tween(300))
+    val pagerState = rememberPagerState(initialPage = initialIndex) { images.size }
 
     // Zoom & Pan states
     var scale by remember { mutableFloatStateOf(1f) }
@@ -2813,24 +2805,13 @@ fun ImageDetailDialog(
     // Smart Preview state
     var isSmartPreview by remember { mutableStateOf(false) }
 
-    // Reset zoom when image changes
-    LaunchedEffect(currentIndex) {
-        scale = 1f
-        offset = Offset.Zero
-    }
-
     Dialog(
-        onDismissRequest = { 
-            isVisible = false
-            // Small delay before actual dismiss to allow animation to play
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ onDismiss() }, 300)
-        },
+        onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .alpha(dialogAlpha)
                 .background(Color.Black)
                 .pointerInput(Unit) {
                     detectTapGestures(
@@ -2854,236 +2835,238 @@ fun ImageDetailDialog(
                         }
                     }
                 }
-                .pointerInput(Unit) {
-                    detectHorizontalDragGestures { change, dragAmount ->
-                        // Only allow swipe if not zoomed in
-                        if (scale <= 1.05f) {
-                            if (dragAmount > 50) {
-                                if (currentIndex > 0) currentIndex--
-                                change.consume()
-                            } else if (dragAmount < -50) {
-                                if (currentIndex < images.size - 1) currentIndex++
-                                change.consume()
-                            }
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+                pageSpacing = 16.dp,
+                userScrollEnabled = scale <= 1.05f,
+                beyondViewportPageCount = 1
+            ) { page ->
+                // Reset zoom when page changes
+                LaunchedEffect(pagerState.currentPage) {
+                    scale = 1f
+                    offset = Offset.Zero
+                }
+
+                val img = images.getOrNull(page) ?: return@HorizontalPager
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(bottom = 120.dp)
+                        .graphicsLayer {
+                            val isCurrentPage = page == pagerState.currentPage
+                            scaleX = if (isCurrentPage) animatedScale else 1f
+                            scaleY = if (isCurrentPage) animatedScale else 1f
+                            translationX = if (isCurrentPage) animatedOffsetX else 0f
+                            translationY = if (isCurrentPage) animatedOffsetY else 0f
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    AsyncImage(
+                        model = Uri.parse(img.uriString),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = if (isSmartPreview) ContentScale.Crop else ContentScale.Fit
+                    )
+                }
+            }
+
+            val currentIndex = pagerState.currentPage
+            val img = images.getOrNull(currentIndex)
+            
+            if (img != null) {
+                // Navigation Overlays (Arrows) - Only show if not zoomed
+                if (scale <= 1.05f) {
+                    val scope = rememberCoroutineScope()
+                    if (currentIndex > 0) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .width(60.dp)
+                                .align(Alignment.CenterStart)
+                                .clickable { scope.launch { pagerState.animateScrollToPage(currentIndex - 1) } },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.ChevronLeft,
+                                null,
+                                tint = Color.White.copy(alpha = 0.5f),
+                                modifier = Modifier.size(48.dp)
+                            )
+                        }
+                    }
+                    if (currentIndex < images.size - 1) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .width(60.dp)
+                                .align(Alignment.CenterEnd)
+                                .clickable { scope.launch { pagerState.animateScrollToPage(currentIndex + 1) } },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                null,
+                                tint = Color.White.copy(alpha = 0.5f),
+                                modifier = Modifier.size(48.dp)
+                            )
                         }
                     }
                 }
-        ) {
-            // Main Image View
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(bottom = 120.dp)
-                    .graphicsLayer {
-                        scaleX = dialogScale * animatedScale
-                        scaleY = dialogScale * animatedScale
-                        translationX = animatedOffsetX
-                        translationY = animatedOffsetY
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                AsyncImage(
-                    model = Uri.parse(img.uriString),
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = if (isSmartPreview) ContentScale.Crop else ContentScale.Fit
-                )
-            }
 
-            // Navigation Overlays (Arrows) - Only show if not zoomed
-            if (scale <= 1.05f) {
-                if (currentIndex > 0) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .width(60.dp)
-                            .align(Alignment.CenterStart)
-                            .clickable { currentIndex-- },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Default.ChevronLeft,
-                            null,
-                            tint = Color.White.copy(alpha = 0.5f),
-                            modifier = Modifier.size(48.dp)
-                        )
-                    }
-                }
-                if (currentIndex < images.size - 1) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .width(60.dp)
-                            .align(Alignment.CenterEnd)
-                            .clickable { currentIndex++ },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Default.ChevronRight,
-                            null,
-                            tint = Color.White.copy(alpha = 0.5f),
-                            modifier = Modifier.size(48.dp)
-                        )
-                    }
-                }
-            }
-
-            // Top Bar
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 48.dp, start = 20.dp, end = 20.dp)
-                    .align(Alignment.TopCenter),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "${currentIndex + 1} / ${images.size}",
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    if (isSmartPreview) {
-                        Text(
-                            "Wallpaper Preview Mode",
-                            color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-                IconButton(
-                    onClick = { 
-                        isVisible = false
-                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ onDismiss() }, 300)
-                    },
-                    modifier = Modifier.background(Color.White.copy(alpha = 0.1f), CircleShape)
-                ) {
-                    Icon(Icons.Default.Close, null, tint = Color.White)
-                }
-            }
-
-            // Bottom Control Panel
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 24.dp)
-                    .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(28.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(28.dp))
-                    .padding(16.dp)
-                    .navigationBarsPadding(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = img.displayName,
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
+                // Top Bar
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 48.dp, start = 20.dp, end = 20.dp)
+                        .align(Alignment.TopCenter),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Smart Preview Toggle
-                    IconButton(
-                        onClick = { isSmartPreview = !isSmartPreview },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .background(
-                                if (isSmartPreview) MaterialTheme.colorScheme.primary 
-                                else Color.White.copy(alpha = 0.1f), 
-                                RoundedCornerShape(12.dp)
-                            )
-                    ) {
-                        Icon(
-                            if (isSmartPreview) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                            null,
-                            modifier = Modifier.size(20.dp),
-                            tint = if (isSmartPreview) Color.White else Color.White.copy(alpha = 0.7f)
-                        )
-                    }
-
-                    Button(
-                        onClick = { onToggleFavorite(img) },
-                        modifier = Modifier.weight(1f).height(48.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (img.isFavorite) Color(0xFFEAB308) else MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
-                        )
-                    ) {
-                        Icon(
-                            if (img.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder, 
-                            null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
+                    Column {
                         Text(
-                            text = if (img.isFavorite) "Starred" else "Star", 
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                    
-                    Button(
-                        onClick = { saveImageToGallery(context, Uri.parse(img.uriString), img.displayName) },
-                        modifier = Modifier.weight(1f).height(48.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color.White.copy(alpha = 0.1f)
-                        )
-                    ) {
-                        Icon(
-                            Icons.Default.Download, 
-                            null, 
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "Export", 
-                            fontWeight = FontWeight.Bold, 
+                            text = "${currentIndex + 1} / ${images.size}",
                             color = Color.White,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            softWrap = false
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
                         )
+                        if (isSmartPreview) {
+                            Text(
+                                "Wallpaper Preview Mode",
+                                color = MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
                     }
-
-                    // Blacklist Button
                     IconButton(
-                        onClick = { onBlacklist(img) },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .background(MaterialTheme.colorScheme.error.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
+                        onClick = onDismiss,
+                        modifier = Modifier.background(Color.White.copy(alpha = 0.1f), CircleShape)
                     ) {
-                        Icon(
-                            Icons.Default.Block,
-                            null,
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.error
-                        )
+                        Icon(Icons.Default.Close, null, tint = Color.White)
                     }
                 }
-                
-                TextButton(
-                    onClick = { 
-                        isVisible = false
-                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ onDismiss() }, 300)
-                    },
-                    modifier = Modifier.padding(top = 8.dp)
+
+                // Bottom Control Panel
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 24.dp)
+                        .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(28.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(28.dp))
+                        .padding(16.dp)
+                        .navigationBarsPadding(),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text("CLOSE", color = Color.White.copy(alpha = 0.5f), letterSpacing = 1.sp, fontSize = 11.sp)
+                    Text(
+                        text = img.displayName,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Smart Preview Toggle
+                        IconButton(
+                            onClick = { isSmartPreview = !isSmartPreview },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(
+                                    if (isSmartPreview) MaterialTheme.colorScheme.primary 
+                                    else Color.White.copy(alpha = 0.1f), 
+                                    RoundedCornerShape(12.dp)
+                                )
+                        ) {
+                            Icon(
+                                if (isSmartPreview) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                null,
+                                modifier = Modifier.size(20.dp),
+                                tint = if (isSmartPreview) Color.White else Color.White.copy(alpha = 0.7f)
+                            )
+                        }
+
+                        Button(
+                            onClick = { onToggleFavorite(img) },
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (img.isFavorite) Color(0xFFEAB308) else MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                            )
+                        ) {
+                            Icon(
+                                if (img.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder, 
+                                null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = if (img.isFavorite) "Starred" else "Star", 
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        
+                        Button(
+                            onClick = { saveImageToGallery(context, Uri.parse(img.uriString), img.displayName) },
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.White.copy(alpha = 0.1f)
+                            )
+                        ) {
+                            Icon(
+                                Icons.Default.Download, 
+                                null, 
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Export", 
+                                fontWeight = FontWeight.Bold, 
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+
+                        // Blacklist Button
+                        IconButton(
+                            onClick = { onBlacklist(img) },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(MaterialTheme.colorScheme.error.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
+                        ) {
+                            Icon(
+                                Icons.Default.Block,
+                                null,
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                    
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) {
+                        Text("CLOSE", color = Color.White.copy(alpha = 0.5f), letterSpacing = 1.sp, fontSize = 11.sp)
+                    }
                 }
             }
         }
