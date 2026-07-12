@@ -873,11 +873,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
+            Log.d("MW_DEBUG", "[$prefsName] onVisibilityChanged: $visible. Current bitmaps: ${pageBitmaps.size}")
             this.visible = visible
             if (visible) {
-                // FORCE RECOVERY ON POCO:
-                // If we are stuck in a loading state or have no bitmaps, force a reload.
                 if (pageBitmaps.isEmpty() && !isLoading) {
+                    Log.d("MW_DEBUG", "[$prefsName] Blank state detected on visible! Triggering Force Recovery.")
                     loadWallpapersForPages()
                 }
 
@@ -920,7 +920,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val validXOffset = if (xOffset.isNaN()) 0f else xOffset
             val validXStep = if (xStep.isNaN()) 0f else xStep
             
-            // IGNORE TRANSIENT 0.0 JUMPS (HyperOS/Poco Fix):
+            if (validXStep > 0f) {
+                Log.d("MW_DEBUG", "[$prefsName] onOffsetsChanged: xOffset=$validXOffset, xStep=$validXStep")
+            }
             // On Poco/HyperOS, the system often sends a fake (0.0, 0.0) offset when entering
             // Recents or just randomly. If we act on this while NOT visible, it causes the 
             // wallpaper to jump to Page 1 or trigger a false "static launcher" detection.
@@ -1423,10 +1425,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
         private fun loadWallpapersForPages() {
             val now = System.currentTimeMillis()
-            // Only debounce if we already have bitmaps or are already loading.
-            // If the engine is empty, we must allow the load to proceed immediately.
+            Log.d("MW_DEBUG", "[$prefsName] loadWallpapersForPages triggered. Bitmaps: ${pageBitmaps.size}, Loading: $isLoading")
+            
             if (pageBitmaps.isNotEmpty() && (now - lastLoadRequestTime < LOAD_DEBOUNCE_MS)) {
-                Log.d("MultiWallpaper", "loadWallpapersForPages: Debounced (Too frequent)")
+                Log.d("MW_DEBUG", "[$prefsName] loadWallpapersForPages: Debounced (Too frequent)")
                 return
             }
             lastLoadRequestTime = now
@@ -1434,66 +1436,58 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             mainLoadJob?.cancel()
             backgroundRefreshJob?.cancel()
 
-            isLoading = true // Set immediately to show loading spinner instead of "Select Folders"
+            isLoading = true
             requestDraw()
 
             mainLoadJob = engineScope.launch {
-                // 1. WAIT FOR SURFACE: Wait up to 2 seconds for valid dimensions
-                var waitCount = 0
-                while ((surfaceWidth <= 0 || surfaceHeight <= 0) && waitCount < 20 && isActive) {
-                    delay(100)
-                    waitCount++
-                }
-
-                if (surfaceWidth <= 0 || surfaceHeight <= 0) {
-                    Log.e("MultiWallpaper", "loadWallpapersForPages: Surface never ready ($surfaceWidth x $surfaceHeight)")
-                    withContext(Dispatchers.Main) { 
-                        isLoading = false
-                        requestDraw()
-                    }
-                    return@launch
-                }
-
-                // surfaceWidth/Height are now valid. Proceed with load...
+                Log.d("MW_DEBUG", "[$prefsName] mainLoadJob started. Surface: $surfaceWidth x $surfaceHeight")
+                
                 try {
+                    // 1. WAIT FOR SURFACE: Wait up to 2 seconds for valid dimensions
+                    var waitCount = 0
+                    while ((surfaceWidth <= 0 || surfaceHeight <= 0) && waitCount < 20 && isActive) {
+                        Log.d("MW_DEBUG", "[$prefsName] Waiting for surface... ($waitCount)")
+                        delay(200)
+                        waitCount++
+                    }
+
+                    if (surfaceWidth <= 0 || surfaceHeight <= 0) {
+                        Log.e("MW_DEBUG", "[$prefsName] FATAL: Surface never ready!")
+                        return@launch
+                    }
+
                     val db = AppDatabase.getDatabase(applicationContext)
                     val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
                     val useFavorites = prefs.getBoolean("use_favorites_only", false)
                     
                     val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
-                    val total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
+                    var total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
                     
                     if (total <= 0) {
-                        withContext(Dispatchers.Main) { 
-                            synchronized(bitmapLock) {
-                                recycleBitmaps()
-                                isLoading = false
-                                requestDraw()
-                            }
-                        }
+                        Log.d("MW_DEBUG", "[$prefsName] Database empty, waiting 1s...")
+                        delay(1000)
+                        total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
+                    }
+
+                    if (total <= 0) {
+                        Log.w("MW_DEBUG", "[$prefsName] No images found. Aborting.")
+                        synchronized(bitmapLock) { recycleBitmaps() }
                         return@launch
                     }
 
                     if (!isActive) return@launch
 
-                    // Optimized: Fetch 200 for a large pool, but only record what's actually displayed to history
                     val batchSize = 200.coerceAtMost(total)
                     val uriCandidates = getNextWallpaperUriBatch(batchSize).toMutableList()
-                    if (uriCandidates.isEmpty()) {
-                         withContext(Dispatchers.Main) { isLoading = false; requestDraw() }
-                         return@launch
-                    }
+                    if (uriCandidates.isEmpty()) return@launch
 
-                    // Priority 1: Current Page (Main quality)
+                    // CRITICAL SECTION: Visible Page (Non-Cancellable to prevent Loading Abadi)
                     val visibleUri = uriCandidates.removeAt(0)
-                    val firstBitmap = withContext(Dispatchers.IO) {
-                        decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight, isBackground = false)
+                    val (firstBitmap, firstFocal) = withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+                        val b = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight, isBackground = false)
+                        val f = if (b != null && smartCropEnabled) detectFaceFocalPoint(b) else null
+                        Pair(b, f)
                     }
-                    
-                    if (!isActive) { firstBitmap?.recycle(); return@launch }
-                    
-                    // RUN AI INSTANTLY FOR MAIN PAGE
-                    val firstFocal = if (firstBitmap != null && smartCropEnabled) detectFaceFocalPoint(firstBitmap) else null
                     
                     withContext(Dispatchers.Main) {
                         synchronized(bitmapLock) {
@@ -1512,7 +1506,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         }
                         if (firstBitmap != null) {
                             addToHistory(visibleUri)
-                            // Update rotation time because we just refreshed the wallpapers
                             val now = System.currentTimeMillis()
                             lastRotationTime = now
                             getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().putLong("last_rotation_time", now).apply()
