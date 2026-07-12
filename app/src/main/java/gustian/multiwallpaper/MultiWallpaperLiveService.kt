@@ -107,6 +107,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         
         private var isSwiping = false
         private var swipeOffset = 0f // Current drag progress (-1.0 to 1.0)
+        private var isSwipeAnimating = false
+        private var swipeAnimJob: Job? = null
+        
+        // FADE LOCK: Prevent index jumps during fast swipes
+        private var fadeLockFromIndex = -1
+        private var fadeLockToIndex = -1
 
         private var lastTapTime: Long = 0
         private val doubleTapThreshold = 500L
@@ -817,6 +823,14 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     lastX = event.x
                     lastY = event.y
                     isSwiping = true
+                    
+                    // BRUTAL SWIPE PROTECTION: Cancel all ongoing transitions/animations 
+                    // immediately when user touches the screen to prevent "state fighting"
+                    swipeAnimJob?.cancel()
+                    isSwipeAnimating = false
+                    isTransitioning = false 
+                    fadeLockFromIndex = -1
+                    fadeLockToIndex = -1
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
                     if (isSwiping && isStaticLauncher && transitionType == "fade") {
@@ -840,7 +854,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
                 android.view.MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(blacklistRunnable)
-                    isSwiping = false
                     
                     val currTime = System.currentTimeMillis()
                     val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
@@ -851,24 +864,78 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     val isSwipe = kotlin.math.abs(deltaX) > swipeThreshold && kotlin.math.abs(deltaX) > kotlin.math.abs(deltaY) * 1.5f
 
                     if (doubleTapEnabled && !isSwipe && (currTime - lastTapTime) < doubleTapThreshold) {
+                        isSwiping = false
                         rotateWallpapers() // Trigger change
                         lastTapTime = 0
+                        swipeOffset = 0f
+                        requestDraw()
                     } else {
                         lastTapTime = currTime
-                    }
-
-                    if (isSwipe && detectedPages > 1) {
-                        manualPageIndex = if (deltaX > 0) {
-                            if (manualPageIndex > 0) manualPageIndex - 1 else detectedPages - 1
+                        
+                        if (isSwipe && detectedPages > 1) {
+                            // ATOMIC INDEX CHANGE: Change the page index IMMEDIATELY.
+                            // This ensures the page always changes even if the animation is cancelled.
+                            val isPrev = deltaX > 0
+                            val oldIdx = manualPageIndex
+                            val newIdx = if (isPrev) {
+                                if (manualPageIndex > 0) manualPageIndex - 1 else detectedPages - 1
+                            } else {
+                                if (manualPageIndex < detectedPages - 1) manualPageIndex + 1 else 0
+                            }
+                            
+                            // LOCK indices for drawing thread stability
+                            fadeLockFromIndex = oldIdx
+                            fadeLockToIndex = newIdx
+                            
+                            manualPageIndex = newIdx
+                            
+                            if (isPrev) {
+                                swipeOffset = -1.0f + swipeOffset
+                            } else {
+                                swipeOffset = 1.0f + swipeOffset
+                            }
+                            
+                            // Start smooth return-to-center animation
+                            isSwiping = false
+                            isSwipeAnimating = true // Set immediately to prevent 1-frame gap
+                            animateSwipeCompletion()
                         } else {
-                            if (manualPageIndex < detectedPages - 1) manualPageIndex + 1 else 0
+                            isSwiping = false
+                            swipeOffset = 0f
+                            requestDraw()
                         }
                     }
-                    
-                    // Reset swipe offset and force redraw to final state
-                    swipeOffset = 0f
-                    requestDraw()
                 }
+            }
+        }
+
+        private fun animateSwipeCompletion() {
+            swipeAnimJob?.cancel()
+            swipeAnimJob = engineScope.launch {
+                val startOffset = swipeOffset
+                val targetOffset = 0f
+                
+                // Sync with user's Fade Speed setting
+                val duration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L)
+                
+                val startTime = System.currentTimeMillis()
+                
+                while (System.currentTimeMillis() - startTime < duration) {
+                    val elapsed = System.currentTimeMillis() - startTime
+                    val progress = elapsed.toFloat() / duration
+                    val interp = interpolator.getInterpolation(progress)
+                    
+                    // Smoothly animate back to center (0.0f)
+                    swipeOffset = startOffset * (1f - interp)
+                    requestDraw()
+                    delay(16) // ~60fps
+                }
+                
+                swipeOffset = 0f
+                isSwipeAnimating = false
+                fadeLockFromIndex = -1
+                fadeLockToIndex = -1
+                requestDraw()
             }
         }
 
@@ -1870,53 +1937,15 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 return
             }
 
-            val isFluid = if (xStep > 0f) {
-                kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f
-            } else {
-                isSwiping // In Poco mode, we are fluid while finger is down
-            }
-            
-            val pos = if (xStep > 0f) {
-                xOffset / xStep
-            } else {
-                // Combine manual index with finger drag progress
-                (manualPageIndex.toFloat() - swipeOffset).coerceIn(0f, (detectedPages - 1).toFloat())
-            }
-            
-            val maxIdx = (detectedPages - 1).coerceAtLeast(0)
-            val idx = if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
-
-            // FOCAL POINT INTERPOLATION (Fixes effect "jolt" during transitions)
-            var focal: PointF? = null
-            if (smartCropEnabled && subjectFocusEnabled) {
-                if (isTransitioning && nextBitmap != null) {
-                    val startF = pageFocalPoints[manualPageIndex] ?: PointF(0.5f, 0.4f)
-                    val endF = nextFocalPoint ?: PointF(0.5f, 0.4f)
-                    val progress = transitionAlpha.toFloat() / 255f
-                    focal = PointF(
-                        startF.x + (endF.x - startF.x) * progress,
-                        startF.y + (endF.y - startF.y) * progress
-                    )
-                } else if (isFluid && transitionType == "fade") {
-                    val l = pos.toInt().coerceIn(0, maxIdx)
-                    val r = (l + 1).coerceAtMost(maxIdx)
-                    val f = pos - l
-                    val startF = pageFocalPoints[l] ?: PointF(0.5f, 0.4f)
-                    val endF = pageFocalPoints[r] ?: PointF(0.5f, 0.4f)
-                    focal = PointF(
-                        startF.x + (endF.x - startF.x) * f,
-                        startF.y + (endF.y - startF.y) * f
-                    )
-                } else {
-                    focal = pageFocalPoints[idx]
-                }
-            }
+            // 1. CALCULATE INTERPOLATED FOCAL POINT FIRST
+            // This ensures content AND effects are synchronized
+            val focal = getInterpolatedFocalPoint()
 
             // MODERN VISUAL EFFECTS PIPELINE (Android 12+)
             if (android.os.Build.VERSION.SDK_INT >= 31 && canvas.isHardwareAccelerated) {
                 try {
                     if (visualEffectNode == null) {
-                        visualEffectNode = RenderNode("VisualEffects")
+                        visualEffectNode = android.graphics.RenderNode("VisualEffects")
                     }
                     val node = visualEffectNode!!
                     node.setPosition(0, 0, w, h)
@@ -1931,7 +1960,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                     // Record drawing into the Node
                     val recordingCanvas = node.beginRecording()
-                    drawWallpaperContent(recordingCanvas, w, h)
+                    drawActualContent(recordingCanvas, w, h, focal)
                     node.endRecording()
 
                     // Draw the Node (Blurred background)
@@ -1952,11 +1981,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     }
                 } catch (e: Exception) {
                     Log.e("MultiWallpaper", "RenderNode Effects failed: ${e.message}")
-                    drawWallpaperContent(canvas, w, h)
+                    drawActualContent(canvas, w, h, focal)
                 }
             } else {
                 // FALLBACK for older Android or non-HW canvas
-                drawWallpaperContent(canvas, w, h)
+                drawActualContent(canvas, w, h, focal)
                 if (subjectFocusEnabled && focal != null) {
                     if (dimEnabled && dimIntensity > 0f) drawSubjectFocus(canvas, w.toFloat(), h.toFloat(), focal)
                     if (blurEnabled && blurRadius > 0f) drawSharpSubject(canvas, w.toFloat(), h.toFloat(), focal)
@@ -1976,6 +2005,149 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             if (showBlacklistFeedback) {
                 canvas.drawColor(Color.argb(100, 255, 0, 0))
             }
+        }
+
+        private fun getInterpolatedFocalPoint(): PointF? {
+            if (!smartCropEnabled || !subjectFocusEnabled) return null
+            val maxIdx = (detectedPages - 1).coerceAtLeast(0)
+
+            if (isTransitioning && nextBitmap != null) {
+                val startF = pageFocalPoints[manualPageIndex] ?: PointF(0.5f, 0.4f)
+                val endF = nextFocalPoint ?: PointF(0.5f, 0.4f)
+                val progress = transitionAlpha.toFloat() / 255f
+                return PointF(
+                    startF.x + (endF.x - startF.x) * progress,
+                    startF.y + (endF.y - startF.y) * progress
+                )
+            } else if ((isSwiping || isSwipeAnimating) && transitionType == "fade" && xStep <= 0f) {
+                // Manual swipe fade interpolation for focal point
+                val l = manualPageIndex
+                val isPrev = swipeOffset > 0
+                val r = if (isPrev) (if (l > 0) l - 1 else detectedPages - 1) else (if (l < detectedPages - 1) l + 1 else 0)
+                val f = kotlin.math.abs(swipeOffset).coerceIn(0f, 1f)
+                
+                val startF = pageFocalPoints[l] ?: PointF(0.5f, 0.4f)
+                val endF = pageFocalPoints[r] ?: PointF(0.5f, 0.4f)
+                return PointF(
+                    startF.x + (endF.x - startF.x) * f,
+                    startF.y + (endF.y - startF.y) * f
+                )
+            } else {
+                val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
+                val pos = if (xStep > 0f) xOffset / xStep else manualPageIndex.toFloat()
+                val idx = if (isFluid) pos.roundToInt() % detectedPages.coerceAtLeast(1) else manualPageIndex.coerceIn(0, maxIdx)
+                return pageFocalPoints[idx]
+            }
+        }
+
+        private fun drawActualContent(canvas: Canvas, w: Int, h: Int, focal: PointF?) {
+            updateFilter()
+
+            val maxIdx = (detectedPages - 1).coerceAtLeast(0)
+
+            // 1. MANUAL SWIPE (POCO) FADE - PRIORITY ONE
+            // We prioritize manual swipe over automatic rotation to ensure follow-finger feel
+            if ((isSwiping || isSwipeAnimating) && transitionType == "fade" && xStep <= 0f) {
+                // Use LOCKED indices during animation to prevent "image slipping" on fast swipes
+                val l = if (fadeLockFromIndex != -1) fadeLockFromIndex else manualPageIndex
+                val isPrev = swipeOffset > 0
+                val r = if (fadeLockToIndex != -1) fadeLockToIndex else {
+                    if (isPrev) (if (l > 0) l - 1 else detectedPages - 1) else (if (l < detectedPages - 1) l + 1 else 0)
+                }
+                
+                val f = kotlin.math.abs(swipeOffset).coerceIn(0f, 1f)
+
+                val lb = pageBitmaps[l]; val rb = pageBitmaps[r]
+                if (lb != null && rb != null && l != r) {
+                    val oldAlpha = bitmapPaint.alpha
+                    
+                    if (isSwipeAnimating) {
+                        // After Atomic Update: manualPageIndex is the NEW one (r).
+                        // Base is the target, Source fades out on top.
+                        calculateRects(rb, w, h, nextSrcRect, nextDstRect, focal)
+                        canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
+                        
+                        bitmapPaint.alpha = (f * 255).toInt()
+                        calculateRects(lb, w, h, srcRect, dstRect, focal)
+                        canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
+                    } else {
+                        // During Drag: manualPageIndex is the OLD one (l).
+                        // Base is current, Target fades in on top.
+                        calculateRects(lb, w, h, srcRect, dstRect, focal)
+                        canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
+                        
+                        bitmapPaint.alpha = (f * 255).toInt()
+                        calculateRects(rb, w, h, nextSrcRect, nextDstRect, focal)
+                        canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
+                    }
+                    bitmapPaint.alpha = oldAlpha
+                } else if (lb != null) drawSingleBitmap(canvas, lb, w, h, focal)
+                return
+            }
+
+            // 2. TRANSITION (ROTATION) FADE - PRIORITY TWO
+            if (isTransitioning && nextBitmap != null && !nextBitmap!!.isRecycled) {
+                val curr = pageBitmaps[manualPageIndex]
+                if (curr != null && !curr.isRecycled) {
+                    // Use shared focal point during transition to prevent jump
+                    calculateRects(curr, w, h, srcRect, dstRect, focal)
+                    canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
+                    
+                    val oldAlpha = bitmapPaint.alpha
+                    bitmapPaint.alpha = transitionAlpha
+                    calculateRects(nextBitmap!!, w, h, nextSrcRect, nextDstRect, focal)
+                    canvas.drawBitmap(nextBitmap!!, nextSrcRect, nextDstRect, bitmapPaint)
+                    bitmapPaint.alpha = oldAlpha
+                } else {
+                    drawSingleBitmap(canvas, nextBitmap!!, w, h, focal)
+                }
+                return
+            }
+
+            // 3. NORMAL DRAWING (FLUID OR STATIC)
+            val isFluid = if (xStep > 0f) {
+                kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f
+            } else false
+
+            if (isFluid && transitionType == "fade" && xStep > 0f) {
+                // Normal launcher fluid fade
+                val pos = xOffset / xStep
+                val l = pos.toInt() % detectedPages.coerceAtLeast(1)
+                val r = (l + 1) % detectedPages.coerceAtLeast(1)
+                val f = pos - pos.toInt()
+                
+                val lb = pageBitmaps[l]; val rb = pageBitmaps[r]
+                if (lb != null && rb != null && l != r) {
+                    // Use shared focal point here too
+                    calculateRects(lb, w, h, srcRect, dstRect, focal)
+                    calculateRects(rb, w, h, nextSrcRect, nextDstRect, focal)
+
+                    val oldAlpha = bitmapPaint.alpha
+                    canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
+                    
+                    bitmapPaint.alpha = (f * 255).toInt()
+                    canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
+                    
+                    bitmapPaint.alpha = oldAlpha
+                } else if (lb != null) drawSingleBitmap(canvas, lb, w, h, focal)
+            } else {
+                val idx = manualPageIndex.coerceIn(0, maxIdx)
+                val curr = pageBitmaps[idx]
+                if (curr != null && !curr.isRecycled) {
+                    drawSingleBitmap(canvas, curr, w, h, focal)
+                } else {
+                    drawLoadingState(canvas, w, h)
+                }
+            }
+        }
+
+        private fun drawSingleBitmap(canvas: Canvas, b: Bitmap, w: Int, h: Int, focal: PointF? = null) {
+            if (b.isRecycled) {
+                drawLoadingState(canvas, w, h)
+                return
+            }
+            calculateRects(b, w, h, srcRect, dstRect, focal)
+            canvas.drawBitmap(b, srcRect, dstRect, bitmapPaint)
         }
 
 
@@ -2103,18 +2275,23 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val pos = if (xStep > 0f) {
                 xOffset / xStep
             } else {
-                (manualPageIndex.toFloat() - swipeOffset).coerceIn(0f, (detectedPages - 1).toFloat())
+                // Circular math for Poco/HyperOS
+                var p = manualPageIndex.toFloat() - swipeOffset
+                if (detectedPages > 0) {
+                    while (p < 0) p += detectedPages
+                    while (p >= detectedPages) p -= detectedPages
+                }
+                p
             }
 
             val maxIdx = (detectedPages - 1).coerceAtLeast(0)
             
             // HYPEROS REPETITION FIX: 
             // If xStep is 0 (Poco), we use a hard-coded loop based on detectedPages. 
-            // This ensures manual swiping always accesses unique slots (0 to detectedPages - 1)
             val idx = if (this.xStep > 0f) {
                 if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
             } else {
-                manualPageIndex % detectedPages.coerceAtLeast(1)
+                if (isFluid) pos.roundToInt() % detectedPages.coerceAtLeast(1) else manualPageIndex % detectedPages.coerceAtLeast(1)
             }
             val clampedIdx = idx.coerceIn(0, maxIdx)
 
@@ -2131,9 +2308,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     canvas.drawBitmap(nextBitmap!!, nextSrcRect, nextDstRect, bitmapPaint)
                     bitmapPaint.alpha = oldAlpha
                 } else if (transitionType == "fade" && isFluid) {
-                    val l = pos.toInt().coerceIn(0, maxIdx)
-                    val r = (l + 1).coerceAtMost(maxIdx)
-                    val f = pos - l
+                    val l = pos.toInt() % detectedPages.coerceAtLeast(1)
+                    val r = (l + 1) % detectedPages.coerceAtLeast(1)
+                    val f = pos - pos.toInt()
                     
                     val lb = pageBitmaps[l]; val rb = pageBitmaps[r]
                     if (lb != null && rb != null && l != r) {
@@ -2319,21 +2496,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
             sR.set((lOn / s).toInt(), (tOn / s).toInt(), (rOn / s).toInt(), (bOn / s).toInt())
             dR.set(maxOf(0f, cX), maxOf(0f, cY), minOf(w.toFloat(), cX + ow), minOf(h.toFloat(), cY + oh))
-        }
-
-        private fun drawSingleBitmap(canvas: Canvas, b: Bitmap, w: Int, h: Int) {
-            if (b.isRecycled) {
-                drawLoadingState(canvas, w, h)
-                return
-            }
-            val isFluid = if (xStep > 0f) kotlin.math.abs((xOffset / xStep) - (xOffset / xStep).roundToInt()) > 0.001f else false
-            val pos = if (xStep > 0f) xOffset / xStep else xOffset * (detectedPages - 1)
-            val maxIdx = (detectedPages - 1).coerceAtLeast(0)
-            val idx = if (isFluid) pos.roundToInt().coerceIn(0, maxIdx) else manualPageIndex.coerceIn(0, maxIdx)
-            
-            val focal = if (smartCropEnabled) pageFocalPoints[idx] else null
-            calculateRects(b, w, h, srcRect, dstRect, focal)
-            canvas.drawBitmap(b, srcRect, dstRect, bitmapPaint)
         }
     }
 }
