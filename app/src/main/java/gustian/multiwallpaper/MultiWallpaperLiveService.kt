@@ -873,11 +873,17 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
-            Log.d("MW_DEBUG", "[$prefsName] onVisibilityChanged: $visible. Current bitmaps: ${pageBitmaps.size}")
             this.visible = visible
             if (visible) {
+                // SMART UNLOCK: If we have bitmaps but the spinner is stuck, KILL THE SPINNER.
+                if (pageBitmaps.isNotEmpty() && isLoading) {
+                    Log.i("MW_DEBUG", "[$prefsName] Recovery: Stuck spinner unlocked.")
+                    isLoading = false
+                    requestDraw()
+                }
+
                 if (pageBitmaps.isEmpty() && !isLoading) {
-                    Log.d("MW_DEBUG", "[$prefsName] Blank state detected on visible! Triggering Force Recovery.")
+                    Log.i("MW_DEBUG", "[$prefsName] Recovery: Blank state triggered.")
                     loadWallpapersForPages()
                 }
 
@@ -892,27 +898,36 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 scheduleRotation()
                 requestDraw()
             } else {
-                // LESS AGGRESSIVE CLEANUP: 
-                // Don't cancel rotationJob immediately if it's already running a swap
-                mainLoadJob?.cancel()
-                backgroundRefreshJob?.cancel()
-                preloadJob?.cancel()
-                
-                isDrawScheduled = false
-                handler.removeCallbacks(drawRunnable)
-                
-                // Clear high-RAM transient bitmaps
-                nextBitmap?.recycle(); nextBitmap = null
-                preloadedBitmap?.recycle(); preloadedBitmap = null
-                
-                // Unregister sensor to stop redraw loops
-                unregisterSensor()
-                
-                // Also cancel any ongoing transitions to stop power usage
-                isTransitioning = false
-                
-                // Force memory reclamation
-                System.gc()
+                // SMART CLEANUP: 
+                // Don't cancel immediately on first load to prevent "Loading Abadi" on Apply (flicker)
+                if (pageBitmaps.isEmpty() && isLoading) {
+                    // Silent
+                } else {
+                    engineScope.launch {
+                        delay(800) // Small delay to catch "flickers" (Xiaomi/Poco transition)
+                        if (!this@MultiWallpaperEngine.visible) {
+                            mainLoadJob?.cancel()
+                            backgroundRefreshJob?.cancel()
+                            preloadJob?.cancel()
+                            
+                            isDrawScheduled = false
+                            handler.removeCallbacks(drawRunnable)
+                            
+                            // Clear high-RAM transient bitmaps
+                            nextBitmap?.recycle(); nextBitmap = null
+                            preloadedBitmap?.recycle(); preloadedBitmap = null
+                            
+                            // Unregister sensor to stop redraw loops
+                            unregisterSensor()
+                            
+                            // Also cancel any ongoing transitions to stop power usage
+                            isTransitioning = false
+                            
+                            // Force memory reclamation
+                            System.gc()
+                        }
+                    }
+                }
             }
         }
 
@@ -1365,6 +1380,13 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             preloadNextWallpaper()
                             System.gc()
                         }
+                        
+                        // FIX: Ensure isLoading is cleared if manual rotation succeeds
+                        if (isLoading && pageBitmaps.isNotEmpty()) {
+                            isLoading = false
+                            requestDraw()
+                        }
+
                         addToHistory(currentUri)
                     }
                 } else {
@@ -1402,6 +1424,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 nextBitmap = null
                 nextFocalPoint = null
                 if (old != pageBitmaps[manualPageIndex]) old?.recycle()
+                
+                // FIX: Also clear isLoading here just in case
+                if (isLoading) {
+                    isLoading = false
+                }
+
                 requestDraw()
                 scheduleRotation()
                 
@@ -1425,10 +1453,14 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
         private fun loadWallpapersForPages() {
             val now = System.currentTimeMillis()
-            Log.d("MW_DEBUG", "[$prefsName] loadWallpapersForPages triggered. Bitmaps: ${pageBitmaps.size}, Loading: $isLoading")
             
+            // RESET isLoading before starting to ensure we don't get stuck in a "true" state from previous failure
+            if (isLoading) {
+                isLoading = false
+            }
+
+            // BYPASS DEBOUNCE if we have no bitmaps (Initial load must proceed!)
             if (pageBitmaps.isNotEmpty() && (now - lastLoadRequestTime < LOAD_DEBOUNCE_MS)) {
-                Log.d("MW_DEBUG", "[$prefsName] loadWallpapersForPages: Debounced (Too frequent)")
                 return
             }
             lastLoadRequestTime = now
@@ -1440,19 +1472,15 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             requestDraw()
 
             mainLoadJob = engineScope.launch {
-                Log.d("MW_DEBUG", "[$prefsName] mainLoadJob started. Surface: $surfaceWidth x $surfaceHeight")
-                
                 try {
                     // 1. WAIT FOR SURFACE: Wait up to 2 seconds for valid dimensions
                     var waitCount = 0
                     while ((surfaceWidth <= 0 || surfaceHeight <= 0) && waitCount < 20 && isActive) {
-                        Log.d("MW_DEBUG", "[$prefsName] Waiting for surface... ($waitCount)")
                         delay(200)
                         waitCount++
                     }
 
                     if (surfaceWidth <= 0 || surfaceHeight <= 0) {
-                        Log.e("MW_DEBUG", "[$prefsName] FATAL: Surface never ready!")
                         return@launch
                     }
 
@@ -1464,13 +1492,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     var total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
                     
                     if (total <= 0) {
-                        Log.d("MW_DEBUG", "[$prefsName] Database empty, waiting 1s...")
                         delay(1000)
                         total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
                     }
 
                     if (total <= 0) {
-                        Log.w("MW_DEBUG", "[$prefsName] No images found. Aborting.")
                         synchronized(bitmapLock) { recycleBitmaps() }
                         return@launch
                     }
@@ -1506,9 +1532,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         }
                         if (firstBitmap != null) {
                             addToHistory(visibleUri)
-                            val now = System.currentTimeMillis()
-                            lastRotationTime = now
-                            getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().putLong("last_rotation_time", now).apply()
+                            val nowTime = System.currentTimeMillis()
+                            lastRotationTime = nowTime
+                            getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().putLong("last_rotation_time", nowTime).apply()
                         }
                         // SHOW FIRST IMAGE IMMEDIATELY
                         isLoading = false
@@ -1537,7 +1563,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         // After loading the FIRST chunk (immediate neighbors), if the phone just started (< 3 mins),
                         // wait 10 seconds to let the system finish its startup tasks.
                         if (chunkIndex == 1 && android.os.SystemClock.elapsedRealtime() < 180000) {
-                            Log.d("MultiWallpaper", "Reboot startup detected: Delaying remaining background pages 10s...")
                             delay(10000)
                         }
 
@@ -1604,10 +1629,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         }
                     }
                 } catch (t: Throwable) { 
-                    Log.e("MultiWallpaper", "Loading failed", t)
+                    Log.e("MW_DEBUG", "[$prefsName] Loading failed", t)
                 } finally {
                     withContext(Dispatchers.Main) {
                         isLoading = false
+                        Log.d("MW_DEBUG", "[$prefsName] mainLoadJob FINISHED. isLoading set to false.")
                         requestDraw()
                     }
                 }
