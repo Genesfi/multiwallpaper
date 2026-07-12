@@ -109,6 +109,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var swipeOffset = 0f // Current drag progress (-1.0 to 1.0)
         private var isSwipeAnimating = false
         private var swipeAnimJob: Job? = null
+        private var velocityTracker: android.view.VelocityTracker? = null
 
         private var lastTapTime: Long = 0
         private val doubleTapThreshold = 500L
@@ -813,35 +814,36 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val numBitmaps = pageBitmaps.size
             if (numBitmaps <= 0) return
 
+            if (velocityTracker == null) {
+                velocityTracker = android.view.VelocityTracker.obtain()
+            }
+            velocityTracker?.addMovement(event)
+
             val action = event.actionMasked
             when (action) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     lastX = event.x
                     lastY = event.y
                     isSwiping = true
-                    swipeAnimJob?.cancel() // Stop any ongoing animation immediately
+                    swipeAnimJob?.cancel()
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
                     if (isSwiping && isStaticLauncher && transitionType == "fade") {
-                        // Track drag distance relative to screen width
                         swipeOffset = (event.x - lastX) / surfaceWidth.toFloat()
                         requestDraw()
                     }
                 }
                 android.view.MotionEvent.ACTION_POINTER_DOWN -> {
-                    // TWO-FINGER TAP DETECTION WITH DEBOUNCE (150ms)
                     if (event.pointerCount == 2) {
                         handler.postDelayed(blacklistRunnable, 150)
                     } else if (event.pointerCount > 2) {
-                        // 3rd finger detected (like screenshot), cancel immediately
                         handler.removeCallbacks(blacklistRunnable)
                     }
                 }
                 android.view.MotionEvent.ACTION_POINTER_UP -> {
-                    // Jari diangkat sebelum 150ms, batalkan
                     handler.removeCallbacks(blacklistRunnable)
                 }
-                android.view.MotionEvent.ACTION_UP -> {
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                     handler.removeCallbacks(blacklistRunnable)
                     isSwiping = false
                     
@@ -851,36 +853,72 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     
                     val deltaX = event.x - lastX
                     val deltaY = event.y - lastY
-                    val isSwipe = kotlin.math.abs(deltaX) > swipeThreshold && kotlin.math.abs(deltaX) > kotlin.math.abs(deltaY) * 1.5f
+                    
+                    // 1. DIRECTION CHECK: Sudut harus lebih horizontal (maks 30 derajat)
+                    // Agar tidak bentrok dengan scroll widget vertikal
+                    val isHorizontal = kotlin.math.abs(deltaX) > kotlin.math.abs(deltaY) * 1.73f // tan(60deg)
+                    
+                    // 2. VELOCITY CHECK (FLICK): Cek kecepatan sentilan
+                    velocityTracker?.computeCurrentVelocity(1000)
+                    val xVelocity = velocityTracker?.xVelocity ?: 0f
+                    val isFlick = kotlin.math.abs(xVelocity) > 1500f // Threshold kecepatan sentilan
+                    
+                    // 3. DISTANCE THRESHOLD: 45% Lebar Layar
+                    val distanceRatio = kotlin.math.abs(deltaX) / surfaceWidth.toFloat()
+                    val isLongSwipe = distanceRatio > 0.45f
 
-                    if (doubleTapEnabled && !isSwipe && (currTime - lastTapTime) < doubleTapThreshold) {
-                        rotateWallpapers() // Trigger change
+                    val shouldRotate = isHorizontal && (isFlick || isLongSwipe)
+
+                    if (doubleTapEnabled && !shouldRotate && distanceRatio < 0.05f && (currTime - lastTapTime) < doubleTapThreshold) {
+                        rotateWallpapers()
                         lastTapTime = 0
                         swipeOffset = 0f
                         requestDraw()
                     } else {
                         lastTapTime = currTime
                         
-                if (isSwipe && detectedPages > 1) {
+                        if (shouldRotate && detectedPages > 1) {
                             val isPrev = deltaX > 0
                             if (isPrev) {
                                 manualPageIndex = if (manualPageIndex > 0) manualPageIndex - 1 else detectedPages - 1
-                                // Adjusted: keep visual continuity by shifting swipeOffset
                                 swipeOffset = -1f + swipeOffset
                             } else {
                                 manualPageIndex = if (manualPageIndex < detectedPages - 1) manualPageIndex + 1 else 0
-                                // Adjusted: keep visual continuity by shifting swipeOffset
                                 swipeOffset = 1f + swipeOffset
                             }
-                            
-                            // SMOOTH ANIMATION: Instead of snapping, animate the remaining distance
                             animateSwipeCompletion()
                         } else {
-                            swipeOffset = 0f
-                            requestDraw()
+                            // CANCEL SWIPE: Balikkan ke posisi awal jika syarat tidak terpenuhi
+                            animateSwipeCancel()
                         }
                     }
+                    
+                    velocityTracker?.recycle()
+                    velocityTracker = null
                 }
+            }
+        }
+
+        private fun animateSwipeCancel() {
+            swipeAnimJob?.cancel()
+            swipeAnimJob = engineScope.launch {
+                isSwipeAnimating = true
+                val startOffset = swipeOffset
+                
+                // Map fadeSpeed to duration (matching rotateWallpapers logic)
+                val duration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L) / 2L // Half duration for cancel
+                val startTime = System.currentTimeMillis()
+                
+                while (System.currentTimeMillis() - startTime < duration) {
+                    val elapsed = System.currentTimeMillis() - startTime
+                    val progress = interpolator.getInterpolation(elapsed.toFloat() / duration)
+                    swipeOffset = startOffset * (1f - progress)
+                    requestDraw()
+                    delay(16)
+                }
+                swipeOffset = 0f
+                isSwipeAnimating = false
+                requestDraw()
             }
         }
 
@@ -890,7 +928,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 isSwipeAnimating = true
                 val startOffset = swipeOffset
                 
-                val duration = 400L // Slightly longer for smoother feel
+                // Map fadeSpeed to duration (matching rotateWallpapers logic)
+                val duration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L)
                 val startTime = System.currentTimeMillis()
                 
                 while (System.currentTimeMillis() - startTime < duration) {
@@ -1610,44 +1649,50 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 if (!isActive) return@async
                                 
                                 var selectedUri: String? = null
-                                synchronized(uriCandidates) { // Sync on the candidate list
-                                    if (uriCandidates.isNotEmpty()) {
-                                        // Try to pick one that respects smart adjacency
-                                        var candIdx = -1
-                                        val prevPageUri = synchronized(pageUris) { pageUris[p - 1] }
-                                        val prevPageFolder = prevPageUri?.let { Uri.parse(it).path?.substringBeforeLast('/') }
-                                        
-                                        if (smartAdjacencyEnabled && prevPageFolder != null) {
-                                            candIdx = uriCandidates.indexOfFirst { 
-                                                Uri.parse(it).path?.substringBeforeLast('/') != prevPageFolder 
+                                try {
+                                    synchronized(uriCandidates) { // Sync on the candidate list
+                                        if (uriCandidates.isNotEmpty()) {
+                                            // Try to pick one that respects smart adjacency
+                                            var candIdx = -1
+                                            val prevPageUri = synchronized(pageUris) { pageUris[p - 1] }
+                                            val prevPageFolder = prevPageUri?.let { Uri.parse(it).path?.substringBeforeLast('/') }
+                                            
+                                            if (smartAdjacencyEnabled && prevPageFolder != null) {
+                                                candIdx = uriCandidates.indexOfFirst { 
+                                                    Uri.parse(it).path?.substringBeforeLast('/') != prevPageFolder 
+                                                }
+                                            }
+                                            
+                                            selectedUri = if (candIdx != -1) {
+                                                uriCandidates.removeAt(candIdx)
+                                            } else {
+                                                uriCandidates.removeAt(0)
                                             }
                                         }
-                                        
-                                        selectedUri = if (candIdx != -1) {
-                                            uriCandidates.removeAt(candIdx)
-                                        } else {
-                                            uriCandidates.removeAt(0)
-                                        }
                                     }
-                                }
 
-                                val uri = selectedUri ?: return@async
-                                val b = decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight, isBackground = true)
-                                
-                                if (b != null) {
-                                    if (!isActive) { b.recycle(); return@async }
-                                    val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
-                                    withContext(Dispatchers.Main) {
-                                        synchronized(bitmapLock) {
-                                            val old = pageBitmaps[p]
-                                            pageBitmaps[p] = b
-                                            synchronized(pageUris) { pageUris[p] = uri }
-                                            pageFocalPoints[p] = focal
-                                            old?.recycle()
+                                    val uri = selectedUri ?: return@async
+                                    val b = decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight, isBackground = true)
+                                    
+                                    if (b != null) {
+                                        if (!isActive) { b.recycle(); return@async }
+                                        val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
+                                        withContext(Dispatchers.Main) {
+                                            synchronized(bitmapLock) {
+                                                val old = pageBitmaps[p]
+                                                pageBitmaps[p] = b
+                                                synchronized(pageUris) { pageUris[p] = uri }
+                                                pageFocalPoints[p] = focal
+                                                old?.recycle()
+                                            }
+                                            requestDraw()
                                         }
-                                        requestDraw()
+                                        addToHistory(uri)
                                     }
-                                    addToHistory(uri)
+                                } catch (e: Exception) {
+                                    if (e !is kotlinx.coroutines.CancellationException) {
+                                        Log.e("MW_DEBUG", "Page $p load failed: ${e.message}")
+                                    }
                                 }
                             }
                         }
@@ -1665,8 +1710,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             preloadNextWallpaper()
                         }
                     }
-                } catch (t: Throwable) { 
-                    Log.e("MW_DEBUG", "[$prefsName] Loading failed", t)
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) {
+                        // Silent cancellation is normal
+                    } else {
+                        Log.e("MW_DEBUG", "[$prefsName] Loading failed: ${e.message}")
+                    }
                 } finally {
                     withContext(Dispatchers.Main) {
                         isLoading = false
