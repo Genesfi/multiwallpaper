@@ -1721,11 +1721,26 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 
                 Spacer(modifier = Modifier.height(16.dp))
                 Text("Transition Effect", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { viewModel.setTransitionType("slide") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "slide") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Slide", fontSize = 11.sp) }
-                    Button(onClick = { viewModel.setTransitionType("fade") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "fade") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Fade", fontSize = 11.sp) }
-                    Button(onClick = { viewModel.setTransitionType("tumble") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "tumble") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Tumble", fontSize = 11.sp) }
-                    Button(onClick = { viewModel.setTransitionType("cut") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "cut") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Cut", fontSize = 11.sp) }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp).horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf("slide" to "Slide", "fade" to "Fade", "tumble" to "Tumble", "cut" to "Cut").forEach { (type, label) ->
+                        val selected = transition == type
+                        FilterChip(
+                            selected = selected,
+                            onClick = { viewModel.setTransitionType(type) },
+                            label = { Text(label, fontSize = 11.sp) },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                selectedLabelColor = MaterialTheme.colorScheme.primary,
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            border = null
+                        )
+                    }
                 }
                 
                 if (transition != "cut") {
@@ -1742,21 +1757,22 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text("Rotation Order", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                 Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { viewModel.setRotationSortOrder("RANDOM") }, 
-                        modifier = Modifier.weight(1f), 
-                        shape = RoundedCornerShape(12.dp), 
-                        colors = ButtonDefaults.buttonColors(containerColor = if (sortOrder == "RANDOM") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, contentColor = if (sortOrder == "RANDOM") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-                    ) { 
-                        Text("Random") 
-                    }
-                    Button(
-                        onClick = { viewModel.setRotationSortOrder("FOLDER") }, 
-                        modifier = Modifier.weight(1f), 
-                        shape = RoundedCornerShape(12.dp), 
-                        colors = ButtonDefaults.buttonColors(containerColor = if (sortOrder == "FOLDER") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, contentColor = if (sortOrder == "FOLDER") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-                    ) { 
-                        Text("By Folder") 
+                    listOf("RANDOM" to "Random", "FOLDER" to "By Folder").forEach { (type, label) ->
+                        val selected = sortOrder == type
+                        FilterChip(
+                            selected = selected,
+                            onClick = { viewModel.setRotationSortOrder(type) },
+                            label = { Text(label, fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                selectedLabelColor = MaterialTheme.colorScheme.primary,
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            border = null
+                        )
                     }
                 }
                 if (sortOrder == "FOLDER") {
@@ -1767,7 +1783,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 var showCooldownDialog by remember { mutableStateOf(false) }
                 val autoLimitEnabled by viewModel.autoLimitEnabled.collectAsState()
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Rotation History Limit", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                         TextButton(onClick = { showCooldownDialog = true }, contentPadding = PaddingValues(0.dp)) {
@@ -1775,31 +1791,45 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                         }
                     }
                     
-                    Column(horizontalAlignment = Alignment.End) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Auto", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.width(4.dp))
-                            Switch(
-                                checked = autoLimitEnabled,
-                                onCheckedChange = { viewModel.setAutoLimitEnabled(it) },
-                                modifier = Modifier.graphicsLayer(scaleX = 0.7f, scaleY = 0.7f)
-                            )
-                        }
-                        OutlinedTextField(
-                            value = if (autoLimitEnabled) "AUTO" else historyLimit.toString(),
-                            onValueChange = { 
-                                if (!autoLimitEnabled) {
-                                    val v = it.toIntOrNull() ?: 0
-                                    viewModel.setHistoryLimit(v.coerceIn(0, 8000))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
+                        Column(horizontalAlignment = Alignment.End) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Auto", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(Modifier.width(4.dp))
+                                Switch(
+                                    checked = autoLimitEnabled,
+                                    onCheckedChange = { viewModel.setAutoLimitEnabled(it) },
+                                    modifier = Modifier.graphicsLayer(scaleX = 0.7f, scaleY = 0.7f)
+                                )
+                            }
+                            
+                            Box(modifier = Modifier.width(90.dp).height(42.dp)) {
+                                if (autoLimitEnabled) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier.fillMaxSize()
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text("AUTO", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                } else {
+                                    OutlinedTextField(
+                                        value = historyLimit.toString(),
+                                        onValueChange = { 
+                                            val v = it.toIntOrNull() ?: 0
+                                            viewModel.setHistoryLimit(v.coerceIn(0, 8000))
+                                        },
+                                        modifier = Modifier.fillMaxSize(),
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        singleLine = true,
+                                        textStyle = MaterialTheme.typography.bodyMedium.copy(textAlign = TextAlign.Center),
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
                                 }
-                            },
-                            modifier = Modifier.width(90.dp),
-                            enabled = !autoLimitEnabled,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium,
-                            shape = RoundedCornerShape(12.dp)
-                        )
+                            }
+                        }
                     }
                 }
                 
@@ -1826,19 +1856,24 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             listOf("NONE" to "Off", "GRAYSCALE" to "B&W", "DUOTONE" to "2-tone", "TRITONE" to "3-tone").forEach { (type, label) ->
                                 val selected = filterType == type
                                 FilterChip(
                                     selected = selected,
                                     onClick = { viewModel.setFilterType(type) },
                                     label = { Text(label, fontSize = 11.sp) },
-                                    modifier = Modifier.weight(1f),
                                     shape = RoundedCornerShape(8.dp),
                                     colors = FilterChipDefaults.filterChipColors(
                                         selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
-                                        selectedLabelColor = MaterialTheme.colorScheme.primary
-                                    )
+                                        selectedLabelColor = MaterialTheme.colorScheme.primary,
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                    ),
+                                    border = null
                                 )
                             }
                         }

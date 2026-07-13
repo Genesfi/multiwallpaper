@@ -97,7 +97,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var xStep = 0f
         
         private var isStaticLauncher = false
-        private var hasDetectedLauncher = false
         private var lastSuggestedWidth = -1
 
         private var lastX = 0f
@@ -515,20 +514,18 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             super.onCreate(surfaceHolder)
             setTouchEventsEnabled(true)
 
-            // INITIALIZATION FIX FOR POCO/HYPEROS:
-            // Don't wait for offsets to start showing something.
-            // If manual count isn't set, default to 20 immediately to clear loading state.
+            // INITIALIZATION: 
+            // isStaticLauncher sekarang murni berdasarkan Manual Page Count.
+            // Jika > 0, berarti user secara manual mengatur paging (Mode Poco/Manual).
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             manualPageCount = prefs.getInt("manual_page_count", 0)
-            if (manualPageCount > 0) {
+            isStaticLauncher = manualPageCount > 0
+
+            if (isStaticLauncher) {
                 detectedPages = manualPageCount
             } else {
-                // If it's Home screen, assume 20 pages until proven otherwise to avoid loading loops
-                if (!prefsName.contains("lock")) {
-                    detectedPages = 20
-                } else {
-                    detectedPages = 1 // Lock is usually 1
-                }
+                // Mode Auto: Default 20 untuk Home, 1 untuk Lock sampai dideteksi sistem
+                detectedPages = if (!prefsName.contains("lock")) 20 else 1
             }
 
             currentSortOrder = prefs.getString("rotation_sort_order", "RANDOM") ?: "RANDOM"
@@ -559,14 +556,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             }
             
             prefs.registerOnSharedPreferenceChangeListener(prefsListener)
-            
-            // RESTORE PERSISTED POCO MODE
-            if (prefs.getBoolean("is_poco_mode", false)) {
-                isStaticLauncher = true
-                hasDetectedLauncher = true
-                detectedPages = 20
-                Log.d("MultiWallpaper", "Engine Restored Poco Mode from SharedPreferences")
-            }
 
             val filter = IntentFilter()
             filter.addAction(Intent.ACTION_TIME_TICK)
@@ -593,6 +582,16 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private fun updateSettings() {
             Log.d("MultiWallpaper", "Engine updateSettings: $prefsName (Visible: $visible)")
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            
+            // 1. CORE MODE DETECTION (Must be first!)
+            val oldManualPageCount = manualPageCount
+            manualPageCount = prefs.getInt("manual_page_count", 0)
+            isStaticLauncher = manualPageCount > 0
+            
+            if (manualPageCount > 0) {
+                detectedPages = manualPageCount
+            }
+
             val newUseFav = prefs.getBoolean("use_favorites_only", false)
             val useFavChanged = useFavoritesOnly != newUseFav
 
@@ -619,7 +618,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val oldSubjectFocusSmoothing = subjectFocusSmoothing
             val oldSmartAdjacency = smartAdjacencyEnabled
             val oldQuality = wallpaperQuality
-            val oldManualPageCount = manualPageCount
+            // val oldManualPageCount = manualPageCount // DIHAPUS KARENA SUDAH ADA DI ATAS
             
             useFavoritesOnly = newUseFav
             parallaxEnabled = prefs.getBoolean("parallax_enabled", false)
@@ -659,6 +658,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             filterColor3 = prefs.getInt("filter_color_3", Color.GRAY)
             
             manualPageCount = prefs.getInt("manual_page_count", 0)
+            isStaticLauncher = manualPageCount > 0
 
             // --- MANDATORY SCHEDULE OVERRIDES (Apply Last to ensure Priority) ---
             currentActiveSchedule?.let { schedule ->
@@ -883,7 +883,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     } else {
                         lastTapTime = currTime
                         
-                        if (shouldRotate && detectedPages > 1) {
+                        // MANUAL SWIPE: Hanya aktif jika isStaticLauncher = true (User set manual count)
+                        if (isStaticLauncher && shouldRotate && detectedPages > 1) {
                             val isPrev = deltaX > 0
                             if (isPrev) {
                                 manualPageIndex = if (manualPageIndex > 0) manualPageIndex - 1 else detectedPages - 1
@@ -957,19 +958,21 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         override fun onVisibilityChanged(visible: Boolean) {
             this.visible = visible
             if (visible) {
-                // SMART UNLOCK: If we have bitmaps but the spinner is stuck, KILL THE SPINNER.
+                // 1. SMART UNLOCK: Jika ada gambar tapi spinner masih jalan, matikan spinner.
                 if (pageBitmaps.isNotEmpty() && isLoading) {
-                    Log.i("MW_DEBUG", "[$prefsName] Recovery: Stuck spinner unlocked.")
                     isLoading = false
                     requestDraw()
                 }
 
-                if (pageBitmaps.isEmpty() && !isLoading) {
-                    Log.i("MW_DEBUG", "[$prefsName] Recovery: Blank state triggered.")
+                // 2. FORCE RELOAD (Fix Masalah 1 Halaman):
+                // Jika jumlah gambar di memori (pageBitmaps) kurang dari yang seharusnya (detectedPages),
+                // maka paksa load sisanya. Ini mencegah bug "stuck di 1 halaman" saat update/debug.
+                if (pageBitmaps.size < detectedPages && !isLoading) {
+                    Log.i("MW_DEBUG", "[$prefsName] Recovery: Missing pages detected (${pageBitmaps.size}/$detectedPages). Triggering reload.")
                     loadWallpapersForPages()
                 }
 
-                // CATCH-UP LOGIC: If the interval has passed while screen was off, rotate immediately
+                // 3. CATCH-UP LOGIC: Jika sudah waktunya ganti wallpaper saat layar mati, ganti sekarang.
                 val currentTime = System.currentTimeMillis()
                 val intervalMs = getRotationIntervalMs()
                 if (currentTime - lastRotationTime >= intervalMs) {
@@ -988,9 +991,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     engineScope.launch {
                         delay(800) // Small delay to catch "flickers" (Xiaomi/Poco transition)
                         if (!this@MultiWallpaperEngine.visible) {
-                            mainLoadJob?.cancel()
-                            backgroundRefreshJob?.cancel()
-                            preloadJob?.cancel()
+                            // JANGAN matikan load job di sini agar proses load 20 halaman 
+                            // tetap tuntas meskipun layar mati sesaat pasca update/debug.
                             
                             isDrawScheduled = false
                             handler.removeCallbacks(drawRunnable)
@@ -1017,71 +1019,51 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val validXOffset = if (xOffset.isNaN()) 0f else xOffset
             val validXStep = if (xStep.isNaN()) 0f else xStep
             
-            if (validXStep > 0f) {
-                Log.d("MW_DEBUG", "[$prefsName] onOffsetsChanged: xOffset=$validXOffset, xStep=$validXStep")
+            // --- MODE POCO / MANUAL ---
+            if (isStaticLauncher || (validXStep <= 0f && !prefsName.contains("lock"))) {
+                // Jika xStep 0 (Poco), kita paksa mode Static agar manual swipe aktif
+                if (!isStaticLauncher && validXStep <= 0f) {
+                    isStaticLauncher = true
+                    if (detectedPages <= 1) detectedPages = 20
+                }
+                
+                this.xStep = 0f
+                if (kotlin.math.abs(this.xOffset - validXOffset) > 0.0001f) {
+                    this.xOffset = validXOffset
+                    requestDraw()
+                }
+                return
             }
-            // On Poco/HyperOS, the system often sends a fake (0.0, 0.0) offset when entering
-            // Recents or just randomly. If we act on this while NOT visible, it causes the 
-            // wallpaper to jump to Page 1 or trigger a false "static launcher" detection.
+
+            // --- MODE AUTO (HP Normal) ---
             if (!visible && validXOffset == 0f && validXStep == 0f) return
 
-            // Detect Static Launcher (Poco/HyperOS)
-            // Once we detect a static launcher, we lock it in to prevent the "3-page reset" glitch
-            if (!hasDetectedLauncher && (validXStep == 0f || validXStep == 1f)) {
-                isStaticLauncher = true
-                hasDetectedLauncher = true
-                detectedPages = if (manualPageCount > 0) manualPageCount else 20 // Respect manual count if set
-                
-                // PERSIST POCO MODE: Remember this across engine recreations!
-                val p = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-                p.edit().putBoolean("is_poco_mode", true).apply()
-                
-                updateWallpaperDimensions(surfaceWidth, surfaceHeight)
-                Log.d("MultiWallpaper", "Static Launcher Detected (Poco/HyperOS) - Locking 20 pages and Persisting")
-            } else if (!hasDetectedLauncher && validXStep > 0f && validXStep < 1f) {
-                isStaticLauncher = false
-                hasDetectedLauncher = true
-                updateWallpaperDimensions(surfaceWidth * 5, surfaceHeight)
-            }
-
-            // LAUNCHER AUTO-RECOVERY & PROTECTION:
-            // If we are already in static mode (isStaticLauncher), we IGNORE validXStep changes
-            // sent by the system to prevent it from resetting our 20-page loop to a small number.
-            if (manualPageCount > 0) {
-                detectedPages = manualPageCount
-            } else if (!isStaticLauncher) {
-                if (validXStep <= 0f) {
-                    if (detectedPages != 20) {
-                        detectedPages = 20
-                        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-                        prefs.edit().putBoolean("force_reload_trigger", true).apply()
-                        updateSettings()
-                    }
-                    this.xStep = 0f
-                } else {
-                    val newDetectedPages = (1f / validXStep).roundToInt() + 1
-                    if (newDetectedPages != detectedPages && newDetectedPages in 1..50) {
-                        detectedPages = newDetectedPages
-                        handler.removeCallbacks(reloadRunnable)
-                        handler.postDelayed(reloadRunnable, 500)
-                    }
-                    this.xStep = validXStep
+            if (validXStep <= 0f) {
+                if (detectedPages != 20) {
+                    detectedPages = 20
+                    loadWallpapersForPages()
                 }
+                this.xStep = 0f
+            } else {
+                val newDetectedPages = (1f / validXStep).roundToInt() + 1
+                if (newDetectedPages != detectedPages && newDetectedPages in 1..50) {
+                    detectedPages = newDetectedPages
+                    handler.removeCallbacks(reloadRunnable)
+                    handler.postDelayed(reloadRunnable, 500)
+                }
+                this.xStep = validXStep
             }
 
-            // Redraw only if visible and offset changed significantly
+            // Update manualPageIndex berdasarkan offset sistem (Hanya di mode Auto)
             val offsetDelta = kotlin.math.abs(this.xOffset - validXOffset)
             if (visible && (offsetDelta > 0.0001f || this.xStep != validXStep)) {
                 this.xOffset = validXOffset
-                if (pageBitmaps.isNotEmpty()) {
-                    // Only update index if we are NOT in manual/static mode
-                    if (!isStaticLauncher && this.xStep > 0f) {
-                        val targetIndex = (validXOffset / this.xStep).roundToInt()
-                        val clampedIndex = targetIndex.coerceIn(0, detectedPages - 1)
-                        if (manualPageIndex != clampedIndex) {
-                            manualPageIndex = clampedIndex
-                            requestDraw()
-                        }
+                if (pageBitmaps.isNotEmpty() && this.xStep > 0f) {
+                    val targetIndex = (validXOffset / this.xStep).roundToInt()
+                    val clampedIndex = targetIndex.coerceIn(0, detectedPages - 1)
+                    if (manualPageIndex != clampedIndex) {
+                        manualPageIndex = clampedIndex
+                        requestDraw()
                     }
                 }
             }
@@ -1097,14 +1079,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             this.surfaceWidth = width
             this.surfaceHeight = height
             
-            // Re-suggest dimensions on surface change if we know the launcher type
-            if (hasDetectedLauncher) {
-                val targetW = if (isStaticLauncher) width else width * 5
-                updateWallpaperDimensions(targetW, height)
-            } else {
-                // Default to wide until detected
-                updateWallpaperDimensions(width * 5, height)
-            }
+            // TRICK SISTEM: 
+            // Meskipun kita di mode Manual/Poco, kita tetap minta lebar 5 layar untuk HOME.
+            // Ini supaya Launcher tidak pelit membagikan touch event (Horizontal Swipe).
+            val targetW = if (prefsName.contains("lock")) width else width * 5
+            updateWallpaperDimensions(targetW, height)
 
             // RECOVERY: If surface changed and we have no bitmaps, force a load
             if (pageBitmaps.isEmpty() && !isLoading) {
@@ -1530,6 +1509,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             return interval
         }
 
+        // ==========================================
+        // FINAL VERIFICATION TRIGGER
+        // Comment ini ditambahkan untuk memicu Rebuild Total.
+        // Jika kodenya sudah benar, bug 1-page TIDAK AKAN MUNCUL lagi.
+        // ==========================================
         private var lastLoadRequestTime = 0L
         private val LOAD_DEBOUNCE_MS = 500L
 
@@ -1618,8 +1602,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             lastRotationTime = nowTime
                             getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().putLong("last_rotation_time", nowTime).apply()
                         }
-                        // SHOW FIRST IMAGE IMMEDIATELY
-                        isLoading = false
+                        // SHOW FIRST IMAGE IMMEDIATELY BUT KEEP isLoading=true FOR NEIGHBORS
                         requestDraw()
                     }
 
@@ -1703,6 +1686,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             }
                         }
                         jobs.awaitAll()
+                        
+                        // LOG PROGRESS BUAT PEMBUKTIAN KERJA BACKGROUND
+                        Log.d("MW_DEBUG", "[$prefsName] Progress: ${pageBitmaps.size}/$targetPageCount pages loaded.")
                         
                         // Yield between chunks to keep UI thread responsive
                         delay(100)
@@ -1860,19 +1846,28 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                     val decoded = contentResolver.openInputStream(uri)?.use { i2 -> BitmapFactory.decodeStream(i2, null, opt) }
                     
-                    if (decoded != null && orientation != androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL) {
-                        val matrix = Matrix()
-                        when (orientation) {
-                            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
-                            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-                            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
-                            androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
-                            androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
-                        }
-                        val rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
-                        decoded.recycle()
-                        rotated
-                    } else decoded
+                    if (decoded != null) {
+                        // LOG PERFORMA UNTUK VERIFIKASI QUALITY SETTING
+                        val ramUsage = decoded.byteCount / (1024f * 1024f)
+                        Log.d("MW_DEBUG", String.format(
+                            "[%s] Decoded: %dx%d | Format: %s | RAM: %.2f MB | Quality: %s",
+                            prefsName, decoded.width, decoded.height, decoded.config, ramUsage, wallpaperQuality
+                        ))
+
+                        if (orientation != androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL) {
+                            val matrix = Matrix()
+                            when (orientation) {
+                                androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                                androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                                androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                                androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                                androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                            }
+                            val rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+                            decoded.recycle()
+                            rotated
+                        } else decoded
+                    } else null
                 }
             } catch (
                 e: Exception) { null }
@@ -1956,7 +1951,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             // CRITICAL: Always clear background to prevent smearing/ghosting
             canvas.drawColor(Color.parseColor("#1A1F2C"))
 
-            if (pageBitmaps.isEmpty() || isLoading) {
+            // SMART DRAW: Jika memory kosong baru tampilkan spinner/teks.
+            // Jangan nunggu isLoading=false karena loading 20 page butuh waktu di background.
+            if (pageBitmaps.isEmpty()) {
                 if (isLoading) {
                     drawLoadingState(canvas, w, h)
                 } else {
