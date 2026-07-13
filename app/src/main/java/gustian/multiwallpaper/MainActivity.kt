@@ -1722,13 +1722,15 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text("Transition Effect", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                 Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { viewModel.setTransitionType("slide") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "slide") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Slide") }
-                    Button(onClick = { viewModel.setTransitionType("fade") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "fade") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Fade") }
+                    Button(onClick = { viewModel.setTransitionType("slide") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "slide") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Slide", fontSize = 11.sp) }
+                    Button(onClick = { viewModel.setTransitionType("fade") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "fade") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Fade", fontSize = 11.sp) }
+                    Button(onClick = { viewModel.setTransitionType("tumble") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "tumble") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Tumble", fontSize = 11.sp) }
+                    Button(onClick = { viewModel.setTransitionType("cut") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp), colors = ButtonDefaults.buttonColors(containerColor = if (transition == "cut") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)) { Text("Cut", fontSize = 11.sp) }
                 }
                 
-                if (transition == "fade") {
+                if (transition != "cut") {
                     Spacer(modifier = Modifier.height(16.dp))
-                    Text("Fade Speed", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Text("Transition Speed", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                     Slider(
                         value = fadeSpeed.toFloat(),
                         onValueChange = { viewModel.setFadeSpeed(it.roundToInt()) },

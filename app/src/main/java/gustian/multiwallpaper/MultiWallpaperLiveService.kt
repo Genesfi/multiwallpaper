@@ -495,9 +495,15 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
         // Persistent Face Detector to avoid reloading models (saves massive RAM/CPU)
         private var faceDetector: com.google.mlkit.vision.face.FaceDetector? = null
+        
+        // 3D Perspective tools
+        private val camera3D = android.graphics.Camera()
+        private val matrix3D = android.graphics.Matrix()
 
         // RenderNode for high-performance visual effects (Blur/Dim) on Android 12+
         private var visualEffectNode: android.graphics.RenderNode? = null
+        private var leftTumbleNode: android.graphics.RenderNode? = null
+        private var rightTumbleNode: android.graphics.RenderNode? = null
 
         private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             updateSettings()
@@ -828,7 +834,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     swipeAnimJob?.cancel()
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
-                    if (isSwiping && isStaticLauncher && transitionType == "fade") {
+                    if (isSwiping && isStaticLauncher && transitionType != "cut") {
                         swipeOffset = (event.x - lastX) / surfaceWidth.toFloat()
                         requestDraw()
                     }
@@ -1946,11 +1952,14 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
         private fun drawCanvas(canvas: Canvas) {
             val w = canvas.width; val h = canvas.height
+            
+            // CRITICAL: Always clear background to prevent smearing/ghosting
+            canvas.drawColor(Color.parseColor("#1A1F2C"))
+
             if (pageBitmaps.isEmpty() || isLoading) {
                 if (isLoading) {
                     drawLoadingState(canvas, w, h)
                 } else {
-                    canvas.drawColor(Color.parseColor("#1A1F2C"))
                     canvas.drawText("Select folders in App", w / 2f, h / 2f, textPaint)
                 }
                 return
@@ -2017,6 +2026,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                     // Record drawing into the Node
                     val recordingCanvas = node.beginRecording()
+                    // REMOVED solid drawColor here to allow transparency for Tumble Aura
                     drawWallpaperContent(recordingCanvas, w, h, isFluid, pos, idx)
                     node.endRecording()
 
@@ -2181,25 +2191,42 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
             val maxIdx = (detectedPages - 1).coerceAtLeast(0)
 
-            // Priority 1: Auto-Rotation Fade
+            // Priority 1: Auto-Rotation Transitions
             if (isTransitioning && nextBitmap != null && !nextBitmap!!.isRecycled) {
                 val curr = pageBitmaps[manualPageIndex]
                 if (curr != null && !curr.isRecycled) {
                     val currFocal = if (smartCropEnabled) pageFocalPoints[manualPageIndex] else null
-                    calculateRects(curr, w, h, srcRect, dstRect, currFocal)
-                    canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
                     
-                    val oldAlpha = bitmapPaint.alpha
-                    bitmapPaint.alpha = transitionAlpha
-                    calculateRects(nextBitmap!!, w, h, nextSrcRect, nextDstRect, nextFocalPoint)
-                    canvas.drawBitmap(nextBitmap!!, nextSrcRect, nextDstRect, bitmapPaint)
-                    bitmapPaint.alpha = oldAlpha
+                    if (transitionType == "fade") {
+                        calculateRects(curr, w, h, srcRect, dstRect, currFocal)
+                        canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
+                        
+                        val oldAlpha = bitmapPaint.alpha
+                        bitmapPaint.alpha = transitionAlpha
+                        calculateRects(nextBitmap!!, w, h, nextSrcRect, nextDstRect, nextFocalPoint)
+                        canvas.drawBitmap(nextBitmap!!, nextSrcRect, nextDstRect, bitmapPaint)
+                        bitmapPaint.alpha = oldAlpha
+                    } else if (transitionType == "slide") {
+                        val progress = transitionAlpha.toFloat() / 255f
+                        calculateRects(curr, w, h, srcRect, dstRect, currFocal)
+                        dstRect.offset(-progress * w, 0f)
+                        canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
+                        
+                        calculateRects(nextBitmap!!, w, h, nextSrcRect, nextDstRect, nextFocalPoint)
+                        nextDstRect.offset((1f - progress) * w, 0f)
+                        canvas.drawBitmap(nextBitmap!!, nextSrcRect, nextDstRect, bitmapPaint)
+                    } else if (transitionType == "tumble") {
+                        val progress = transitionAlpha.toFloat() / 255f
+                        drawTumbleTransition(canvas, curr, nextBitmap!!, w, h, currFocal, nextFocalPoint, progress)
+                    } else { // "cut" or default
+                        drawSingleBitmap(canvas, nextBitmap!!, w, h, -1) // -1 use nextFocalPoint
+                    }
                     return
                 }
             }
 
-            // Priority 2: Manual Swipe Fade
-            if (transitionType == "fade" && isFluid) {
+            // Priority 2: Manual Swipe Transitions
+            if (isFluid) {
                 val l = pos.toInt().coerceIn(0, maxIdx)
                 val r = (l + 1).coerceAtMost(maxIdx)
                 val f = pos - l
@@ -2213,16 +2240,29 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     calculateRects(lb, w, h, srcRect, dstRect, lf)
                     calculateRects(rb, w, h, nextSrcRect, nextDstRect, rf)
 
-                    val oldAlpha = bitmapPaint.alpha
-                    bitmapPaint.alpha = ((1f - f) * 255).toInt()
-                    canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
-                    
-                    bitmapPaint.alpha = (f * 255).toInt()
-                    canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
-                    bitmapPaint.alpha = oldAlpha
+                    if (transitionType == "fade") {
+                        val oldAlpha = bitmapPaint.alpha
+                        bitmapPaint.alpha = ((1f - f) * 255).toInt()
+                        canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
+                        
+                        bitmapPaint.alpha = (f * 255).toInt()
+                        canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
+                        bitmapPaint.alpha = oldAlpha
+                    } else if (transitionType == "slide") {
+                        dstRect.offset(-f * w, 0f)
+                        canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
+                        
+                        nextDstRect.offset((1f - f) * w, 0f)
+                        canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
+                    } else if (transitionType == "tumble") {
+                        drawTumbleTransition(canvas, lb, rb, w, h, lf, rf, f)
+                    } else { // "cut"
+                        val clampedIdx = idx.coerceIn(0, maxIdx)
+                        val activeB = pageBitmaps[clampedIdx]
+                        if (activeB != null) drawSingleBitmap(canvas, activeB, w, h, clampedIdx)
+                    }
                     return
                 } else if (lb != null && !lb.isRecycled) {
-                    // Fallback to single page if neighbor missing, prevents flicker
                     drawSingleBitmap(canvas, lb, w, h, l)
                     return
                 } else if (rb != null && !rb.isRecycled) {
@@ -2238,6 +2278,94 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             } else {
                 drawLoadingState(canvas, w, h)
             }
+        }
+
+        private fun drawTumbleTransition(canvas: Canvas, b1: Bitmap, b2: Bitmap, w: Int, h: Int, f1: PointF?, f2: PointF?, progress: Float) {
+            val rotationMax = 25f // Sudut rotasi 2D
+            val splitX = (1f - progress) * w
+
+            // 1. Gambar Sisi Kiri (WP 1 + Background Tile Miring)
+            canvas.save()
+            canvas.clipRect(0f, 0f, splitX, h.toFloat()) // Hard Cut kiri
+            
+            canvas.rotate(-progress * rotationMax, w / 2f, h.toFloat())
+            canvas.translate(-progress * w, 0f)
+            
+            // A. Draw Blurred Mirror Tile Background
+            drawProfessionalTiltedBackground(canvas, b1, w, h, true)
+            
+            // B. Draw Sharp Card
+            calculateRects(b1, w, h, srcRect, dstRect, f1)
+            canvas.drawBitmap(b1, srcRect, dstRect, bitmapPaint)
+            canvas.restore()
+
+            // 2. Gambar Sisi Kanan (WP 2 + Background Tile Miring)
+            canvas.save()
+            canvas.clipRect(splitX, 0f, w.toFloat(), h.toFloat()) // Hard Cut kanan
+            
+            canvas.rotate((1f - progress) * rotationMax, w / 2f, h.toFloat())
+            canvas.translate((1f - progress) * w, 0f)
+            
+            // A. Draw Blurred Mirror Tile Background
+            drawProfessionalTiltedBackground(canvas, b2, w, h, false)
+
+            // B. Draw Sharp Card
+            calculateRects(b2, w, h, nextSrcRect, nextDstRect, f2)
+            canvas.drawBitmap(b2, nextSrcRect, nextDstRect, bitmapPaint)
+            canvas.restore()
+        }
+
+        private fun drawProfessionalTiltedBackground(canvas: Canvas, b: Bitmap, w: Int, h: Int, isLeft: Boolean) {
+            if (android.os.Build.VERSION.SDK_INT >= 31 && canvas.isHardwareAccelerated) {
+                val node = if (isLeft) {
+                    if (leftTumbleNode == null) leftTumbleNode = RenderNode("LeftTumble")
+                    leftTumbleNode!!
+                } else {
+                    if (rightTumbleNode == null) rightTumbleNode = RenderNode("RightTumble")
+                    rightTumbleNode!!
+                }
+                
+                // Area gambar harus luas karena ada perputaran
+                node.setPosition(-w, -h, w * 2, h * 2)
+                node.setRenderEffect(RenderEffect.createBlurEffect(60f, 60f, Shader.TileMode.MIRROR))
+                
+                val recordingCanvas = node.beginRecording()
+                val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+                val shader = android.graphics.BitmapShader(b, Shader.TileMode.MIRROR, Shader.TileMode.MIRROR)
+                
+                // MIRROR TILE LOGIC: Skala dikecilkan supaya efek "Tile & Flip" kelihatan jelas
+                val matrix = Matrix()
+                val scale = maxOf(w.toFloat() / b.width, h.toFloat() / b.height) * 0.5f // 50% size for visible tiling
+                matrix.setScale(scale, scale, b.width / 2f, b.height / 2f)
+                shader.setLocalMatrix(matrix)
+                
+                paint.shader = shader
+                recordingCanvas.drawRect(0f, 0f, w * 3f, h * 3f, paint)
+                node.endRecording()
+                
+                canvas.drawRenderNode(node)
+            } else {
+                // Fallback untuk Android lama
+                drawTiltedMirrorBackground(canvas, b, w, h, 255f)
+            }
+        }
+
+        private fun drawTiltedMirrorBackground(canvas: Canvas, b: Bitmap, w: Int, h: Int, alpha: Float) {
+            val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+                this.alpha = alpha.toInt().coerceIn(0, 255)
+                if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    maskFilter = android.graphics.BlurMaskFilter(40f, android.graphics.BlurMaskFilter.Blur.NORMAL)
+                }
+            }
+            val shader = android.graphics.BitmapShader(b, Shader.TileMode.MIRROR, Shader.TileMode.MIRROR)
+            val matrix = Matrix()
+            val scale = maxOf(w.toFloat() / b.width, h.toFloat() / b.height)
+            matrix.setScale(scale, scale, b.width / 2f, b.height / 2f)
+            shader.setLocalMatrix(matrix)
+            paint.shader = shader
+            
+            // Gambar kotak besar yang miring mengikuti sistem koordinat canvas saat ini
+            canvas.drawRect(-w.toFloat(), -h.toFloat(), w * 2f, h * 2f, paint)
         }
 
         private fun updateFilter() {
@@ -2409,7 +2537,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 drawLoadingState(canvas, w, h)
                 return
             }
-            val focal = if (smartCropEnabled) pageFocalPoints[idx] else null
+            val focal = if (idx == -1) nextFocalPoint else if (smartCropEnabled) pageFocalPoints[idx] else null
             calculateRects(b, w, h, srcRect, dstRect, focal)
             canvas.drawBitmap(b, srcRect, dstRect, bitmapPaint)
         }
