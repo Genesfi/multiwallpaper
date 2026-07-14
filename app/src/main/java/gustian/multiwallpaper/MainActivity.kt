@@ -1199,6 +1199,8 @@ fun SettingsScreen(viewModel: HomeViewModel) {
     val manualFocalX by viewModel.manualFocalX.collectAsState()
     val manualFocalY by viewModel.manualFocalY.collectAsState()
     val manualPageCount by viewModel.manualPageCount.collectAsState()
+    val panoramicScrollEnabled by viewModel.panoramicScrollEnabled.collectAsState()
+    val maxPanoramicSpan by viewModel.maxPanoramicSpan.collectAsState()
     val smartAdjacencyEnabled by viewModel.smartAdjacencyEnabled.collectAsState()
     val blurRadius by viewModel.blurRadius.collectAsState()
     val dimIntensity by viewModel.dimIntensity.collectAsState()
@@ -1371,6 +1373,27 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                                     modifier = Modifier.padding(top = 4.dp)
                                 )
                             }
+                        }
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        
+                        SettingRow(
+                            title = "Panoramic Wide Images",
+                            subtitle = "Stretch wide photos across multiple pages",
+                            checked = panoramicScrollEnabled,
+                            onCheckedChange = { viewModel.setPanoramicScrollEnabled(it) }
+                        )
+                        
+                        if (panoramicScrollEnabled) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Max Pages per Photo", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            Slider(
+                                value = maxPanoramicSpan.toFloat(),
+                                onValueChange = { viewModel.setMaxPanoramicSpan(it.roundToInt()) },
+                                valueRange = 2f..10f,
+                                steps = 8
+                            )
+                            Text("$maxPanoramicSpan Pages max", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
                         }
                     }
                 }

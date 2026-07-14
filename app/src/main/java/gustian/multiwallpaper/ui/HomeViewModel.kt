@@ -203,6 +203,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _manualPageCount = MutableStateFlow(0)
     val manualPageCount = _manualPageCount.asStateFlow()
 
+    private val _panoramicScrollEnabled = MutableStateFlow(false)
+    val panoramicScrollEnabled = _panoramicScrollEnabled.asStateFlow()
+
+    private val _maxPanoramicSpan = MutableStateFlow(3)
+    val maxPanoramicSpan = _maxPanoramicSpan.asStateFlow()
+
     private val _filterType = MutableStateFlow("NONE")
     val filterType = _filterType.asStateFlow()
 
@@ -302,6 +308,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _manualFocalX.value = prefs.getFloat("manual_focal_x", 0.5f)
         _manualFocalY.value = prefs.getFloat("manual_focal_y", 0.4f)
         _manualPageCount.value = prefs.getInt("manual_page_count", 0)
+        _panoramicScrollEnabled.value = prefs.getBoolean("panoramic_scroll_enabled", false)
+        _maxPanoramicSpan.value = prefs.getInt("max_panoramic_span", 3)
         _filterType.value = prefs.getString("filter_type", "NONE") ?: "NONE"
         _filterColor1.value = prefs.getInt("filter_color_1", 0xFF000000.toInt())
         _filterColor2.value = prefs.getInt("filter_color_2", 0xFFFFFFFF.toInt())
@@ -353,6 +361,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             putInt("filter_color_1", otherPrefs.getInt("filter_color_1", 0xFF000000.toInt()))
             putInt("filter_color_2", otherPrefs.getInt("filter_color_2", 0xFFFFFFFF.toInt()))
             putInt("manual_page_count", otherPrefs.getInt("manual_page_count", 0))
+            putBoolean("panoramic_scroll_enabled", otherPrefs.getBoolean("panoramic_scroll_enabled", false))
+            putInt("max_panoramic_span", otherPrefs.getInt("max_panoramic_span", 3))
             putBoolean("force_reload_trigger", true)
             apply()
         }
@@ -375,6 +385,22 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             ?.putBoolean("force_reload_trigger", true)
             ?.apply()
         _manualPageCount.value = count
+    }
+
+    fun setPanoramicScrollEnabled(enabled: Boolean) {
+        currentPrefs?.edit()
+            ?.putBoolean("panoramic_scroll_enabled", enabled)
+            ?.putBoolean("force_reload_trigger", true)
+            ?.apply()
+        _panoramicScrollEnabled.value = enabled
+    }
+
+    fun setMaxPanoramicSpan(span: Int) {
+        currentPrefs?.edit()
+            ?.putInt("max_panoramic_span", span)
+            ?.putBoolean("force_reload_trigger", true)
+            ?.apply()
+        _maxPanoramicSpan.value = span
     }
 
     private var scanJob: Job? = null
