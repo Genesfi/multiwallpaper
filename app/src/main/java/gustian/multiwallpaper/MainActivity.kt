@@ -448,37 +448,80 @@ fun TargetSwitcher(
     selectedTarget: gustian.multiwallpaper.ui.SettingTarget,
     onTargetSelected: (gustian.multiwallpaper.ui.SettingTarget) -> Unit
 ) {
+    val context = LocalContext.current
     Card(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
     ) {
         Row(modifier = Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = { onTargetSelected(gustian.multiwallpaper.ui.SettingTarget.HOME) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (selectedTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            DoubleTapTargetButton(
+                label = "Home Sources",
+                icon = Icons.Default.Home,
+                isSelected = selectedTarget == gustian.multiwallpaper.ui.SettingTarget.HOME,
+                onSingleTap = { onTargetSelected(gustian.multiwallpaper.ui.SettingTarget.HOME) },
+                onDoubleTap = { 
+                    onTargetSelected(gustian.multiwallpaper.ui.SettingTarget.HOME)
+                    triggerLiveWallpaperSelection(context, MultiWallpaperHomeService::class.java)
+                },
+                modifier = Modifier.weight(1f)
+            )
+            DoubleTapTargetButton(
+                label = "Lock Sources",
+                icon = Icons.Default.Lock,
+                isSelected = selectedTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK,
+                onSingleTap = { onTargetSelected(gustian.multiwallpaper.ui.SettingTarget.LOCK) },
+                onDoubleTap = { 
+                    onTargetSelected(gustian.multiwallpaper.ui.SettingTarget.LOCK)
+                    triggerLiveWallpaperSelection(context, MultiWallpaperLockService::class.java)
+                },
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+fun DoubleTapTargetButton(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    isSelected: Boolean,
+    onSingleTap: () -> Unit,
+    onDoubleTap: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    var lastClickTime by remember { mutableLongStateOf(0L) }
+
+    Surface(
+        modifier = modifier
+            .height(40.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current
             ) {
-                Icon(Icons.Default.Home, null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Home Sources", fontSize = 12.sp)
-            }
-            Button(
-                onClick = { onTargetSelected(gustian.multiwallpaper.ui.SettingTarget.LOCK) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (selectedTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            ) {
-                Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Lock Sources", fontSize = 12.sp)
-            }
+                val currentTime = System.currentTimeMillis()
+                if (currentTime - lastClickTime < 400L) {
+                    // DOUBLE TAP DETECTED
+                    onDoubleTap()
+                    lastClickTime = 0L // Reset to prevent triple-tap firing twice
+                } else {
+                    // SINGLE TAP - Run INSTANTLY
+                    onSingleTap()
+                    lastClickTime = currentTime
+                }
+            },
+        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -1258,32 +1301,28 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 Text("TARGET SCREEN", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.HOME) },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    ) {
-                        Icon(Icons.Default.Home, null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Home")
-                    }
-                    Button(
-                        onClick = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.LOCK) },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    ) {
-                        Icon(Icons.Default.Lock, null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Lock")
-                    }
+                    DoubleTapTargetButton(
+                        label = "Home",
+                        icon = Icons.Default.Home,
+                        isSelected = settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME,
+                        onSingleTap = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.HOME) },
+                        onDoubleTap = { 
+                            viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.HOME)
+                            triggerLiveWallpaperSelection(context, MultiWallpaperHomeService::class.java)
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    DoubleTapTargetButton(
+                        label = "Lock",
+                        icon = Icons.Default.Lock,
+                        isSelected = settingsTarget == gustian.multiwallpaper.ui.SettingTarget.LOCK,
+                        onSingleTap = { viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.LOCK) },
+                        onDoubleTap = { 
+                            viewModel.setSettingsTarget(gustian.multiwallpaper.ui.SettingTarget.LOCK)
+                            triggerLiveWallpaperSelection(context, MultiWallpaperLockService::class.java)
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
                 }
                 
                 TextButton(

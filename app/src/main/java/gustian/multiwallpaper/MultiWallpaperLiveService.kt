@@ -633,8 +633,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
             shakeEnabled = prefs.getBoolean("shake_enabled", false)
             val shakeSensitivity = prefs.getFloat("shake_sensitivity", 0.9f)
-            // Range: 10.0 (High Sensitivity) to 50.0 (Low Sensitivity)
-            shakeThreshold = 50.0f - (shakeSensitivity * 40.0f)
+            // INCREASED SENSITIVITY: Range 8.0 (Very High) to 40.0 (Low)
+            shakeThreshold = 40.0f - (shakeSensitivity * 32.0f)
 
             smartCropEnabled = prefs.getBoolean("smart_crop_enabled", true)
             lightModeEnabled = prefs.getBoolean("light_mode_enabled", false)
@@ -745,6 +745,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     val now = System.currentTimeMillis()
                     if (now - lastShakeTime > 1200) { // 1.2s debounce
                         lastShakeTime = now
+                        Log.d("MW_DEBUG", "[$prefsName] Shake detected!")
                         handler.post { rotateWallpapers() }
                     }
                 }
@@ -1047,6 +1048,18 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 this.xStep = 0f
                 if (kotlin.math.abs(this.xOffset - validXOffset) > 0.0001f) {
                     this.xOffset = validXOffset
+                    
+                    // SYNC manualPageIndex from launcher offset if possible (Even in Poco/Manual mode)
+                    val effectiveStep = if (this.xStep > 0f) this.xStep else if (detectedPages > 1) 1f / (detectedPages - 1).toFloat() else 0f
+                    if (pageBitmaps.isNotEmpty() && effectiveStep > 0f) {
+                        val targetIndex = (validXOffset / effectiveStep).roundToInt()
+                        val clampedIndex = targetIndex.coerceIn(0, detectedPages - 1)
+                        if (manualPageIndex != clampedIndex) {
+                            manualPageIndex = clampedIndex
+                            Log.d("MW_DEBUG", "[$prefsName] Synced manualPageIndex to $clampedIndex via Offset")
+                        }
+                    }
+                    
                     requestDraw()
                 }
                 return
@@ -1071,15 +1084,19 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 this.xStep = validXStep
             }
 
-            // Update manualPageIndex berdasarkan offset sistem (Hanya di mode Auto)
+            // Update manualPageIndex berdasarkan offset sistem
             val offsetDelta = kotlin.math.abs(this.xOffset - validXOffset)
             if (visible && (offsetDelta > 0.0001f || this.xStep != validXStep)) {
                 this.xOffset = validXOffset
-                if (pageBitmaps.isNotEmpty() && this.xStep > 0f) {
-                    val targetIndex = (validXOffset / this.xStep).roundToInt()
+                
+                // SYNC manualPageIndex from launcher offset
+                val effectiveStep = if (this.xStep > 0f) this.xStep else if (detectedPages > 1) 1f / (detectedPages - 1).toFloat() else 0f
+                if (pageBitmaps.isNotEmpty() && effectiveStep > 0f) {
+                    val targetIndex = (validXOffset / effectiveStep).roundToInt()
                     val clampedIndex = targetIndex.coerceIn(0, detectedPages - 1)
                     if (manualPageIndex != clampedIndex) {
                         manualPageIndex = clampedIndex
+                        Log.d("MW_DEBUG", "[$prefsName] Synced manualPageIndex to $clampedIndex via Offset (Auto)")
                         requestDraw()
                     }
                 }
@@ -1279,18 +1296,18 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             synchronized(bitmapLock) {
                 if (isTransitioning) return // Avoid overlapping transitions
 
+                // PRIORITAS: Selalu ganti halaman aktif (manualPageIndex) terlebih dahulu!
                 if (transitionType == "fade" && pageBitmaps.isNotEmpty()) {
-                    // Tighter timing mapping for better feel
                     transitionDuration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L)
+                    
+                    Log.d("MW_DEBUG", "[$prefsName] Rotation Triggered (FADE). Target Index: $manualPageIndex")
                     
                     if (preloadedBitmap != null) {
                         if (visible) {
                             nextBitmap?.recycle()
                             nextBitmap = preloadedBitmap
                             nextFocalPoint = preloadedFocalPoint
-                            if (preloadedUri != null) {
-                                pageUris[manualPageIndex] = preloadedUri!!
-                            }
+                            pageUris[manualPageIndex] = preloadedUri ?: ""
                             
                             preloadedBitmap = null
                             preloadedUri = null
@@ -1298,40 +1315,26 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             
                             startFade()
                         } else {
-                            // SCREEN OFF: Respect timer, but swap instantly to free memory
                             val old = pageBitmaps[manualPageIndex]
                             pageBitmaps[manualPageIndex] = preloadedBitmap!!
                             pageFocalPoints[manualPageIndex] = preloadedFocalPoint
-                            if (preloadedUri != null) {
-                                pageUris[manualPageIndex] = preloadedUri!!
-                            }
+                            pageUris[manualPageIndex] = preloadedUri ?: ""
                             
                             if (old != preloadedBitmap) old?.recycle()
                             
                             preloadedBitmap = null
                             preloadedUri = null
                             preloadedFocalPoint = null
-                            
-                            // CLEANUP: Ensure no hidden indices exist beyond detectedPages
-                            val keysToRemove = pageBitmaps.keys.filter { it >= detectedPages }
-                            keysToRemove.forEach { k ->
-                                pageBitmaps[k]?.recycle()
-                                pageBitmaps.remove(k)
-                                pageUris.remove(k)
-                                pageFocalPoints.remove(k)
-                            }
-                            
+
                             scheduleRotation()
                             preloadNextWallpaper()
-                            System.gc()
                         }
                     } else {
                         startFadeRotation()
                     }
-                    
-                    // Silently refresh other pages to keep them fresh
                     refreshOtherPages()
                 } else {
+                    // FORCE RELOAD MODE: Pastikan manualPageIndex di-load pertama!
                     loadWallpapersForPages()
                 }
             }
@@ -1548,15 +1551,18 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             }
             lastLoadRequestTime = now
 
+            // CANCEL EVERYTHING OLD: We are starting a fresh state now
             mainLoadJob?.cancel()
             backgroundRefreshJob?.cancel()
+            preloadJob?.cancel()
+            rotationJob?.cancel()
 
             isLoading = true
             requestDraw()
 
             mainLoadJob = engineScope.launch {
                 try {
-                    // 1. WAIT FOR SURFACE: Wait up to 2 seconds for valid dimensions
+                    // ... (rest of the wait logic) ...
                     var waitCount = 0
                     while ((surfaceWidth <= 0 || surfaceHeight <= 0) && waitCount < 20 && isActive) {
                         delay(200)
@@ -1591,6 +1597,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     if (uriCandidates.isEmpty()) return@launch
 
                     // CRITICAL SECTION: Visible Page (Non-Cancellable to prevent Loading Abadi)
+                    Log.d("MW_DEBUG", "[$prefsName] Forced Reload Triggered. Priority Index: $manualPageIndex")
                     val visibleUri = uriCandidates.removeAt(0)
                     val (firstBitmap, firstFocal) = withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
                         val b = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight, isBackground = false)
@@ -1616,6 +1623,16 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 pageFocalPoints.remove(k)
                                 pageScrollOffsets.remove(k)
                             }
+                            
+                            if (firstBitmap != null) {
+                                pageBitmaps[manualPageIndex] = firstBitmap
+                                pageUris[manualPageIndex] = visibleUri
+                                pageFocalPoints[manualPageIndex] = firstFocal
+                                pageScrollOffsets[manualPageIndex] = null
+                            }
+                        }
+                        if (firstBitmap != null) {
+                            addToHistory(visibleUri)
                         }
                         // SHOW CURRENT IMAGES IMMEDIATELY BUT KEEP isLoading=true FOR OTHERS
                         requestDraw()
