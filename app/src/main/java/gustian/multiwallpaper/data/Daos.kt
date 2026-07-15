@@ -79,7 +79,15 @@ interface FavoriteDao {
 
     @Query("DELETE FROM favorites WHERE uriString = :uriString AND target = :target")
     suspend fun deleteFavoriteByUriSync(uriString: String, target: String)
+
+    @Query("SELECT focalX, focalY FROM favorites WHERE uriString = :uriString AND target = :target LIMIT 1")
+    suspend fun getFocalPoint(uriString: String, target: String): FocalPointProjection?
+
+    @Query("UPDATE favorites SET focalX = :x, focalY = :y WHERE uriString = :uriString AND target = :target")
+    suspend fun updateFocalPoint(uriString: String, target: String, x: Float, y: Float)
 }
+
+data class FocalPointProjection(val focalX: Float?, val focalY: Float?)
 
 @Dao
 interface ScannedImageDao {
@@ -118,6 +126,12 @@ interface ScannedImageDao {
 
     @Query("SELECT uriString FROM scanned_images WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT :limit")
     suspend fun getOrderedUrisExcludingHistory(target: String, limit: Int): List<String>
+
+    @Query("SELECT focalX, focalY FROM scanned_images WHERE uriString = :uriString AND target = :target LIMIT 1")
+    suspend fun getFocalPoint(uriString: String, target: String): FocalPointProjection?
+
+    @Query("UPDATE scanned_images SET focalX = :x, focalY = :y WHERE uriString = :uriString AND target = :target")
+    suspend fun updateFocalPoint(uriString: String, target: String, x: Float, y: Float)
 }
 
 @Dao

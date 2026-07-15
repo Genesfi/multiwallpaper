@@ -20,7 +20,9 @@ data class FavoriteImageEntity(
     val folderUriString: String,
     val displayName: String,
     val target: String = "HOME", // "HOME" or "LOCK"
-    val addedTime: Long = System.currentTimeMillis()
+    val addedTime: Long = System.currentTimeMillis(),
+    val focalX: Float? = null,
+    val focalY: Float? = null
 )
 
 @Entity(tableName = "scanned_images", primaryKeys = ["uriString", "target"], indices = [Index(value = ["folderUriString", "target"])])
@@ -30,7 +32,9 @@ data class ScannedImageEntity(
     val displayName: String,
     val target: String = "HOME", // "HOME" or "LOCK"
     val lastScanned: Long = System.currentTimeMillis(),
-    val dateModified: Long = 0
+    val dateModified: Long = 0,
+    val focalX: Float? = null,
+    val focalY: Float? = null
 )
 
 @Entity(tableName = "presets")

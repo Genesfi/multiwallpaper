@@ -1470,7 +1470,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
                             val span = if (spanFactor > 1.2f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
                             
-                            val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b) else null
+                            val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b, nextUri!!) else null
                             
                             withContext(Dispatchers.Main) {
                                 synchronized(bitmapLock) {
@@ -1535,7 +1535,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 
                                 val b = decodeSampledBitmapFromUri(Uri.parse(nextUri!!), surfaceWidth, surfaceHeight, isBackground = true)
                                 if (b != null) {
-                                    val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
+                                    val focal = if (smartCropEnabled) detectFaceFocalPoint(b, nextUri!!) else null
                                     
                                     withContext(Dispatchers.Main) {
                                         synchronized(bitmapLock) {
@@ -1584,7 +1584,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
 
                 if (rawBmp != null) {
-                    val focal = if (smartCropEnabled) detectFaceFocalPoint(rawBmp!!) else null
+                    val focal = if (smartCropEnabled) detectFaceFocalPoint(rawBmp!!, currentUri) else null
                     
                     // Pre-calculate Panoramic info
                     var span = 1
@@ -1628,7 +1628,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
 
                 if (rawBmp != null) {
-                    val focal = if (smartCropEnabled) detectFaceFocalPoint(rawBmp!!) else null
+                    val focal = if (smartCropEnabled) detectFaceFocalPoint(rawBmp!!, currentUri) else null
                     
                     // Pre-calculate Panoramic info
                     var span = 1
@@ -1859,7 +1859,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             return@withContext Triple(null, null, 1)
                         }
                         
-                        val f = if (b != null && span == 1 && smartCropEnabled) detectFaceFocalPoint(b) else null
+                        val f = if (b != null && span == 1 && smartCropEnabled) detectFaceFocalPoint(b, visibleUri) else null
                         Triple(b, f, span)
                     }
                     
@@ -1936,7 +1936,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                     if (targetP == manualPageIndex) continue
                                     
                                     val offset = if (span > 1) i.toFloat() / (span - 1).toFloat() else null
-                                    val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b) else null
+                                    val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b, uri) else null
                                     
                                     withContext(Dispatchers.Main) {
                                         synchronized(bitmapLock) {
@@ -2014,8 +2014,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                         val b = decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight, isBackground = true)
                                         
                                         if (b != null) {
-                                            if (!isActive) { b.recycle(); return@async }
-                                            val focal = if (smartCropEnabled) detectFaceFocalPoint(b) else null
+                                            val focal = if (smartCropEnabled) detectFaceFocalPoint(b, uri) else null
                                             withContext(Dispatchers.Main) {
                                                 synchronized(bitmapLock) {
                                                     val old = pageBitmaps[p]
@@ -2217,7 +2216,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             span = if (spanFactor > 1.2f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
                         }
 
-                        val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b) else null
+                        val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b, fallbackUri) else null
                         withContext(Dispatchers.Main) {
                             synchronized(bitmapLock) {
                                 for (j in 0 until span) {
@@ -2254,7 +2253,21 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             }
         }
 
-        private suspend fun detectFaceFocalPoint(bitmap: Bitmap): PointF? {
+        private suspend fun detectFaceFocalPoint(bitmap: Bitmap, uriString: String): PointF? {
+            val db = AppDatabase.getDatabase(applicationContext)
+            val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
+            val useFavorites = getSharedPreferences(prefsName, Context.MODE_PRIVATE).getBoolean("use_favorites_only", false)
+
+            // 1. Check Cache first
+            val cached = withContext(Dispatchers.IO) {
+                if (useFavorites) db.favoriteDao().getFocalPoint(uriString, targetName)
+                else db.scannedImageDao().getFocalPoint(uriString, targetName)
+            }
+
+            if (cached?.focalX != null && cached.focalY != null) {
+                return PointF(cached.focalX, cached.focalY)
+            }
+
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             val manX = prefs.getFloat("manual_focal_x", 0.5f)
             val manY = prefs.getFloat("manual_focal_y", 0.4f)
@@ -2324,8 +2337,20 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     val focal = PointF(mainFace.boundingBox.centerX() / dWidth.toFloat(), 
                                        mainFace.boundingBox.centerY() / dHeight.toFloat())
                     Log.d("MultiWallpaper", "Main face detected at: $focal (using ${dWidth}x${dHeight} proxy)")
+                    
+                    // 2. Save result to Cache
+                    engineScope.launch(Dispatchers.IO) {
+                        if (useFavorites) db.favoriteDao().updateFocalPoint(uriString, targetName, focal.x, focal.y)
+                        else db.scannedImageDao().updateFocalPoint(uriString, targetName, focal.x, focal.y)
+                    }
+                    
                     focal
                 } else {
+                    // Also save fallback so we don't scan empty/no-face images repeatedly
+                    engineScope.launch(Dispatchers.IO) {
+                        if (useFavorites) db.favoriteDao().updateFocalPoint(uriString, targetName, fallback.x, fallback.y)
+                        else db.scannedImageDao().updateFocalPoint(uriString, targetName, fallback.x, fallback.y)
+                    }
                     fallback // Fallback slightly above center
                 }
             } catch (e: Exception) { 
