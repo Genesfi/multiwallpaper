@@ -945,17 +945,41 @@ fun GalleryScreen(viewModel: HomeViewModel) {
     var selectedImgUri by remember { mutableStateOf<String?>(null) }
     var activeFolderUri by remember { mutableStateOf<String?>(null) }
     
-    val grouped = remember(images, sortType, sortOrder, searchQuery) {
-        val filtered = if (searchQuery.isBlank()) images 
-                       else images.filter { img ->
-                           val folderName = try {
-                               val u = Uri.parse(img.folderUriString)
-                               if (u.scheme == "file") java.io.File(u.path ?: "").name else Uri.decode(img.folderUriString).split("/").lastOrNull() ?: ""
-                           } catch (e: Exception) { "" }
-                           
-                           img.displayName.contains(searchQuery, ignoreCase = true) || 
-                           folderName.contains(searchQuery, ignoreCase = true) ||
-                           img.folderUriString.contains(searchQuery, ignoreCase = true)
+    var currentPage by remember { mutableIntStateOf(1) }
+    val itemsPerPage = 20
+    var showJumpDialog by remember { mutableStateOf(false) }
+
+    // Search Debouncing
+    var debouncedSearchQuery by remember { mutableStateOf(searchQuery) }
+    LaunchedEffect(searchQuery) {
+        if (searchQuery.isBlank()) {
+            debouncedSearchQuery = ""
+        } else {
+            kotlinx.coroutines.delay(400) // Wait for user to stop typing
+            debouncedSearchQuery = searchQuery
+        }
+    }
+
+    LaunchedEffect(debouncedSearchQuery) {
+        currentPage = 1
+    }
+
+    val listState = rememberLazyListState()
+    LaunchedEffect(currentPage) {
+        listState.animateScrollToItem(0)
+    }
+    
+    val allGrouped = remember(images, sortType, sortOrder, debouncedSearchQuery) {
+        val filtered = if (debouncedSearchQuery.isBlank()) images 
+                       else {
+                           val q = debouncedSearchQuery.trim()
+                           images.filter { img ->
+                               // FAST FILTER: Avoid Uri.parse and java.io.File inside the loop
+                               val folderNamePart = img.folderUriString.substringAfterLast("/").substringAfterLast("%2F")
+                               
+                               img.displayName.contains(q, ignoreCase = true) || 
+                               folderNamePart.contains(q, ignoreCase = true)
+                           }
                        }
         
         val groups = filtered.groupBy { it.folderUriString }
@@ -981,6 +1005,14 @@ fun GalleryScreen(viewModel: HomeViewModel) {
         }
         sorted.associate { it.key to it.value }
     }
+
+    val totalPages = (allGrouped.size + itemsPerPage - 1) / itemsPerPage
+    val pagedGroups = remember(allGrouped, currentPage) {
+        allGrouped.entries.toList()
+            .drop((currentPage - 1) * itemsPerPage)
+            .take(itemsPerPage)
+            .associate { it.key to it.value }
+    }
     
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
     var showBlacklistSection by remember { mutableStateOf(false) }
@@ -993,8 +1025,13 @@ fun GalleryScreen(viewModel: HomeViewModel) {
 
         if (isScanning) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
-        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            grouped.forEach { (uri, imgs) ->
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            state = listState,
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            pagedGroups.forEach { (uri, imgs) ->
                 val isExp = expanded[uri] ?: false
                 val anyFav = imgs.any { it.isFavorite }
                 val isSelected = selectedFolderUris.contains(uri)
@@ -1058,9 +1095,45 @@ fun GalleryScreen(viewModel: HomeViewModel) {
                 }
             }
         }
+
+        if (totalPages > 1) {
+            Surface(
+                tonalElevation = 2.dp,
+                shadowElevation = 8.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        enabled = currentPage > 1,
+                        onClick = { currentPage-- }
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBackIos, null)
+                    }
+
+                    TextButton(onClick = { showJumpDialog = true }) {
+                        Text(
+                            "Page $currentPage of $totalPages",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    IconButton(
+                        enabled = currentPage < totalPages,
+                        onClick = { currentPage++ }
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowForwardIos, null)
+                    }
+                }
+            }
+        }
     }
     
-    val activeImgs = grouped[activeFolderUri] ?: emptyList()
+    val activeImgs = allGrouped[activeFolderUri] ?: emptyList()
     val activeIndex = activeImgs.indexOfFirst { it.uriString == selectedImgUri }
     
     if (selectedImgUri != null && activeIndex != -1) {
@@ -1075,6 +1148,62 @@ fun GalleryScreen(viewModel: HomeViewModel) {
             }
         )
     }
+
+    if (showJumpDialog) {
+        JumpToPageDialog(
+            currentPage = currentPage,
+            totalPages = totalPages,
+            onDismiss = { showJumpDialog = false },
+            onJump = { page ->
+                currentPage = page
+                showJumpDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+fun JumpToPageDialog(
+    currentPage: Int,
+    totalPages: Int,
+    onDismiss: () -> Unit,
+    onJump: (Int) -> Unit
+) {
+    var text by remember { mutableStateOf(currentPage.toString()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Jump to Page") },
+        text = {
+            Column {
+                Text("Enter page number (1-$totalPages):", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { if (it.all { char -> char.isDigit() }) text = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val page = text.toIntOrNull()
+                    if (page != null && page in 1..totalPages) {
+                        onJump(page)
+                    }
+                }
+            ) {
+                Text("Go")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @Composable
