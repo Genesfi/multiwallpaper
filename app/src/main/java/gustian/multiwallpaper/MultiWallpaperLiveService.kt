@@ -560,6 +560,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
                 db.folderDao().getAllFolders(targetName).collectLatest {
                     if (it.isNotEmpty()) {
+                        if (isBootPhase) {
+                            // Give other apps (WhatsApp, System, etc.) 8 seconds to finish booting first
+                            delay(8000)
+                        }
                         loadWallpapersForPages()
                     }
                 }
@@ -2030,7 +2034,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 }
                             }
                             jobs.awaitAll()
-                            delay(if (isBootPhase) 1000L else 100L)
+                            delay(if (isBootPhase) 1500L else 100L)
                         }
                     }
 
