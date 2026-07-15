@@ -933,13 +933,10 @@ fun PresetManagerDialog(
 @Composable
 fun GalleryScreen(viewModel: HomeViewModel) {
     val settingsTarget by viewModel.settingsTarget.collectAsState()
-    val images by viewModel.scannedImages.collectAsState()
-    val blacklisted by viewModel.blacklisted.collectAsState()
+    val allGrouped by viewModel.groupedGalleryImages.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
     val selectedUris by viewModel.selectedGalleryUris.collectAsState()
     val selectedFolderUris by viewModel.selectedGalleryFolderUris.collectAsState()
-    val sortType by viewModel.gallerySortType.collectAsState()
-    val sortOrder by viewModel.gallerySortOrder.collectAsState()
     val searchQuery by viewModel.gallerySearchQuery.collectAsState()
 
     var selectedImgUri by remember { mutableStateOf<String?>(null) }
@@ -949,73 +946,30 @@ fun GalleryScreen(viewModel: HomeViewModel) {
     val itemsPerPage = 20
     var showJumpDialog by remember { mutableStateOf(false) }
 
-    // Search Debouncing
-    var debouncedSearchQuery by remember { mutableStateOf(searchQuery) }
-    LaunchedEffect(searchQuery) {
-        if (searchQuery.isBlank()) {
-            debouncedSearchQuery = ""
-        } else {
-            kotlinx.coroutines.delay(400) // Wait for user to stop typing
-            debouncedSearchQuery = searchQuery
-        }
+    val totalPages = remember(allGrouped) { (allGrouped.size + itemsPerPage - 1) / itemsPerPage.coerceAtLeast(1) }
+    val pagerState = rememberPagerState(pageCount = { totalPages.coerceAtLeast(1) })
+
+    // Sync currentPage with pagerState
+    LaunchedEffect(pagerState.currentPage) {
+        currentPage = pagerState.currentPage + 1
     }
 
-    LaunchedEffect(debouncedSearchQuery) {
-        currentPage = 1
-    }
-
-    val listState = rememberLazyListState()
+    // Sync pagerState with currentPage (Jump to Page)
     LaunchedEffect(currentPage) {
-        listState.animateScrollToItem(0)
-    }
-    
-    val allGrouped = remember(images, sortType, sortOrder, debouncedSearchQuery) {
-        val filtered = if (debouncedSearchQuery.isBlank()) images 
-                       else {
-                           val q = debouncedSearchQuery.trim()
-                           images.filter { img ->
-                               // FAST FILTER: Avoid Uri.parse and java.io.File inside the loop
-                               val folderNamePart = img.folderUriString.substringAfterLast("/").substringAfterLast("%2F")
-                               
-                               img.displayName.contains(q, ignoreCase = true) || 
-                               folderNamePart.contains(q, ignoreCase = true)
-                           }
-                       }
-        
-        val groups = filtered.groupBy { it.folderUriString }
-        val sorted = when (sortType) {
-            "NAME" -> groups.entries.toList().let { list ->
-                if (sortOrder == "DESC") list.sortedByDescending { entry -> 
-                    val uri = Uri.parse(entry.key)
-                    if (uri.scheme == "file") java.io.File(uri.path ?: "").name else Uri.decode(entry.key).split("/").lastOrNull() ?: "Folder"
-                } else list.sortedBy { entry -> 
-                    val uri = Uri.parse(entry.key)
-                    if (uri.scheme == "file") java.io.File(uri.path ?: "").name else Uri.decode(entry.key).split("/").lastOrNull() ?: "Folder"
-                }
-            }
-            "DATE" -> groups.entries.toList().let { list ->
-                if (sortOrder == "DESC") list.sortedByDescending { it.value.maxOfOrNull { img -> img.date } ?: 0L }
-                else list.sortedBy { it.value.maxOfOrNull { img -> img.date } ?: 0L }
-            }
-            "STAR" -> groups.entries.toList().let { list ->
-                if (sortOrder == "DESC") list.sortedByDescending { it.value.any { img -> img.isFavorite } }
-                else list.sortedBy { it.value.any { img -> img.isFavorite } }
-            }
-            else -> groups.entries.toList()
+        val targetPage = (currentPage - 1).coerceIn(0, totalPages.coerceAtLeast(1) - 1)
+        if (pagerState.currentPage != targetPage) {
+            pagerState.animateScrollToPage(targetPage)
         }
-        sorted.associate { it.key to it.value }
     }
 
-    val totalPages = (allGrouped.size + itemsPerPage - 1) / itemsPerPage
-    val pagedGroups = remember(allGrouped, currentPage) {
-        allGrouped.entries.toList()
-            .drop((currentPage - 1) * itemsPerPage)
-            .take(itemsPerPage)
-            .associate { it.key to it.value }
+    // Reset currentPage when allGrouped size changes significantly or target changes
+    LaunchedEffect(allGrouped.size, settingsTarget) {
+        if (currentPage > totalPages && totalPages > 0) {
+            currentPage = totalPages
+        }
     }
-    
+
     val expanded = remember { mutableStateMapOf<String, Boolean>() }
-    var showBlacklistSection by remember { mutableStateOf(false) }
     
     Column(modifier = Modifier.fillMaxSize()) {
         TargetSwitcher(
@@ -1025,71 +979,90 @@ fun GalleryScreen(viewModel: HomeViewModel) {
 
         if (isScanning) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
-        LazyColumn(
+        HorizontalPager(
+            state = pagerState,
             modifier = Modifier.weight(1f),
-            state = listState,
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            pagedGroups.forEach { (uri, imgs) ->
-                val isExp = expanded[uri] ?: false
-                val anyFav = imgs.any { it.isFavorite }
-                val isSelected = selectedFolderUris.contains(uri)
-                
-                item {
-                    val name = remember(uri) { val u = Uri.parse(uri); if (u.scheme == "file") java.io.File(u.path ?: "").name else Uri.decode(uri).split("/").lastOrNull() ?: "Folder" }
-                    Card(
-                        modifier = Modifier.combinedClickable(
-                            onClick = { 
-                                if (selectedFolderUris.isNotEmpty()) viewModel.toggleGalleryFolderSelection(uri) 
-                                else expanded[uri] = !(expanded[uri] ?: false)
-                            },
-                            onLongClick = { viewModel.toggleGalleryFolderSelection(uri) }
-                        ),
-                        border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
-                        colors = CardDefaults.cardColors(containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
-                    ) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (selectedFolderUris.isNotEmpty()) Checkbox(isSelected, { viewModel.toggleGalleryFolderSelection(uri) })
-                            Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
-                                val firstImg = imgs.firstOrNull()
-                                if (firstImg != null) {
-                                    AsyncImage(model = Uri.parse(firstImg.uriString), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                } else {
-                                    Icon(if (isExp) Icons.Default.FolderOpen else Icons.Default.Folder, null, modifier = Modifier.align(Alignment.Center), tint = MaterialTheme.colorScheme.primary)
+            beyondViewportPageCount = 1,
+            userScrollEnabled = true,
+            key = { page -> "page_$page" } // Help Pager keep track
+        ) { page ->
+            val pageIndex = page + 1
+            // Use key(allGrouped) to force re-calculation if allGrouped changes (sorting/filtering)
+            val pagedGroups = remember(allGrouped, pageIndex) {
+                allGrouped
+                    .drop((pageIndex - 1) * itemsPerPage)
+                    .take(itemsPerPage)
+            }
+
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                pagedGroups.forEach { (uri, imgs) ->
+                    val isExp = expanded[uri] ?: false
+                    val anyFav = imgs.any { it.isFavorite }
+                    val isSelected = selectedFolderUris.contains(uri)
+                    
+                    item(key = uri) {
+                        val name = remember(uri) { 
+                            val u = try { Uri.parse(uri) } catch (e: Exception) { null }
+                            if (u?.scheme == "file") java.io.File(u.path ?: "").name 
+                            else Uri.decode(uri).split("/").lastOrNull() ?: "Folder" 
+                        }
+                        Card(
+                            modifier = Modifier.combinedClickable(
+                                onClick = { 
+                                    if (selectedFolderUris.isNotEmpty()) viewModel.toggleGalleryFolderSelection(uri) 
+                                    else expanded[uri] = !(expanded[uri] ?: false)
+                                },
+                                onLongClick = { viewModel.toggleGalleryFolderSelection(uri) }
+                            ),
+                            border = BorderStroke(1.dp, if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
+                            colors = CardDefaults.cardColors(containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (selectedFolderUris.isNotEmpty()) Checkbox(isSelected, { viewModel.toggleGalleryFolderSelection(uri) })
+                                Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                                    val firstImg = imgs.firstOrNull()
+                                    if (firstImg != null) {
+                                        AsyncImage(model = Uri.parse(firstImg.uriString), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                    } else {
+                                        Icon(if (isExp) Icons.Default.FolderOpen else Icons.Default.Folder, null, modifier = Modifier.align(Alignment.Center), tint = MaterialTheme.colorScheme.primary)
+                                    }
                                 }
+                                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                    Text(name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("${imgs.size} images", style = MaterialTheme.typography.labelSmall)
+                                }
+                                IconButton(onClick = { viewModel.toggleFavoriteFolder(uri) }) { Icon(if (anyFav) Icons.Default.Star else Icons.Default.StarOutline, null, tint = if (anyFav) Color(0xFFEAB308) else MaterialTheme.colorScheme.onSurfaceVariant) }
+                                Icon(if (isExp) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
                             }
-                            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                                Text(name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("${imgs.size} images", style = MaterialTheme.typography.labelSmall)
-                            }
-                            IconButton(onClick = { viewModel.toggleFavoriteFolder(uri) }) { Icon(if (anyFav) Icons.Default.Star else Icons.Default.StarOutline, null, tint = if (anyFav) Color(0xFFEAB308) else MaterialTheme.colorScheme.onSurfaceVariant) }
-                            Icon(if (isExp) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
                         }
                     }
-                }
-                if (isExp) {
-                    val chunks = imgs.chunked(3)
-                    items(chunks.size) { i ->
-                        Row(modifier = Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            chunks[i].forEach { img ->
-                                val sel = selectedUris.contains(img.uriString)
-                                Box(modifier = Modifier.weight(1f).aspectRatio(0.85f).clip(RoundedCornerShape(12.dp)).background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant).combinedClickable(
-                                    onClick = { 
-                                        if (selectedUris.isNotEmpty()) viewModel.toggleGalleryUriSelection(img.uriString) 
-                                        else {
-                                            selectedImgUri = img.uriString
-                                            activeFolderUri = uri
-                                        }
-                                    }, 
-                                    onLongClick = { viewModel.toggleGalleryUriSelection(img.uriString) }
-                                )) {
-                                    AsyncImage(model = Uri.parse(img.uriString), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(if (sel) 0.6f else 1f), contentScale = ContentScale.Crop)
-                                    if (img.isFavorite) Icon(Icons.Default.Star, null, tint = Color.Yellow, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(16.dp))
-                                    if (sel) Icon(Icons.Default.CheckCircle, null, tint = Color.White, modifier = Modifier.align(Alignment.Center).size(32.dp))
+                    if (isExp) {
+                        val chunks = imgs.chunked(3)
+                        items(chunks.size, key = { i -> "$uri-row-$i" }) { i ->
+                            Row(modifier = Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                chunks[i].forEach { img ->
+                                    val sel = selectedUris.contains(img.uriString)
+                                    Box(modifier = Modifier.weight(1f).aspectRatio(0.85f).clip(RoundedCornerShape(12.dp)).background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant).combinedClickable(
+                                        onClick = { 
+                                            if (selectedUris.isNotEmpty()) viewModel.toggleGalleryUriSelection(img.uriString) 
+                                            else {
+                                                selectedImgUri = img.uriString
+                                                activeFolderUri = uri
+                                            }
+                                        }, 
+                                        onLongClick = { viewModel.toggleGalleryUriSelection(img.uriString) }
+                                    )) {
+                                        AsyncImage(model = Uri.parse(img.uriString), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(if (sel) 0.6f else 1f), contentScale = ContentScale.Crop)
+                                        if (img.isFavorite) Icon(Icons.Default.Star, null, tint = Color.Yellow, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(16.dp))
+                                        if (sel) Icon(Icons.Default.CheckCircle, null, tint = Color.White, modifier = Modifier.align(Alignment.Center).size(32.dp))
+                                    }
                                 }
+                                repeat(3 - chunks[i].size) { Spacer(modifier = Modifier.weight(1f)) }
                             }
-                            repeat(3 - chunks[i].size) { Spacer(modifier = Modifier.weight(1f)) }
                         }
                     }
                 }
@@ -1133,8 +1106,12 @@ fun GalleryScreen(viewModel: HomeViewModel) {
         }
     }
     
-    val activeImgs = allGrouped[activeFolderUri] ?: emptyList()
-    val activeIndex = activeImgs.indexOfFirst { it.uriString == selectedImgUri }
+    val activeImgs = remember(allGrouped, activeFolderUri) { 
+        allGrouped.find { it.first == activeFolderUri }?.second ?: emptyList()
+    }
+    val activeIndex = remember(activeImgs, selectedImgUri) {
+        activeImgs.indexOfFirst { it.uriString == selectedImgUri }
+    }
     
     if (selectedImgUri != null && activeIndex != -1) {
         ImageDetailDialog(

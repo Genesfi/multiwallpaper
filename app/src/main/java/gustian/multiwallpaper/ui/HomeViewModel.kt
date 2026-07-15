@@ -130,6 +130,57 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _gallerySearchQuery = MutableStateFlow("")
     val gallerySearchQuery = _gallerySearchQuery.asStateFlow()
 
+    @OptIn(FlowPreview::class)
+    val debouncedSearchQuery = gallerySearchQuery
+        .debounce(400)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
+
+    val groupedGalleryImages: StateFlow<List<Pair<String, List<WallpaperImg>>>> = combine(
+        scannedImages,
+        gallerySortType,
+        gallerySortOrder,
+        debouncedSearchQuery
+    ) { images, sortType, sortOrder, query ->
+        val filtered = if (query.isBlank()) images 
+                       else {
+                           val q = query.trim()
+                           images.filter { img ->
+                               val folderNamePart = img.folderUriString.substringAfterLast("/").substringAfterLast("%2F")
+                               img.displayName.contains(q, ignoreCase = true) || 
+                               folderNamePart.contains(q, ignoreCase = true)
+                           }
+                       }
+        
+        val groups = filtered.groupBy { it.folderUriString }
+        val sortedList = when (sortType) {
+            "NAME" -> {
+                // Pre-calculate folder names for sorting to avoid repetitive Uri parsing
+                val folderNames = groups.keys.associateWith { uriStr ->
+                    try {
+                        val uri = Uri.parse(uriStr)
+                        if (uri.scheme == "file") java.io.File(uri.path ?: "").name 
+                        else Uri.decode(uriStr).split("/").lastOrNull() ?: "Folder"
+                    } catch (e: Exception) { "Folder" }
+                }
+                groups.entries.toList().let { list ->
+                    if (sortOrder == "DESC") list.sortedByDescending { folderNames[it.key] ?: "" }
+                    else list.sortedBy { folderNames[it.key] ?: "" }
+                }
+            }
+            "DATE" -> groups.entries.toList().let { list ->
+                if (sortOrder == "DESC") list.sortedByDescending { it.value.maxOfOrNull { img -> img.date } ?: 0L }
+                else list.sortedBy { it.value.maxOfOrNull { img -> img.date } ?: 0L }
+            }
+            "STAR" -> groups.entries.toList().let { list ->
+                if (sortOrder == "DESC") list.sortedByDescending { it.value.any { img -> img.isFavorite } }
+                else list.sortedBy { it.value.any { img -> img.isFavorite } }
+            }
+            else -> groups.entries.toList()
+        }
+        sortedList.map { it.key to it.value } // Return List<Pair<String, List<WallpaperImg>>>
+    }.flowOn(Dispatchers.Default)
+     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     private val _activePresetName = MutableStateFlow<String?>(null)
     val activePresetName = _activePresetName.asStateFlow()
 
