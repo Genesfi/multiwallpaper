@@ -1,0 +1,16 @@
+Index: app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt b/app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt
+--- a/app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt
++++ b/app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt	(date 1784093815097)
+@@ -2130,7 +2130,6 @@
+                                     // Calculate next scroll offset based on span detection
+                                     // Look back to the start of this pano to find the span
+                                     var spanStartIdx = prevIdx
+-                                    var spanSize = 1
+                                     // Search backwards to find first page of this pano
+                                     for (k in 1 until maxPanoramicSpan) {
+                                         val checkIdx = (prevIdx - k + detectedPages) % detectedPages

@@ -1,0 +1,49 @@
+Index: app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt b/app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt
+--- a/app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt
++++ b/app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt	(date 1784096012572)
+@@ -2390,11 +2390,24 @@
+                     val decoded = contentResolver.openInputStream(uri)?.use { i2 -> BitmapFactory.decodeStream(i2, null, opt) }
+                     
+                     if (decoded != null) {
++                        // STRICT LIGHT MODE SCALING
++                        // If it's Light Mode or LOW quality, we force-scale if inSampleSize wasn't precise enough
++                        val isLowPriority = lightModeEnabled || isBackground || wallpaperQuality == "LOW"
++                        val finalBmp = if (isLowPriority && (decoded.width > maxWidth || decoded.height > maxHeight)) {
++                            val scale = Math.min(maxWidth.toFloat() / decoded.width, maxHeight.toFloat() / decoded.height)
++                            val targetW = (decoded.width * scale).toInt().coerceAtLeast(1)
++                            val targetH = (decoded.height * scale).toInt().coerceAtLeast(1)
++                            
++                            val scaled = Bitmap.createScaledBitmap(decoded, targetW, targetH, true)
++                            if (scaled != decoded) decoded.recycle()
++                            scaled
++                        } else decoded
++
+                         // LOG PERFORMA UNTUK VERIFIKASI QUALITY SETTING
+-                        val ramUsage = decoded.byteCount / (1024f * 1024f)
++                        val ramUsage = finalBmp.byteCount / (1024f * 1024f)
+                         Log.d("MW_DEBUG", String.format(
+                             "[%s] Decoded: %dx%d | Format: %s | RAM: %.2f MB | Quality: %s",
+-                            prefsName, decoded.width, decoded.height, decoded.config, ramUsage, wallpaperQuality
++                            prefsName, finalBmp.width, finalBmp.height, finalBmp.config, ramUsage, wallpaperQuality
+                         ))
+ 
+                         if (orientation != androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL) {
+@@ -2406,10 +2419,10 @@
+                                 androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                                 androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                             }
+-                            val rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+-                            decoded.recycle()
++                            val rotated = Bitmap.createBitmap(finalBmp, 0, 0, finalBmp.width, finalBmp.height, matrix, true)
++                            if (rotated != finalBmp) finalBmp.recycle()
+                             rotated
+-                        } else decoded
++                        } else finalBmp
+                     } else null
+                 }
+             } catch (

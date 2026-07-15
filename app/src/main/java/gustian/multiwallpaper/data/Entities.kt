@@ -14,7 +14,7 @@ data class FolderEntity(
     val addedTime: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "favorites", primaryKeys = ["uriString", "target"])
+@Entity(tableName = "favorites", primaryKeys = ["uriString", "target"], indices = [Index(value = ["folderUriString", "target"])])
 data class FavoriteImageEntity(
     val uriString: String,
     val folderUriString: String,
@@ -23,7 +23,7 @@ data class FavoriteImageEntity(
     val addedTime: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "scanned_images", primaryKeys = ["uriString", "target"])
+@Entity(tableName = "scanned_images", primaryKeys = ["uriString", "target"], indices = [Index(value = ["folderUriString", "target"])])
 data class ScannedImageEntity(
     val uriString: String,
     val folderUriString: String,
@@ -53,7 +53,7 @@ data class BlacklistedImageEntity(
     val addedTime: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "rotation_history", indices = [Index(value = ["timestamp"]), Index(value = ["id"]), Index(value = ["target"])])
+@Entity(tableName = "rotation_history", indices = [Index(value = ["timestamp"]), Index(value = ["id"]), Index(value = ["target"]), Index(value = ["uriString", "target"])])
 data class RotationHistoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val uriString: String,
