@@ -1000,9 +1000,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     requestDraw()
                 }
 
-                // 2. FORCE RELOAD (Fix Masalah 1 Halaman & Gaps):
-                // Jika jumlah gambar di memori kurang dari detectedPages, atau ada gap,
-                // maka paksa reload. Ini adalah pengaman terakhir untuk "Loading Abadi".
+                // 2. FORCE RELOAD:
                 val currentSize = synchronized(bitmapLock) { pageBitmaps.size }
                 val hasGaps = synchronized(bitmapLock) { 
                     (0 until detectedPages).any { 
@@ -1011,58 +1009,54 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     } 
                 }
                 
-                Log.d("MW_DEBUG", "[$prefsName] Visibility Check: Size=$currentSize, Det=$detectedPages, Gaps=$hasGaps, Loading=$isLoading")
+                Log.d("MW_DEBUG", "[$prefsName] Visibility ON: Size=$currentSize, Det=$detectedPages, Gaps=$hasGaps")
 
                 if ((currentSize < detectedPages || hasGaps) && !isLoading) {
                     if (currentSize == 0) {
-                        Log.i("MW_DEBUG", "[$prefsName] Recovery: Empty memory. Full reload.")
                         loadWallpapersForPages()
                     } else {
-                        Log.i("MW_DEBUG", "[$prefsName] Recovery: Gaps detected. Priority repair.")
                         engineScope.launch { repairGaps(manualPageIndex) }
                     }
                 }
 
-                // 3. CATCH-UP LOGIC: Jika sudah waktunya ganti wallpaper saat layar mati, ganti sekarang.
+                // 3. CATCH-UP LOGIC: Jika sudah waktunya ganti saat HP di saku, ganti SEKARANG.
                 val currentTime = System.currentTimeMillis()
                 val intervalMs = getRotationIntervalMs()
-                if (currentTime - lastRotationTime >= intervalMs) {
+                if (intervalMs > 0 && currentTime - lastRotationTime >= intervalMs) {
+                    Log.i("MW_DEBUG", "[$prefsName] Catch-up Rotation triggered.")
                     rotateWallpapers()
                 }
 
                 updateSettings()
+                registerSensor() // Resume parallax/shake
                 scheduleRotation()
                 requestDraw()
             } else {
-                // SMART CLEANUP: 
-                // Don't cancel immediately on first load to prevent "Loading Abadi" on Apply (flicker)
-                if (pageBitmaps.isEmpty() && isLoading) {
-                    // Silent
-                } else {
-                    engineScope.launch {
-                        delay(800) // Small delay to catch "flickers" (Xiaomi/Poco transition)
-                        if (!this@MultiWallpaperEngine.visible) {
-                            // JANGAN matikan load job di sini agar proses load 20 halaman 
-                            // tetap tuntas meskipun layar mati sesaat pasca update/debug.
-                            
-                            isDrawScheduled = false
-                            handler.removeCallbacks(drawRunnable)
-                            
-                            // Clear high-RAM transient bitmaps
-                            nextBitmap?.recycle(); nextBitmap = null
-                            preloadedBitmap?.recycle(); preloadedBitmap = null
-                            
-                            // Unregister sensor to stop redraw loops
-                            unregisterSensor()
-                            
-                            // Also cancel any ongoing transitions to stop power usage
-                            isTransitioning = false
-                            
-                            // Force memory reclamation
-                            System.gc()
-                        }
-                    }
+                // EXTREME BATTERY SAVING: Layar Mati = Stop Total
+                Log.d("MW_DEBUG", "[$prefsName] Visibility OFF: Stopping all work.")
+                
+                // Cancel all heavy CPU tasks immediately
+                mainLoadJob?.cancel()
+                backgroundRefreshJob?.cancel()
+                preloadJob?.cancel()
+                rotationJob?.cancel()
+                
+                handler.removeCallbacks(drawRunnable)
+                handler.removeCallbacks(rotationRunnable)
+                
+                isDrawScheduled = false
+                isTransitioning = false
+                
+                // Clear transient heavy objects
+                synchronized(bitmapLock) {
+                    nextBitmap?.recycle(); nextBitmap = null
+                    preloadedBitmap?.recycle(); preloadedBitmap = null
                 }
+                
+                unregisterSensor() // Stop accelerometer listener
+                
+                // Hint for GC to clean up RAM while device is idle
+                System.gc()
             }
         }
 
@@ -2949,6 +2943,37 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                     if (lb != null) drawSingleBitmap(canvas, lb, w, h, l)
                                     else if (rb != null) drawSingleBitmap(canvas, rb, w, h, r)
                                     else drawLoadingState(canvas, w, h)
+                                }
+                            }
+                            "zoom" -> {
+                                // ZOOM OUT (Manual Swipe): Left fades/expands, Right fades in
+                                if (rb != null && !rb.isRecycled) {
+                                    calculateRects(rb, w, h, nextSrcRect, nextDstRect, rf, rs)
+                                    val oldAlpha = bitmapPaint.alpha
+                                    bitmapPaint.alpha = (f * 255).toInt()
+                                    canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
+                                    bitmapPaint.alpha = oldAlpha
+                                } else {
+                                    canvas.save(); canvas.clipRect((w * (1-f)).toInt(), 0, w, h); drawLoadingState(canvas, w, h); canvas.restore()
+                                }
+
+                                if (lb != null && !lb.isRecycled) {
+                                    val scale = 1f + (f * 2.5f)
+                                    val alpha = (255 * (1f - f)).toInt()
+                                    val oldAlpha = bitmapPaint.alpha
+                                    bitmapPaint.alpha = alpha
+                                    
+                                    calculateRects(lb, w, h, srcRect, dstRect, lf, ls)
+                                    val centerX = dstRect.centerX()
+                                    val centerY = dstRect.centerY()
+                                    val dw = dstRect.width() * scale
+                                    val dh = dstRect.height() * scale
+                                    dstRect.set(centerX - dw/2, centerY - dh/2, centerX + dw/2, centerY + dh/2)
+                                    
+                                    canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
+                                    bitmapPaint.alpha = oldAlpha
+                                } else {
+                                    canvas.save(); canvas.clipRect(0, 0, (w * (1-f)).toInt(), h); drawLoadingState(canvas, w, h); canvas.restore()
                                 }
                             }
                             else -> { // "cut"
