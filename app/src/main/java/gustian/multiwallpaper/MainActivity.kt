@@ -1892,8 +1892,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp).horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf("slide" to "Slide", "fade" to "Fade", "tumble" to "Tumble", "cut" to "Cut").forEach { (type, label) ->
+                ) { listOf("slide" to "Slide", "fade" to "Fade", "tumble" to "Tumble", "zoom" to "Zoom", "cut" to "Cut").forEach { (type, label) ->
                         val selected = transition == type
                         FilterChip(
                             selected = selected,

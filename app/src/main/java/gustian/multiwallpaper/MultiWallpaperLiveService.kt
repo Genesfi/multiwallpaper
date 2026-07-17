@@ -173,6 +173,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var surfaceHeight = 2400
 
         private val pageBitmaps = mutableMapOf<Int, Bitmap>()
+        private val pageThumbnails = mutableMapOf<Int, Bitmap>() // Buffer 3 Lapis: Thumbnail Irit RAM
         private val pageUris = mutableMapOf<Int, String>() // Track URIs to prevent duplicates
         private val pageFocalPoints = mutableMapOf<Int, PointF?>()
         private val pageScrollOffsets = mutableMapOf<Int, Float?>() // 0.0 to 1.0 horizontal progress
@@ -1393,6 +1394,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             preloadNextWallpaper()
                         }
                     } else {
+                        // INSTANT START: Start transition even if bitmap is not ready
+                        startTransition()
                         startRotationTransition()
                     }
                     refreshOtherPages()
@@ -1414,10 +1417,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 // CRITICAL: We must skip pages that are part of the current active panoramic span
                 val protectedIndices = mutableSetOf<Int>()
                 val startIdx = manualPageIndex
+                protectedIndices.add(startIdx) // VETO: Always protect current page first
+                
                 synchronized(bitmapLock) {
                     val currentBmp = pageBitmaps[startIdx]
                     if (currentBmp != null) {
-                        protectedIndices.add(startIdx)
                         // Protect all pages sharing the same bitmap (existing pano)
                         for (i in 1 until maxPanoramicSpan) {
                             val p = (startIdx + i) % detectedPages
@@ -1441,47 +1445,45 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         Math.min(diff, detectedPages - diff) // Circular distance priority
                     }
 
+                // --- CONSOLIDATED 3-LAYER LOADING (Instant + Consistent) ---
+                // We process pages in priority order, handling Thumbnail then HQ for the SAME URI
                 if (panoramicScrollEnabled && !prefsName.contains("lock")) {
-                    // --- SEQUENTIAL PANORAMIC FILLING ---
-                    // Prevent race conditions where multiple parallel jobs claim the same span
-                    Log.d("MW_DEBUG", "[$prefsName] refreshOtherPages: Starting SEQUENTIAL Pano fill...")
+                    Log.d("MW_DEBUG", "[$prefsName] refreshOtherPages: Starting UNIFIED Pano fill...")
                     var i = 0
                     while (i < fillOrder.size && isActive) {
                         val p = fillOrder[i]
-                        
-                        // DEEP RESERVATION CHECK: 
-                        // Check if this page was filled by a span started earlier in this loop
-                        if (synchronized(bitmapLock) { protectedIndices.contains(p) }) {
-                            i++
-                            continue
-                        }
+                        if (synchronized(bitmapLock) { protectedIndices.contains(p) }) { i++; continue }
 
                         var nextUri: String? = null
-                        synchronized(pageUris) {
-                            if (candidates.isNotEmpty()) nextUri = candidates.removeAt(0)
-                        }
-                        
+                        synchronized(pageUris) { if (candidates.isNotEmpty()) nextUri = candidates.removeAt(0) }
                         if (nextUri == null) break
                         
+                        // 1. QUICK THUMBNAIL (Stage A)
+                        val thumb = decodeSampledBitmapFromUri(Uri.parse(nextUri!!), 240, 240, isBackground = true, isThumbnail = true)
+                        if (thumb != null) {
+                            withContext(Dispatchers.Main) {
+                                synchronized(bitmapLock) {
+                                    if (pageBitmaps[p] == null) pageThumbnails[p] = thumb
+                                    else thumb.recycle()
+                                }
+                                requestDraw()
+                            }
+                        }
+
+                        // 2. HQ UPGRADE (Stage B) - SAME URI
                         val b = decodeSampledBitmapFromUri(Uri.parse(nextUri!!), surfaceWidth, surfaceHeight, isBackground = true)
                         if (b != null) {
                             val imgRatio = b.width.toFloat() / b.height.toFloat()
                             val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
                             val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
                             val span = if (spanFactor > 1.2f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
-                            
                             val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b, nextUri!!) else null
                             
                             withContext(Dispatchers.Main) {
                                 synchronized(bitmapLock) {
-                                    Log.d("MW_DEBUG", "[$prefsName] refreshOtherPages: Filling Page $p with Pano (Span: $span)")
                                     for (j in 0 until span) {
                                         val targetP = (p + j) % detectedPages
-                                        // PROTECT: Don't overwrite the active page or its pre-existing pano
-                                        // However, we MUST overwrite other non-protected pages to be authoritative
-                                        if (protectedIndices.contains(targetP) && targetP != p) {
-                                            continue 
-                                        }
+                                        if (protectedIndices.contains(targetP) && targetP != p) continue 
                                         
                                         val old = pageBitmaps[targetP]
                                         pageBitmaps[targetP] = b
@@ -1489,69 +1491,62 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                         pageScrollOffsets[targetP] = if (span > 1) j.toFloat() / (span - 1).toFloat() else null
                                         pageFocalPoints[targetP] = focal
                                         if (old != b && old != null) {
-                                            // Only recycle if it's not the same bitmap we just put in (safety)
                                             var isStillUsed = false
                                             for(otherB in pageBitmaps.values) if(otherB == old) { isStillUsed = true; break }
                                             if(!isStillUsed) old.recycle()
                                         }
-                                        
                                         protectedIndices.add(targetP)
+                                        pageThumbnails[targetP]?.recycle(); pageThumbnails.remove(targetP)
                                     }
                                     requestDraw()
                                 }
                             }
                             addToHistory(nextUri!!)
-                            delay(50) // Yield for UI
+                            delay(50)
                         }
                         i++
                     }
                 } else {
-                    // --- STANDARD PARALLEL FILLING ---
-                    // Preserves speed for non-panoramic wallpapers
+                    // STANDARD PARALLEL LOADING (Now Consistent)
                     fillOrder.chunked(3).forEach { chunk ->
                         if (!isActive) return@launch
-                        
                         val jobs = chunk.map { p ->
                             async(Dispatchers.IO) {
                                 if (!isActive) return@async
-                                
                                 var nextUri: String? = null
                                 synchronized(pageUris) {
                                     val prevIdx = (p - 1 + detectedPages) % detectedPages
                                     val prevPageUri = pageUris[prevIdx]
                                     val prevPageFolder = prevPageUri?.let { Uri.parse(it).path?.substringBeforeLast('/') }
-                                    
-                                    val candIdx = candidates.indexOfFirst { cand -> 
-                                        !smartAdjacencyEnabled || Uri.parse(cand).path?.substringBeforeLast('/') != prevPageFolder
-                                    }
-                                    if (candIdx != -1) {
-                                        nextUri = candidates.removeAt(candIdx)
-                                    } else if (candidates.isNotEmpty()) {
-                                        nextUri = candidates.removeAt(0)
-                                    }
+                                    val candIdx = candidates.indexOfFirst { cand -> !smartAdjacencyEnabled || Uri.parse(cand).path?.substringBeforeLast('/') != prevPageFolder }
+                                    nextUri = if (candIdx != -1) candidates.removeAt(candIdx) else if (candidates.isNotEmpty()) candidates.removeAt(0) else null
                                 }
-                                
                                 if (nextUri == null) return@async
                                 
+                                // 1. QUICK THUMBNAIL (Stage A)
+                                val thumb = decodeSampledBitmapFromUri(Uri.parse(nextUri!!), 240, 240, isBackground = true, isThumbnail = true)
+                                if (thumb != null) {
+                                    withContext(Dispatchers.Main) {
+                                        synchronized(bitmapLock) { if (pageBitmaps[p] == null) pageThumbnails[p] = thumb else thumb.recycle() }
+                                        requestDraw()
+                                    }
+                                }
+
+                                // 2. HQ UPGRADE (Stage B) - SAME URI
                                 val b = decodeSampledBitmapFromUri(Uri.parse(nextUri!!), surfaceWidth, surfaceHeight, isBackground = true)
                                 if (b != null) {
                                     val focal = if (smartCropEnabled) detectFaceFocalPoint(b, nextUri!!) else null
-                                    
                                     withContext(Dispatchers.Main) {
                                         synchronized(bitmapLock) {
-                                            if (protectedIndices.contains(p)) {
-                                                b.recycle()
-                                                return@withContext
-                                            }
-
+                                            if (protectedIndices.contains(p)) { b.recycle(); return@withContext }
                                             val old = pageBitmaps[p]
                                             pageBitmaps[p] = b
                                             pageUris[p] = nextUri!!
                                             pageScrollOffsets[p] = null
                                             pageFocalPoints[p] = focal
                                             if (old != b) old?.recycle()
-                                            
                                             protectedIndices.add(p)
+                                            pageThumbnails[p]?.recycle(); pageThumbnails.remove(p)
                                         }
                                         requestDraw()
                                     }
@@ -1559,8 +1554,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 }
                             }
                         }
-                        jobs.awaitAll()
-                        delay(100)
+                        jobs.awaitAll(); delay(100)
                     }
                 }
 
@@ -1721,40 +1715,54 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             if (progress >= 1f) {
                 transitionAlpha = 255
                 isTransitioning = false
-                val old = pageBitmaps[manualPageIndex]
                 
-                Log.d("MW_DEBUG", "[$prefsName] Transition FINISHED. Next Span: $nextSpan")
+                synchronized(bitmapLock) {
+                    val next = nextBitmap
+                    if (next != null && !next.isRecycled) {
+                        val old = pageBitmaps[manualPageIndex]
+                        Log.d("MW_DEBUG", "[$prefsName] Transition FINISHED. Next Span: $nextSpan")
 
-                // Finalize the active page
-                pageBitmaps[manualPageIndex] = nextBitmap!!
-                pageFocalPoints[manualPageIndex] = nextFocalPoint
-                pageScrollOffsets[manualPageIndex] = nextScrollOffset
-                
-                // PANORAMIC FINALIZATION: If it was a pano, fill the neighbors now
-                if (nextSpan > 1) {
-                    val currentUri = pageUris[manualPageIndex] ?: ""
-                    for (i in 1 until nextSpan) {
-                        val targetP = (manualPageIndex + i) % detectedPages
-                        val oldNeighbor = pageBitmaps[targetP]
-                        pageBitmaps[targetP] = nextBitmap!!
-                        pageUris[targetP] = currentUri
-                        pageScrollOffsets[targetP] = i.toFloat() / (nextSpan - 1).toFloat()
-                        pageFocalPoints[targetP] = null
-                        if (oldNeighbor != nextBitmap) oldNeighbor?.recycle()
+                        // Finalize the active page
+                        pageBitmaps[manualPageIndex] = next
+                        pageFocalPoints[manualPageIndex] = nextFocalPoint
+                        pageScrollOffsets[manualPageIndex] = nextScrollOffset
+                        
+                        // PANORAMIC FINALIZATION: If it was a pano, fill the neighbors now
+                        if (nextSpan > 1) {
+                            val currentUri = pageUris[manualPageIndex] ?: ""
+                            for (i in 1 until nextSpan) {
+                                val targetP = (manualPageIndex + i) % detectedPages
+                                val oldNeighbor = pageBitmaps[targetP]
+                                pageBitmaps[targetP] = next
+                                pageUris[targetP] = currentUri
+                                pageScrollOffsets[targetP] = i.toFloat() / (nextSpan - 1).toFloat()
+                                pageFocalPoints[targetP] = null
+                                if (oldNeighbor != next && oldNeighbor != null) oldNeighbor.recycle()
+                            }
+                        }
+
+                        if (old != next && old != null) old.recycle()
+                        
+                        nextBitmap = null
+                        nextFocalPoint = null
+                        nextScrollOffset = null
+                        nextSpan = 1
+                        
+                        // Successfully loaded and swapped
+                        if (isLoading) isLoading = false
+                    } else {
+                        Log.w("MW_DEBUG", "[$prefsName] Transition FINISHED but nextBitmap is missing. Cleaning up old bitmap to prevent snap-back.")
+                        // SNAP-BACK FIX: Recycle old bitmap so it doesn't reappear while waiting for rotation job
+                        val old = pageBitmaps[manualPageIndex]
+                        if (old != null) {
+                            pageBitmaps.remove(manualPageIndex)
+                            pageUris.remove(manualPageIndex)
+                            old.recycle()
+                        }
+                        // Keep isLoading = true to ensure spinner stays visible
                     }
                 }
-
-                nextBitmap = null
-                nextFocalPoint = null
-                nextScrollOffset = null
-                nextSpan = 1
-                if (old != pageBitmaps[manualPageIndex]) old?.recycle()
                 
-                // FIX: Also clear isLoading here just in case
-                if (isLoading) {
-                    isLoading = false
-                }
-
                 requestDraw()
                 scheduleRotation()
                 
@@ -1898,141 +1906,128 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         if (firstBitmap != null) {
                             addToHistory(visibleUri)
                         }
-                        // SHOW CURRENT IMAGES IMMEDIATELY BUT KEEP isLoading=true FOR OTHERS
-                        requestDraw()
                     }
+                    // SHOW CURRENT IMAGES IMMEDIATELY BUT KEEP isLoading=true FOR OTHERS
+                    requestDraw()
 
                     if (!isActive) return@launch
 
-                    // STAGGERED PARALLEL LOADING:
+                    // --- CONSOLIDATED 3-LAYER LOADING (Instant + Consistent) ---
                     if (panoramicScrollEnabled && !prefsName.contains("lock")) {
                         val filledIndices = mutableSetOf<Int>()
-                        synchronized(bitmapLock) {
-                            for (i in 0 until firstSpan) {
-                                filledIndices.add((manualPageIndex + i) % detectedPages)
-                            }
-                        }
+                        synchronized(bitmapLock) { for (i in 0 until firstSpan) filledIndices.add((manualPageIndex + i) % detectedPages) }
 
-                        var p = 0
-                        while (p < detectedPages && isActive) {
-                            if (filledIndices.contains(p)) { p++; continue }
+                        val pOrder = (0 until detectedPages).filter { !filledIndices.contains(it) }.sortedBy { p -> val diff = Math.abs(p - manualPageIndex); Math.min(diff, detectedPages - diff) }
+
+                        var iIdx = 0
+                        while (iIdx < pOrder.size && isActive) {
+                            val p = pOrder[iIdx]
+                            if (synchronized(bitmapLock) { filledIndices.contains(p) }) { iIdx++; continue }
                             
                             var selectedUri: String? = null
-                            synchronized(uriCandidates) {
-                                if (uriCandidates.isNotEmpty()) selectedUri = uriCandidates.removeAt(0)
-                            }
+                            synchronized(uriCandidates) { if (uriCandidates.isNotEmpty()) selectedUri = uriCandidates.removeAt(0) }
                             val uri = selectedUri ?: break
                             
+                            // 1. QUICK THUMBNAIL (Stage A)
+                            val thumb = decodeSampledBitmapFromUri(Uri.parse(uri), 240, 240, isBackground = true, isThumbnail = true)
+                            if (thumb != null) {
+                                withContext(Dispatchers.Main) {
+                                    synchronized(bitmapLock) { if (pageBitmaps[p] == null) pageThumbnails[p] = thumb else thumb.recycle() }
+                                    requestDraw()
+                                }
+                            }
+
+                            // 2. HQ UPGRADE (Stage B) - SAME URI
                             val b = withContext(Dispatchers.IO) { decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight, isBackground = true) }
                             if (b != null) {
-                                // Calculate Span
                                 val imgRatio = b.width.toFloat() / b.height.toFloat()
                                 val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
                                 val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
                                 val span = if (spanFactor > 1.2f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
+                                val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b, uri) else null
                                 
-                                for (i in 0 until span) {
-                                    val targetP = (p + i) % detectedPages
-                                    if (targetP == manualPageIndex) continue
-                                    
-                                    val offset = if (span > 1) i.toFloat() / (span - 1).toFloat() else null
-                                    val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b, uri) else null
-                                    
-                                    withContext(Dispatchers.Main) {
-                                        synchronized(bitmapLock) {
-                                            // PROTEKSI: Jangan menimpa halaman yang sudah dipesan oleh panorama lain
-                                            if (targetP != manualPageIndex) {
-                                                pageBitmaps[targetP]?.recycle()
-                                                pageBitmaps[targetP] = b
-                                                pageUris[targetP] = uri
-                                                pageFocalPoints[targetP] = focal
-                                                pageScrollOffsets[targetP] = offset
-                                                filledIndices.add(targetP)
+                                withContext(Dispatchers.Main) {
+                                    synchronized(bitmapLock) {
+                                        for (j in 0 until span) {
+                                            val targetP = (p + j) % detectedPages
+                                            if (targetP == manualPageIndex || (filledIndices.contains(targetP) && targetP != p)) continue
+                                            val old = pageBitmaps[targetP]
+                                            pageBitmaps[targetP] = b
+                                            pageUris[targetP] = uri
+                                            pageFocalPoints[targetP] = focal
+                                            pageScrollOffsets[targetP] = if (span > 1) j.toFloat() / (span - 1).toFloat() else null
+                                            filledIndices.add(targetP)
+                                            pageThumbnails[targetP]?.recycle(); pageThumbnails.remove(targetP)
+                                            if (old != b && old != null) {
+                                                var isStillUsed = false
+                                                for(otherB in pageBitmaps.values) if(otherB == old) { isStillUsed = true; break }
+                                                if(!isStillUsed) old.recycle()
                                             }
                                         }
-                                        requestDraw()
                                     }
+                                    requestDraw()
                                 }
                                 addToHistory(uri)
-                                p += span
-                            } else {
-                                p++
                             }
-                            // STAGGERED DELAY: Longer delay during boot phase to let system settle
-                            delay(if (isBootPhase) 800L else 50L)
+                            iIdx++; delay(if (isBootPhase) 800L else 50L)
                         }
                     } else {
-                        // ORIGINAL PARALLEL LOGIC for non-panoramic
+                        // ORIGINAL PARALLEL LOGIC (Now Consistent)
                         val targetPageCount = detectedPages.coerceAtMost(total)
                         val filledIndicesNonPano = mutableSetOf<Int>()
-                        synchronized(bitmapLock) {
-                            if (pageBitmaps.containsKey(manualPageIndex)) {
-                                filledIndicesNonPano.add(manualPageIndex)
-                            }
-                        }
+                        synchronized(bitmapLock) { if (pageBitmaps.containsKey(manualPageIndex)) filledIndicesNonPano.add(manualPageIndex) }
 
-                        val priorityOrder = (0 until targetPageCount).filter { !filledIndicesNonPano.contains(it) }
-                            .sortedBy { p ->
-                                val diff = Math.abs(p - manualPageIndex)
-                                Math.min(diff, targetPageCount - diff) // Circular distance
-                            }
+                        val priorityOrder = (0 until targetPageCount).filter { !filledIndicesNonPano.contains(it) }.sortedBy { p -> val diff = Math.abs(p - manualPageIndex); Math.min(diff, targetPageCount - diff) }
 
-                        // BOOT OPTIMIZATION: Use smaller chunks and longer delays
                         val chunkSize = if (isBootPhase) 1 else 3
-                        val chunks = priorityOrder.chunked(chunkSize)
-                        chunks.forEachIndexed { _, chunk ->
+                        priorityOrder.chunked(chunkSize).forEach { chunk ->
                             if (!isActive) return@launch
-                            
-                            val jobs = chunk.map { p ->
+                            chunk.map { p ->
                                 async(Dispatchers.IO) {
                                     if (!isActive) return@async
-                                    
                                     var selectedUri: String? = null
-                                    try {
-                                        synchronized(uriCandidates) {
-                                            if (uriCandidates.isNotEmpty()) {
-                                                var candIdx = -1
-                                                val prevIdx = (p - 1 + targetPageCount) % targetPageCount
-                                                val prevPageUri = synchronized(pageUris) { pageUris[prevIdx] }
-                                                val prevPageFolder = prevPageUri?.let { Uri.parse(it).path?.substringBeforeLast('/') }
-                                                
-                                                if (smartAdjacencyEnabled && prevPageFolder != null) {
-                                                    candIdx = uriCandidates.indexOfFirst { 
-                                                        Uri.parse(it).path?.substringBeforeLast('/') != prevPageFolder 
-                                                    }
-                                                }
-                                                
-                                                selectedUri = if (candIdx != -1) {
-                                                    uriCandidates.removeAt(candIdx)
-                                                } else {
-                                                    uriCandidates.removeAt(0)
-                                                }
-                                            }
+                                    synchronized(uriCandidates) {
+                                        if (uriCandidates.isNotEmpty()) {
+                                            val prevIdx = (p - 1 + targetPageCount) % targetPageCount
+                                            val prevPageUri = pageUris[prevIdx]
+                                            val prevPageFolder = prevPageUri?.let { Uri.parse(it).path?.substringBeforeLast('/') }
+                                            val candIdx = if (smartAdjacencyEnabled && prevPageFolder != null) uriCandidates.indexOfFirst { Uri.parse(it).path?.substringBeforeLast('/') != prevPageFolder } else -1
+                                            selectedUri = if (candIdx != -1) uriCandidates.removeAt(candIdx) else uriCandidates.removeAt(0)
                                         }
+                                    }
+                                    val uri = selectedUri ?: return@async
 
-                                        val uri = selectedUri ?: return@async
-                                        val b = decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight, isBackground = true)
-                                        
-                                        if (b != null) {
-                                            val focal = if (smartCropEnabled) detectFaceFocalPoint(b, uri) else null
-                                            withContext(Dispatchers.Main) {
-                                                synchronized(bitmapLock) {
-                                                    val old = pageBitmaps[p]
-                                                    pageBitmaps[p] = b
-                                                    synchronized(pageUris) { pageUris[p] = uri }
-                                                    pageFocalPoints[p] = focal
-                                                    pageScrollOffsets[p] = null
-                                                    old?.recycle()
-                                                    filledIndicesNonPano.add(p)
-                                                }
-                                                requestDraw()
-                                            }
-                                            addToHistory(uri)
+                                    // 1. QUICK THUMBNAIL (Stage A)
+                                    val thumb = decodeSampledBitmapFromUri(Uri.parse(uri), 240, 240, isBackground = true, isThumbnail = true)
+                                    if (thumb != null) {
+                                        withContext(Dispatchers.Main) {
+                                            synchronized(bitmapLock) { if (pageBitmaps[p] == null) pageThumbnails[p] = thumb else thumb.recycle() }
+                                            requestDraw()
                                         }
-                                    } catch (e: Exception) {}
+                                    }
+
+                                    // 2. HQ UPGRADE (Stage B) - SAME URI
+                                    val b = decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight, isBackground = true)
+                                    if (b != null) {
+                                        val focal = if (smartCropEnabled) detectFaceFocalPoint(b, uri) else null
+                                        withContext(Dispatchers.Main) {
+                                            synchronized(bitmapLock) {
+                                                if (filledIndicesNonPano.contains(p)) { b.recycle(); return@withContext }
+                                                val old = pageBitmaps[p]
+                                                pageBitmaps[p] = b
+                                                pageUris[p] = uri
+                                                pageFocalPoints[p] = focal
+                                                pageScrollOffsets[p] = null
+                                                if (old != b) old?.recycle()
+                                                filledIndicesNonPano.add(p)
+                                                pageThumbnails[p]?.recycle(); pageThumbnails.remove(p)
+                                            }
+                                            requestDraw()
+                                        }
+                                        addToHistory(uri)
+                                    }
                                 }
-                            }
-                            jobs.awaitAll()
+                            }.awaitAll()
                             delay(if (isBootPhase) 1500L else 100L)
                         }
                     }
@@ -2164,6 +2159,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             // --- PHASE 2: GAP REPAIR (EMPTY PAGES) ---
             for (i in targetIndices) {
                 if (!engineScope.isActive) break
+                if (i == manualPageIndex && isTransitioning) continue // VETO: Don't touch active page during rotation
                 
                 val isTrulyEmpty = synchronized(bitmapLock) { 
                     val b = pageBitmaps[i]
@@ -2358,7 +2354,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             }
         }
 
-        private fun decodeSampledBitmapFromUri(uri: Uri, reqWidth: Int, reqHeight: Int, isBackground: Boolean = false): Bitmap? {
+        private fun decodeSampledBitmapFromUri(uri: Uri, reqWidth: Int, reqHeight: Int, isBackground: Boolean = false, isThumbnail: Boolean = false): Bitmap? {
             return try {
                 // Get Orientation first
                 val orientation = contentResolver.openInputStream(uri)?.use { input ->
@@ -2371,9 +2367,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     BitmapFactory.decodeStream(input, null, opt)
                     
                     // Quality-based max resolution
-                    val baseRes = when (wallpaperQuality) {
-                        "HIGH" -> 1920
-                        "LOW" -> 1080
+                    val baseRes = when {
+                        isThumbnail -> 240 // Sangat Kecil untuk Thumbnail Siaga
+                        wallpaperQuality == "HIGH" -> 1920
+                        wallpaperQuality == "LOW" -> 1080
                         else -> 1440 // NORMAL
                     }
                     
@@ -2381,7 +2378,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     var maxHeight = baseRes
 
                     // Only downscale below the Tier cap if Power Saving (Light Mode) is ON
-                    if (lightModeEnabled) {
+                    if (lightModeEnabled && !isThumbnail) {
                         val factor = 0.75f
                         maxWidth = (maxWidth * factor).toInt().coerceAtLeast(720)
                         maxHeight = (maxHeight * factor).toInt().coerceAtLeast(720)
@@ -2392,6 +2389,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     
                     // Bitmap configuration selection
                     opt.inPreferredConfig = when {
+                        isThumbnail -> Bitmap.Config.RGB_565 // Selalu irit RAM untuk thumbnail
                         // HIGH ignores everything and stays high quality
                         wallpaperQuality == "HIGH" -> Bitmap.Config.ARGB_8888
                         // LOW is always power saving
@@ -2458,6 +2456,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private fun recycleBitmaps() {
             pageBitmaps.values.forEach { if (!it.isRecycled) it.recycle() }
             pageBitmaps.clear()
+            pageThumbnails.values.forEach { if (!it.isRecycled) it.recycle() }
+            pageThumbnails.clear()
             pageFocalPoints.clear()
             pageUris.clear()
             // recentHistory.clear() // REMOVED: Now persistent in companion object
@@ -2525,9 +2525,17 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             // CRITICAL: Always clear background to prevent smearing/ghosting
             canvas.drawColor(Color.parseColor("#1A1F2C"))
 
-            // SMART DRAW: Jika memory kosong baru tampilkan spinner/teks.
-            // Jangan nunggu isLoading=false karena loading 20 page butuh waktu di background.
-            if (pageBitmaps.isEmpty()) {
+            // SMART DRAW: Support per-page loading state instead of global check
+            val pos = if (xStep > 0f) {
+                xOffset / xStep
+            } else {
+                val rawPos = manualPageIndex.toFloat() - swipeOffset
+                val total = detectedPages.toFloat().coerceAtLeast(1f)
+                (rawPos % total + total) % total
+            }
+            val idx = pos.roundToInt() % detectedPages
+
+            if (pageBitmaps.isEmpty() && !isTransitioning) {
                 if (isLoading) {
                     drawLoadingState(canvas, w, h)
                 } else {
@@ -2541,19 +2549,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             } else {
                 isSwiping || isSwipeAnimating // Stay fluid during swipe animation
             }
-            
-            val pos = if (xStep > 0f) {
-                xOffset / xStep
-            } else {
-                // CIRCULAR POS LOGIC: (CurrentIndex - Offset + Total) % Total
-                // This allows smooth wrap-around swiping (e.g. 20 -> 1)
-                val rawPos = manualPageIndex.toFloat() - swipeOffset
-                val total = detectedPages.toFloat().coerceAtLeast(1f)
-                (rawPos % total + total) % total
-            }
-            
-            val maxIdx = (detectedPages - 1).coerceAtLeast(0)
-            val idx = pos.roundToInt() % detectedPages
 
             // FOCAL POINT INTERPOLATION (Fixes effect "jolt" during transitions)
             var focal: PointF? = null
@@ -2576,8 +2571,16 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     val node = visualEffectNode!!
                     node.setPosition(0, 0, w, h)
                     
-                    // Apply Blur to the Node (Global background blur)
-                    val actualBlur = if (blurEnabled) blurRadius else 0f
+                    // SMART BLUR: If HQ is missing but thumbnail exists, apply heavy blur to thumbnail
+                    val hqBitmap = pageBitmaps[idx]
+                    val thumbBitmap = pageThumbnails[idx]
+                    val isUsingPlaceholder = hqBitmap == null && thumbBitmap != null
+                    
+                    // Apply Blur to the Node (Global background blur OR placeholder blur)
+                    val baseBlur = if (blurEnabled) blurRadius else 0f
+                    val placeholderBlur = if (isUsingPlaceholder) 40f else 0f
+                    val actualBlur = maxOf(baseBlur, placeholderBlur)
+                    
                     if (actualBlur > 0f) {
                         node.setRenderEffect(RenderEffect.createBlurEffect(actualBlur, actualBlur, Shader.TileMode.CLAMP))
                     } else {
@@ -2586,8 +2589,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                     // Record drawing into the Node
                     val recordingCanvas = node.beginRecording()
-                    // REMOVED solid drawColor here to allow transparency for Tumble Aura
-                    drawWallpaperContent(recordingCanvas, w, h, isFluid, pos, idx)
+                    if (isUsingPlaceholder) {
+                        // Draw the thumbnail as base for blur
+                        drawSingleBitmap(recordingCanvas, thumbBitmap!!, w, h, idx)
+                    } else {
+                        drawWallpaperContent(recordingCanvas, w, h, isFluid, pos, idx)
+                    }
                     node.endRecording()
 
                     // Draw the Node (Blurred background)
@@ -2612,7 +2619,15 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
             } else {
                 // FALLBACK for older Android or non-HW canvas
-                drawWallpaperContent(canvas, w, h, isFluid, pos, idx)
+                val hqBitmap = pageBitmaps[idx]
+                val thumbBitmap = pageThumbnails[idx]
+                
+                if (hqBitmap == null && thumbBitmap != null) {
+                    drawSingleBitmap(canvas, thumbBitmap, w, h, idx)
+                } else {
+                    drawWallpaperContent(canvas, w, h, isFluid, pos, idx)
+                }
+
                 if (subjectFocusEnabled && focal != null) {
                     if (dimEnabled && dimIntensity > 0f) drawSubjectFocus(canvas, w.toFloat(), h.toFloat(), focal)
                     if (blurEnabled && blurRadius > 0f) drawSharpSubject(canvas, w.toFloat(), h.toFloat(), focal, isFluid, pos, idx)
@@ -2757,40 +2772,110 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 transitionType
             }
 
-            // Priority 1: Auto-Rotation Transitions
-            if (isTransitioning && nextBitmap != null && !nextBitmap!!.isRecycled) {
+            // Priority 1: Auto-Rotation Transitions (Shake/Timer)
+            if (isTransitioning) {
                 val curr = pageBitmaps[manualPageIndex]
-                if (curr != null && !curr.isRecycled) {
-                    val currFocal = if (smartCropEnabled) pageFocalPoints[manualPageIndex] else null
-                    val currScroll = pageScrollOffsets[manualPageIndex]
-                    
-                    if (effectiveTransition == "fade") {
-                        calculateRects(curr, w, h, srcRect, dstRect, currFocal, currScroll)
-                        canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
-                        
-                        val oldAlpha = bitmapPaint.alpha
-                        bitmapPaint.alpha = transitionAlpha
-                        // Next image rotation target uses its pre-calculated panoramic scroll offset
-                        calculateRects(nextBitmap!!, w, h, nextSrcRect, nextDstRect, nextFocalPoint, nextScrollOffset)
-                        canvas.drawBitmap(nextBitmap!!, nextSrcRect, nextDstRect, bitmapPaint)
-                        bitmapPaint.alpha = oldAlpha
-                    } else if (effectiveTransition == "slide") {
-                        val progress = transitionAlpha.toFloat() / 255f
-                        calculateRects(curr, w, h, srcRect, dstRect, currFocal, currScroll)
-                        dstRect.offset(-progress * w, 0f)
-                        canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
-                        
-                        calculateRects(nextBitmap!!, w, h, nextSrcRect, nextDstRect, nextFocalPoint, nextScrollOffset)
-                        nextDstRect.offset((1f - progress) * w, 0f)
-                        canvas.drawBitmap(nextBitmap!!, nextSrcRect, nextDstRect, bitmapPaint)
-                    } else if (effectiveTransition == "tumble") {
-                        val progress = transitionAlpha.toFloat() / 255f
-                        drawTumbleTransition(canvas, curr, nextBitmap!!, w, h, currFocal, nextFocalPoint, progress, nextScrollOffset)
-                    } else { // "cut" or default
-                        drawSingleBitmap(canvas, nextBitmap!!, w, h, -1) // -1 use nextFocalPoint
-                    }
+                val next = if (nextBitmap != null && !nextBitmap!!.isRecycled) nextBitmap else null
+                
+                // If we have nothing to draw, show loading
+                if (curr == null && next == null) {
+                    drawLoadingState(canvas, w, h)
                     return
                 }
+
+                val currFocal = if (smartCropEnabled) pageFocalPoints[manualPageIndex] else null
+                val currScroll = pageScrollOffsets[manualPageIndex]
+                val progress = transitionAlpha.toFloat() / 255f
+
+                when (effectiveTransition) {
+                    "fade" -> {
+                        // 1. Reveal Loading if next is missing
+                        if (next == null) {
+                            drawLoadingState(canvas, w, h)
+                        }
+
+                        // 2. Draw current fading out
+                        if (curr != null && !curr.isRecycled) {
+                            val oldAlpha = bitmapPaint.alpha
+                            bitmapPaint.alpha = (255 * (1f - progress)).toInt()
+                            calculateRects(curr, w, h, srcRect, dstRect, currFocal, currScroll)
+                            canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
+                            bitmapPaint.alpha = oldAlpha
+                        }
+                        
+                        // 3. Draw next fading in
+                        if (next != null) {
+                            val oldAlpha = bitmapPaint.alpha
+                            bitmapPaint.alpha = transitionAlpha
+                            calculateRects(next, w, h, nextSrcRect, nextDstRect, nextFocalPoint, nextScrollOffset)
+                            canvas.drawBitmap(next, nextSrcRect, nextDstRect, bitmapPaint)
+                            bitmapPaint.alpha = oldAlpha
+                        }
+                    }
+                    "slide" -> {
+                        // 1. Reveal Loading or Next underneath
+                        if (next == null) {
+                            drawLoadingState(canvas, w, h)
+                        } else {
+                            calculateRects(next, w, h, nextSrcRect, nextDstRect, nextFocalPoint, nextScrollOffset)
+                            nextDstRect.offset((1f - progress) * w, 0f)
+                            canvas.drawBitmap(next, nextSrcRect, nextDstRect, bitmapPaint)
+                        }
+                        
+                        // 2. Current moves out on top
+                        if (curr != null && !curr.isRecycled) {
+                            calculateRects(curr, w, h, srcRect, dstRect, currFocal, currScroll)
+                            dstRect.offset(-progress * w, 0f)
+                            canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
+                        }
+                    }
+                    "tumble" -> {
+                        if (next != null && curr != null) {
+                            drawTumbleTransition(canvas, curr, next, w, h, currFocal, nextFocalPoint, progress, nextScrollOffset)
+                        } else if (curr != null) {
+                            // Tumble out to loading
+                            drawLoadingState(canvas, w, h)
+                            drawTumbleTransition(canvas, curr, curr, w, h, currFocal, currFocal, progress, currScroll, onlyOut = true)
+                        } else {
+                            drawLoadingState(canvas, w, h)
+                        }
+                    }
+                    "zoom" -> {
+                        // 1. Reveal Loading or Next behind
+                        if (next == null) {
+                            drawLoadingState(canvas, w, h)
+                        } else {
+                            calculateRects(next, w, h, nextSrcRect, nextDstRect, nextFocalPoint, nextScrollOffset)
+                            canvas.drawBitmap(next, nextSrcRect, nextDstRect, bitmapPaint)
+                        }
+
+                        // 2. Current EXPANDS and fades out on top (Redesigned)
+                        if (curr != null && !curr.isRecycled) {
+                            val scale = 1f + (progress * 2.5f) // Expand to 350% (Warp Feel)
+                            val alpha = (255 * (1f - progress)).toInt()
+                            val oldAlpha = bitmapPaint.alpha
+                            bitmapPaint.alpha = alpha
+                            
+                            calculateRects(curr, w, h, srcRect, dstRect, currFocal, currScroll)
+                            val centerX = dstRect.centerX()
+                            val centerY = dstRect.centerY()
+                            val dw = dstRect.width() * scale
+                            val dh = dstRect.height() * scale
+                            dstRect.set(centerX - dw/2, centerY - dh/2, centerX + dw/2, centerY + dh/2)
+                            
+                            canvas.drawBitmap(curr, srcRect, dstRect, bitmapPaint)
+                            bitmapPaint.alpha = oldAlpha
+                        }
+                    }
+                    else -> { // "cut"
+                        if (next != null) {
+                            drawSingleBitmap(canvas, next, w, h, -1)
+                        } else {
+                            drawLoadingState(canvas, w, h)
+                        }
+                    }
+                }
+                return
             }
 
             // Priority 2: Manual Swipe Transitions
@@ -2805,51 +2890,74 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 // CEK APAKAH KEDUA HALAMAN INI SATU FOTO PANORAMA YANG SAMA
                 val isSamePano = lb != null && rb != null && lb == rb && pageUris[l] == pageUris[r]
 
-                if (lb != null && !lb.isRecycled && rb != null && !rb.isRecycled && l != r) {
+                if (l != r) {
                     val lf = if (smartCropEnabled) pageFocalPoints[l] else null
                     val rf = if (smartCropEnabled) pageFocalPoints[r] else null
                     val ls = pageScrollOffsets[l]
                     val rs = pageScrollOffsets[r]
                     
-                    if (isSamePano && ls != null && rs != null) {
+                    if (isSamePano && ls != null && rs != null && lb != null && !lb.isRecycled) {
                         // --- SEAMLESS PANO SCROLL ---
-                        // Abaikan efek Slide/Fade, murni interpolasi scroll offset
                         val interpolatedScroll = ls + (rs - ls) * f
                         calculateRects(lb, w, h, srcRect, dstRect, lf, interpolatedScroll)
                         canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
                     } else {
                         // --- STANDARD TRANSITION (Slide/Fade/etc) ---
-                        calculateRects(lb, w, h, srcRect, dstRect, lf, ls)
-                        calculateRects(rb, w, h, nextSrcRect, nextDstRect, rf, rs)
+                        if (lb != null && !lb.isRecycled) calculateRects(lb, w, h, srcRect, dstRect, lf, ls)
+                        if (rb != null && !rb.isRecycled) calculateRects(rb, w, h, nextSrcRect, nextDstRect, rf, rs)
 
-                        if (effectiveTransition == "fade") {
-                            val oldAlpha = bitmapPaint.alpha
-                            bitmapPaint.alpha = ((1f - f) * 255).toInt()
-                            canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
-                            
-                            bitmapPaint.alpha = (f * 255).toInt()
-                            canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
-                            bitmapPaint.alpha = oldAlpha
-                        } else if (effectiveTransition == "slide") {
-                            dstRect.offset(-f * w, 0f)
-                            canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
-                            
-                            nextDstRect.offset((1f - f) * w, 0f)
-                            canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
-                        } else if (effectiveTransition == "tumble") {
-                            drawTumbleTransition(canvas, lb, rb, w, h, lf, rf, f)
-                        } else { // "cut"
-                            val activeB = pageBitmaps[idx]
-                            if (activeB != null) drawSingleBitmap(canvas, activeB, w, h, idx)
+                        when (effectiveTransition) {
+                            "fade" -> {
+                                if (lb != null && !lb.isRecycled) {
+                                    val oldAlpha = bitmapPaint.alpha
+                                    bitmapPaint.alpha = ((1f - f) * 255).toInt()
+                                    canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
+                                    bitmapPaint.alpha = oldAlpha
+                                } else {
+                                    drawLoadingState(canvas, w, h)
+                                }
+                                
+                                if (rb != null && !rb.isRecycled) {
+                                    val oldAlpha = bitmapPaint.alpha
+                                    bitmapPaint.alpha = (f * 255).toInt()
+                                    canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
+                                    bitmapPaint.alpha = oldAlpha
+                                } else {
+                                    drawLoadingState(canvas, w, h)
+                                }
+                            }
+                            "slide" -> {
+                                if (lb != null && !lb.isRecycled) {
+                                    dstRect.offset(-f * w, 0f)
+                                    canvas.drawBitmap(lb, srcRect, dstRect, bitmapPaint)
+                                } else {
+                                    canvas.save(); canvas.clipRect(0, 0, (w * (1-f)).toInt(), h); drawLoadingState(canvas, w, h); canvas.restore()
+                                }
+                                
+                                if (rb != null && !rb.isRecycled) {
+                                    nextDstRect.offset((1f - f) * w, 0f)
+                                    canvas.drawBitmap(rb, nextSrcRect, nextDstRect, bitmapPaint)
+                                } else {
+                                    canvas.save(); canvas.clipRect((w * (1-f)).toInt(), 0, w, h); drawLoadingState(canvas, w, h); canvas.restore()
+                                }
+                            }
+                            "tumble" -> {
+                                if (lb != null && rb != null && !lb.isRecycled && !rb.isRecycled) {
+                                    drawTumbleTransition(canvas, lb, rb, w, h, lf, rf, f)
+                                } else {
+                                    // Fallback to simpler draw if one is missing
+                                    if (lb != null) drawSingleBitmap(canvas, lb, w, h, l)
+                                    else if (rb != null) drawSingleBitmap(canvas, rb, w, h, r)
+                                    else drawLoadingState(canvas, w, h)
+                                }
+                            }
+                            else -> { // "cut"
+                                val activeB = pageBitmaps[idx]
+                                if (activeB != null) drawSingleBitmap(canvas, activeB, w, h, idx)
+                                else drawLoadingState(canvas, w, h)
+                            }
                         }
                     }
-                    return
-                }
-else if (lb != null && !lb.isRecycled) {
-                    drawSingleBitmap(canvas, lb, w, h, l)
-                    return
-                } else if (rb != null && !rb.isRecycled) {
-                    drawSingleBitmap(canvas, rb, w, h, r)
                     return
                 }
             }
@@ -2863,13 +2971,13 @@ else if (lb != null && !lb.isRecycled) {
             }
         }
 
-        private fun drawTumbleTransition(canvas: Canvas, b1: Bitmap, b2: Bitmap, w: Int, h: Int, f1: PointF?, f2: PointF?, progress: Float, scroll2: Float? = null) {
+        private fun drawTumbleTransition(canvas: Canvas, b1: Bitmap, b2: Bitmap, w: Int, h: Int, f1: PointF?, f2: PointF?, progress: Float, scroll2: Float? = null, onlyOut: Boolean = false) {
             val rotationMax = 25f // Sudut rotasi 2D
             val splitX = (1f - progress) * w
 
             // 1. Gambar Sisi Kiri (WP 1 + Background Tile Miring)
             canvas.save()
-            canvas.clipRect(0f, 0f, splitX, h.toFloat()) // Hard Cut kiri
+            if (!onlyOut) canvas.clipRect(0f, 0f, splitX, h.toFloat()) // Hard Cut kiri
             
             canvas.rotate(-progress * rotationMax, w / 2f, h.toFloat())
             canvas.translate(-progress * w, 0f)
@@ -2878,10 +2986,11 @@ else if (lb != null && !lb.isRecycled) {
             drawProfessionalTiltedBackground(canvas, b1, w, h, true)
             
             // B. Draw Sharp Card
-            // Assuming WP1 is current page, it uses its own scroll offset
             calculateRects(b1, w, h, srcRect, dstRect, f1, pageScrollOffsets[manualPageIndex])
             canvas.drawBitmap(b1, srcRect, dstRect, bitmapPaint)
             canvas.restore()
+
+            if (onlyOut) return
 
             // 2. Gambar Sisi Kanan (WP 2 + Background Tile Miring)
             canvas.save()
