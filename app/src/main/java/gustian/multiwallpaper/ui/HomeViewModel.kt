@@ -467,7 +467,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     favoriteDao.getAllFavoritesSync(targetName).map { it.uriString }.toSet()
                 }
                 val images = entities.map { 
-                    WallpaperImg(it.uriString, it.folderUriString, it.displayName, favUris.contains(it.uriString), it.dateModified)
+                    WallpaperImg(
+                        it.uriString, 
+                        it.folderUriString, 
+                        it.displayName, 
+                        favUris.contains(it.uriString), 
+                        it.dateModified,
+                        it.focalX,
+                        it.focalY
+                    )
                 }
                 _scannedImages.value = images
                 currentPrefs?.edit()?.putInt("total_scanned_count", images.size)?.apply()
@@ -1660,7 +1668,9 @@ data class WallpaperImg(
     val folderUriString: String,
     val displayName: String,
     val isFavorite: Boolean,
-    val date: Long = 0
+    val date: Long = 0,
+    val focalX: Float? = null,
+    val focalY: Float? = null
 )
 
 data class FileItem(

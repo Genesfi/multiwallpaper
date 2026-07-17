@@ -3069,10 +3069,26 @@ fun ImageDetailDialog(
                         },
                     contentAlignment = Alignment.Center
                 ) {
+                    val focalPoint = remember(img, isSmartPreview) {
+                        if (isSmartPreview && img.focalX != null && img.focalY != null) {
+                            androidx.compose.ui.graphics.TransformOrigin(img.focalX, img.focalY)
+                        } else {
+                            androidx.compose.ui.graphics.TransformOrigin.Center
+                        }
+                    }
+
                     AsyncImage(
                         model = Uri.parse(img.uriString),
                         contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                if (isSmartPreview && img.focalX != null && img.focalY != null) {
+                                    transformOrigin = focalPoint
+                                    scaleX = 1.35f // Default AI Slack simulation
+                                    scaleY = 1.35f
+                                }
+                            },
                         contentScale = if (isSmartPreview) ContentScale.Crop else ContentScale.Fit
                     )
                 }
@@ -3182,22 +3198,27 @@ fun ImageDetailDialog(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         // Smart Preview Toggle
-                        IconButton(
-                            onClick = { isSmartPreview = !isSmartPreview },
-                            modifier = Modifier
-                                .size(48.dp)
-                                .background(
-                                    if (isSmartPreview) MaterialTheme.colorScheme.primary 
-                                    else Color.White.copy(alpha = 0.1f), 
-                                    RoundedCornerShape(12.dp)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            IconButton(
+                                onClick = { isSmartPreview = !isSmartPreview },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(
+                                        if (isSmartPreview) MaterialTheme.colorScheme.primary 
+                                        else Color.White.copy(alpha = 0.1f), 
+                                        RoundedCornerShape(12.dp)
+                                    )
+                            ) {
+                                Icon(
+                                    if (isSmartPreview) Icons.Default.AutoFixHigh else Icons.Default.AutoFixOff,
+                                    null,
+                                    modifier = Modifier.size(20.dp),
+                                    tint = if (isSmartPreview) Color.White else Color.White.copy(alpha = 0.7f)
                                 )
-                        ) {
-                            Icon(
-                                if (isSmartPreview) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                null,
-                                modifier = Modifier.size(20.dp),
-                                tint = if (isSmartPreview) Color.White else Color.White.copy(alpha = 0.7f)
-                            )
+                            }
+                            if (isSmartPreview && (img.focalX == null || img.focalY == null)) {
+                                Text("No AI Data", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f), fontSize = 8.sp)
+                            }
                         }
 
                         Button(
