@@ -83,6 +83,20 @@ interface FavoriteDao {
     @Query("SELECT focalX, focalY FROM favorites WHERE uriString = :uriString AND target = :target LIMIT 1")
     suspend fun getFocalPoint(uriString: String, target: String): FocalPointProjection?
 
+    @Query("""
+        WITH RankedFavorites AS (
+            SELECT *, 
+            ROW_NUMBER() OVER (PARTITION BY folderUriString ORDER BY RANDOM()) as rn
+            FROM favorites 
+            WHERE target = :targetName 
+            AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :targetName)
+        )
+        SELECT * FROM RankedFavorites 
+        ORDER BY rn, RANDOM() 
+        LIMIT :count
+    """)
+    suspend fun getBalancedRandomFavorites(targetName: String, count: Int): List<FavoriteImageEntity>
+
     @Query("UPDATE favorites SET focalX = :x, focalY = :y WHERE uriString = :uriString AND target = :target")
     suspend fun updateFocalPoint(uriString: String, target: String, x: Float, y: Float)
 }
@@ -129,6 +143,20 @@ interface ScannedImageDao {
 
     @Query("SELECT focalX, focalY FROM scanned_images WHERE uriString = :uriString AND target = :target LIMIT 1")
     suspend fun getFocalPoint(uriString: String, target: String): FocalPointProjection?
+
+    @Query("""
+        WITH RankedImages AS (
+            SELECT *, 
+            ROW_NUMBER() OVER (PARTITION BY folderUriString ORDER BY RANDOM()) as rn
+            FROM scanned_images 
+            WHERE target = :targetName 
+            AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :targetName)
+        )
+        SELECT * FROM RankedImages 
+        ORDER BY rn, RANDOM() 
+        LIMIT :count
+    """)
+    suspend fun getBalancedRandomUris(targetName: String, count: Int): List<ScannedImageEntity>
 
     @Query("UPDATE scanned_images SET focalX = :x, focalY = :y WHERE uriString = :uriString AND target = :target")
     suspend fun updateFocalPoint(uriString: String, target: String, x: Float, y: Float)
