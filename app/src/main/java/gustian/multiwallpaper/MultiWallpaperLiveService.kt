@@ -276,6 +276,13 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
         fun checkSchedules() {
             val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
+
+            // GATING UTAMA: Jika layar mati dan sudah ganti 1x, JANGAN panggil coroutine sama sekali.
+            if (!visible && hasRotatedWhileIdle) {
+                Log.d("MW_DEBUG", "[$prefsName] Idle Mode: Blocking TimeTick to save battery.")
+                return
+            }
+
             engineScope.launch(Dispatchers.IO) {
                 val db = AppDatabase.getDatabase(applicationContext)
                 val enabledSchedules = db.scheduleDao().getEnabledSchedulesSync(targetName)
