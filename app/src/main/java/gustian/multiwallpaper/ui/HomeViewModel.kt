@@ -145,9 +145,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                        else {
                            val q = query.trim()
                            images.filter { img ->
-                               val folderNamePart = img.folderUriString.substringAfterLast("/").substringAfterLast("%2F")
+                               val folderName = try {
+                                   val uri = Uri.parse(img.folderUriString)
+                                   if (uri.scheme == "file") java.io.File(uri.path ?: "").name 
+                                   else Uri.decode(img.folderUriString).split("/").lastOrNull { it.isNotBlank() } ?: "Folder"
+                               } catch (e: Exception) { "Folder" }
+
                                img.displayName.contains(q, ignoreCase = true) || 
-                               folderNamePart.contains(q, ignoreCase = true)
+                               folderName.contains(q, ignoreCase = true)
                            }
                        }
         
@@ -1338,6 +1343,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             // 4. Schedules
             val schedulesList = scheduleDao.getAllSchedules(targetName).first()
             backupMap["schedules"] = schedulesList
+            
+            // 5. Scanned Images (Includes AI Focal Points)
+            val scannedList = scannedImageDao.getAllImagesSync(targetName)
+            backupMap["scanned_images"] = scannedList
 
             val moshi = com.squareup.moshi.Moshi.Builder()
                 .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
@@ -1401,6 +1410,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     editor.apply()
+                }
+
+                // 5. Restore Scanned Images
+                (map["scanned_images"] as? List<*>)?.let { list ->
+                    scannedImageDao.deleteAllImages(targetName)
+                    val adapter = moshi.adapter(ScannedImageEntity::class.java)
+                    val entities = list.mapNotNull { item ->
+                        adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
+                    }
+                    if (entities.isNotEmpty()) {
+                        scannedImageDao.insertImages(entities)
+                    }
                 }
 
                 withContext(Dispatchers.Main) {

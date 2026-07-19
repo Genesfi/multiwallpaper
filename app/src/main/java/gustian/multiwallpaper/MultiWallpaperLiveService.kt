@@ -69,6 +69,62 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         // Keyed by Target Name (e.g. "HOME", "LOCK")
         private val recentHistories = mutableMapOf<String, LinkedHashSet<String>>()
         private const val DEFAULT_MAX_HISTORY = 150
+
+        // SHARED RESOURCES (AI & Jam) - Irit RAM & CPU
+        private var globalFaceDetector: com.google.mlkit.vision.face.FaceDetector? = null
+        private var timeTickReceiver: BroadcastReceiver? = null
+        private var scheduleReloadReceiver: BroadcastReceiver? = null
+        private val engines = mutableListOf<MultiWallpaperEngine>()
+
+        fun registerEngine(engine: MultiWallpaperEngine) {
+            synchronized(engines) { engines.add(engine) }
+        }
+
+        fun unregisterEngine(engine: MultiWallpaperEngine) {
+            synchronized(engines) { engines.remove(engine) }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        // SHARED RECEIVER: Cukup satu sistem yang ngecek menit berganti
+        if (timeTickReceiver == null) {
+            timeTickReceiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    synchronized(engines) { engines.forEach { it.checkSchedules() } }
+                }
+            }
+            val filter = IntentFilter(Intent.ACTION_TIME_TICK)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(timeTickReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(timeTickReceiver, filter)
+            }
+        }
+
+        if (scheduleReloadReceiver == null) {
+            scheduleReloadReceiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    synchronized(engines) { engines.forEach { it.checkSchedules() } }
+                }
+            }
+            val filter = IntentFilter("gustian.multiwallpaper.RELOAD_SCHEDULES")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(scheduleReloadReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(scheduleReloadReceiver, filter)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        timeTickReceiver?.let { unregisterReceiver(it) }
+        scheduleReloadReceiver?.let { unregisterReceiver(it) }
+        timeTickReceiver = null
+        scheduleReloadReceiver = null
+        globalFaceDetector?.close()
+        globalFaceDetector = null
     }
 
     private var activeEngine: MultiWallpaperEngine? = null
@@ -156,6 +212,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 pageBitmaps.remove(manualPageIndex)
                                 pageUris.remove(manualPageIndex)
                                 pageFocalPoints.remove(manualPageIndex)
+                                needsNodeUpdate = true
                             }
                             
                             // 3. Force immediate change to a NEW image
@@ -193,6 +250,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var transitionDuration = 600L
         private val interpolator = DecelerateInterpolator(1.5f) // Cubic-like ease-out for snappier response
 
+        // GPU Smart Cache: Tandai kapan efek harus di-render ulang
+        private var needsNodeUpdate = true
+        private var lastRenderedIdx = -1
+
         private val frameCallback = object : Choreographer.FrameCallback {
             override fun doFrame(frameTimeNanos: Long) {
                 if (isTransitioning) {
@@ -213,25 +274,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             rotateWallpapers()
         }
 
-        private val timeTickReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == Intent.ACTION_TIME_TICK) {
-                    checkSchedules()
-                }
-            }
-        }
-
-        private var currentActiveSchedule: ScheduleEntity? = null
-
-        private val scheduleReloadReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == "gustian.multiwallpaper.RELOAD_SCHEDULES") {
-                    checkSchedules()
-                }
-            }
-        }
-
-        private fun checkSchedules() {
+        fun checkSchedules() {
             val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
             engineScope.launch(Dispatchers.IO) {
                 val db = AppDatabase.getDatabase(applicationContext)
@@ -242,10 +285,22 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     if (activeSchedule?.id != currentActiveSchedule?.id) {
                         applySchedule(activeSchedule)
                     } else {
+                        // SMART IDLE LOGIC:
+                        // Jika layar mati dan kita sudah pernah rotasi sekali di background, 
+                        // jangan lakukan rotasi lagi sampai layar nyala.
+                        if (!visible && hasRotatedWhileIdle) {
+                            Log.d("MW_DEBUG", "[$prefsName] Idle Mode: Skipping redundant rotation to save battery.")
+                            return@withContext
+                        }
+
                         // Extra insurance: Check if we missed a rotation
                         val currentTime = System.currentTimeMillis()
                         val intervalMs = getRotationIntervalMs()
                         if (currentTime - lastRotationTime >= intervalMs) {
+                            if (!visible) {
+                                hasRotatedWhileIdle = true
+                                Log.d("MW_DEBUG", "[$prefsName] Idle Rotation (One-time) triggered.")
+                            }
                             Log.d("MultiWallpaper", "TimeTick catch-up rotation triggered for $prefsName")
                             rotateWallpapers()
                         }
@@ -253,6 +308,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
             }
         }
+
+        private var currentActiveSchedule: ScheduleEntity? = null
 
         private fun applySchedule(schedule: ScheduleEntity?) {
             val oldScheduleId = currentActiveSchedule?.id
@@ -479,10 +536,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         
         private val deadZoneThreshold = 0.2f // Ignore very small tremors
         private var lastSensorDrawTime = 0L
-        private val sensorThrottleMs = 33L // Balanced throttling (30fps) for smoothness
+        private val sensorThrottleMs = 45L // IRIT: Lebih jarang baca sensor (Gak berasa bedanya)
         private var lastShakeTime = 0L
         private var shakeThreshold = 14f // m/s^2 above gravity, now adjustable
         private var lastRotationTime = 0L
+        private var hasRotatedWhileIdle = false
         
         private val bitmapPaint = Paint().apply { isFilterBitmap = true }
         private val textPaint = Paint().apply { 
@@ -524,6 +582,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         override fun onCreate(surfaceHolder: SurfaceHolder?) {
             super.onCreate(surfaceHolder)
             setTouchEventsEnabled(true)
+            registerEngine(this)
 
             // INITIALIZATION: 
             // isStaticLauncher sekarang murni berdasarkan Manual Page Count.
@@ -715,6 +774,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 if (oldPanoramicScrollEnabled != panoramicScrollEnabled || forceReload) {
                     lastLoadRequestTime = 0L
                 }
+                needsNodeUpdate = true
                 loadWallpapersForPages()
             } else if (strengthChanged || oldSmartCrop != smartCropEnabled ||
                        oldAiAdv != aiAdvancedEnabled || 
@@ -728,6 +788,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                        oldSubjectFocusEnabled != subjectFocusEnabled ||
                        oldSubjectFocusSmoothing != subjectFocusSmoothing ||
                        oldSmartAdjacency != smartAdjacencyEnabled) {
+                needsNodeUpdate = true
                 requestDraw()
             }
             
@@ -780,6 +841,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 currentRoll += smoothingFactor * deltaX
                 currentPitch += smoothingFactor * deltaY
                 
+                // PARALLAX RECOVERY: Force RenderNode update because position changed
+                needsNodeUpdate = true
+                
                 // Only request draw if NOT transitioning
                 if (!isTransitioning) {
                     val now = System.currentTimeMillis()
@@ -816,23 +880,19 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         recycleBitmaps()
                     }
                 }
-                System.gc()
             }
         }
 
         override fun onDestroy() {
             super.onDestroy()
+            unregisterEngine(this)
             if (activeEngine == this) activeEngine = null
-            unregisterReceiver(timeTickReceiver)
-            unregisterReceiver(scheduleReloadReceiver)
             engineScope.cancel()
             handler.removeCallbacks(drawRunnable)
             handler.removeCallbacks(rotationRunnable)
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
             unregisterSensor()
-            faceDetector?.close()
-            faceDetector = null
             if (android.os.Build.VERSION.SDK_INT >= 31) {
                 visualEffectNode?.discardDisplayList()
                 visualEffectNode = null
@@ -927,6 +987,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             
                             Log.i("MW_DEBUG", "[$prefsName] MANUAL SWIPE -> Page $manualPageIndex | $panoStatus | Img: $imgName")
                             
+                            needsNodeUpdate = true
                             animateSwipeCompletion()
                             // Proactive Gap Repair for neighbors
                             engineScope.launch { repairGaps(manualPageIndex, checkOnlyNeighbors = true) }
@@ -994,6 +1055,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         override fun onVisibilityChanged(visible: Boolean) {
             this.visible = visible
             if (visible) {
+                // RESET IDLE TRACKER
+                hasRotatedWhileIdle = false
+
                 // 1. SMART UNLOCK: Jika ada gambar tapi spinner masih jalan, matikan spinner.
                 if (pageBitmaps.isNotEmpty() && isLoading) {
                     isLoading = false
@@ -1013,8 +1077,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                 if ((currentSize < detectedPages || hasGaps) && !isLoading) {
                     if (currentSize == 0) {
+                        Log.i("MW_DEBUG", "[$prefsName] Anti-1-Page: Critical gap detected (Size 0). Forcing full reload.")
                         loadWallpapersForPages()
                     } else {
+                        Log.i("MW_DEBUG", "[$prefsName] Visibility Recovery: Repairing $currentSize/$detectedPages pages.")
                         engineScope.launch { repairGaps(manualPageIndex) }
                     }
                 }
@@ -1022,8 +1088,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 // 3. CATCH-UP LOGIC: Jika sudah waktunya ganti saat HP di saku, ganti SEKARANG.
                 val currentTime = System.currentTimeMillis()
                 val intervalMs = getRotationIntervalMs()
-                if (intervalMs > 0 && currentTime - lastRotationTime >= intervalMs) {
-                    Log.i("MW_DEBUG", "[$prefsName] Catch-up Rotation triggered.")
+                val timeSinceLast = currentTime - lastRotationTime
+                
+                Log.d("MW_DEBUG", "[$prefsName] Wake Check: Time since last rotation: ${timeSinceLast/1000}s / ${intervalMs/1000}s")
+
+                if (intervalMs > 0 && timeSinceLast >= intervalMs) {
+                    Log.i("MW_DEBUG", "[$prefsName] Catch-up Rotation triggered (Wake up from Idle).")
                     rotateWallpapers()
                 }
 
@@ -1033,13 +1103,15 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 requestDraw()
             } else {
                 // EXTREME BATTERY SAVING: Layar Mati = Stop Total
-                Log.d("MW_DEBUG", "[$prefsName] Visibility OFF: Stopping all work.")
+                Log.d("MW_DEBUG", "[$prefsName] Visibility OFF: Throttling background work.")
                 
-                // Cancel all heavy CPU tasks immediately
-                mainLoadJob?.cancel()
-                backgroundRefreshJob?.cancel()
-                preloadJob?.cancel()
-                rotationJob?.cancel()
+                // Jangan batalkan job yang sedang menyiapkan rotasi idle pertama
+                if (hasRotatedWhileIdle) {
+                    mainLoadJob?.cancel()
+                    backgroundRefreshJob?.cancel()
+                    preloadJob?.cancel()
+                    rotationJob?.cancel()
+                }
                 
                 handler.removeCallbacks(drawRunnable)
                 handler.removeCallbacks(rotationRunnable)
@@ -1047,16 +1119,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 isDrawScheduled = false
                 isTransitioning = false
                 
-                // Clear transient heavy objects
-                synchronized(bitmapLock) {
-                    nextBitmap?.recycle(); nextBitmap = null
-                    preloadedBitmap?.recycle(); preloadedBitmap = null
-                }
+                // JANGAN recycle nextBitmap dan preloadedBitmap di sini!
+                // Kita butuh mereka untuk rotasi idle pertama atau untuk "Fresh Start" saat layar nyala.
                 
                 unregisterSensor() // Stop accelerometer listener
-                
-                // Hint for GC to clean up RAM while device is idle
-                System.gc()
             }
         }
 
@@ -1103,6 +1169,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
             if (validXStep <= 0f) {
                 if (detectedPages != 20) {
+                    Log.w("MW_DEBUG", "[$prefsName] Anti-1-Page: Launcher reported static (0), but we suspect 20 pages. Delaying decision...")
                     detectedPages = 20
                     loadWallpapersForPages()
                 }
@@ -1110,6 +1177,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             } else {
                 val newDetectedPages = (1f / validXStep).roundToInt() + 1
                 if (newDetectedPages != detectedPages && newDetectedPages in 1..50) {
+                    Log.i("MW_DEBUG", "[$prefsName] Page Detection: Launcher changed from $detectedPages to $newDetectedPages pages. Debouncing...")
                     detectedPages = newDetectedPages
                     handler.removeCallbacks(reloadRunnable)
                     handler.postDelayed(reloadRunnable, 500)
@@ -1303,12 +1371,20 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         private fun rotateWallpapers() {
-            val now = System.currentTimeMillis()
-            lastRotationTime = now
-            getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().putLong("last_rotation_time", now).apply()
-
             synchronized(bitmapLock) {
                 if (isTransitioning) return // Avoid overlapping transitions
+
+                val now = System.currentTimeMillis()
+                lastRotationTime = now
+                getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit().putLong("last_rotation_time", now).apply()
+
+                // Jika rotasi terpancing saat layar mati, tandai agar rotasi berikutnya di-skip
+                if (!visible) {
+                    hasRotatedWhileIdle = true
+                    Log.d("MW_DEBUG", "[$prefsName] Idle Rotation triggered. Future redundant rotations will be skipped.")
+                }
+                
+                needsNodeUpdate = true
 
                 // PRIORITAS: Selalu ganti halaman aktif (manualPageIndex) terlebih dahulu!
                 if (transitionType != "cut" && pageBitmaps.isNotEmpty()) {
@@ -1502,7 +1578,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     }
                 } else {
                     // STANDARD PARALLEL LOADING (Now Consistent)
-                    fillOrder.chunked(3).forEach { chunk ->
+                    val chunkSize = if (visible) 3 else 1
+                    fillOrder.chunked(chunkSize).forEach { chunk ->
                         if (!isActive) return@launch
                         val jobs = chunk.map { p ->
                             async(Dispatchers.IO) {
@@ -1548,7 +1625,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 }
                             }
                         }
-                        jobs.awaitAll(); delay(100)
+                        jobs.awaitAll(); delay(if (visible) 100L else 500L)
                     }
                 }
 
@@ -1669,7 +1746,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             if (old != pageBitmaps[manualPageIndex]) old?.recycle()
                             scheduleRotation()
                             preloadNextWallpaper()
-                            System.gc()
                         }
                         
                         // FIX: Ensure isLoading is cleared if manual rotation succeeds
@@ -1729,7 +1805,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 val oldNeighbor = pageBitmaps[targetP]
                                 pageBitmaps[targetP] = next
                                 pageUris[targetP] = currentUri
-                                pageScrollOffsets[targetP] = i.toFloat() / (nextSpan - 1).toFloat()
+                                pageScrollOffsets[targetP] = i.toFloat() / (preloadedSpan - 1).toFloat()
                                 pageFocalPoints[targetP] = null
                                 if (oldNeighbor != next && oldNeighbor != null) oldNeighbor.recycle()
                             }
@@ -1744,6 +1820,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         
                         // Successfully loaded and swapped
                         if (isLoading) isLoading = false
+                        needsNodeUpdate = true
                     } else {
                         Log.w("MW_DEBUG", "[$prefsName] Transition FINISHED but nextBitmap is missing. Cleaning up old bitmap to prevent snap-back.")
                         // SNAP-BACK FIX: Recycle old bitmap so it doesn't reappear while waiting for rotation job
@@ -1759,9 +1836,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 
                 requestDraw()
                 scheduleRotation()
-                
-                // Hint for GC after rotation to reclaim any overhead
-                System.gc()
             } else {
                 requestDraw()
             }
@@ -1973,7 +2047,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                         val priorityOrder = (0 until targetPageCount).filter { !filledIndicesNonPano.contains(it) }.sortedBy { p -> val diff = Math.abs(p - manualPageIndex); Math.min(diff, targetPageCount - diff) }
 
-                        val chunkSize = if (isBootPhase) 1 else 3
+                        val chunkSize = if (isBootPhase) 1 else if (visible) 3 else 1
                         priorityOrder.chunked(chunkSize).forEach { chunk ->
                             if (!isActive) return@launch
                             chunk.map { p ->
@@ -2028,8 +2102,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                     // PRIORITY GAP REPAIR
                     repairGaps(manualPageIndex)
-                    
-                    System.gc() // Final cleanup after batch load
                     
                     if (isActive) {
                         withContext(Dispatchers.Main) { 
@@ -2289,24 +2361,24 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val dWidth = detectionBitmap.width
             val dHeight = detectionBitmap.height
 
-            // Reuse or initialize the detector ONCE
-            if (faceDetector == null) {
-                val options = FaceDetectorOptions.Builder()
-                    .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-                    .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
-                    .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+            // Reuse or initialize the detector ONCE (Global Singleton)
+            if (globalFaceDetector == null) {
+                val options = com.google.mlkit.vision.face.FaceDetectorOptions.Builder()
+                    .setPerformanceMode(com.google.mlkit.vision.face.FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                    .setLandmarkMode(com.google.mlkit.vision.face.FaceDetectorOptions.LANDMARK_MODE_NONE)
+                    .setClassificationMode(com.google.mlkit.vision.face.FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
                     .setMinFaceSize(0.15f) // Optimized for faster detection
                     .build()
-                faceDetector = FaceDetection.getClient(options)
+                globalFaceDetector = com.google.mlkit.vision.face.FaceDetection.getClient(options)
             }
             
-            val detector = faceDetector ?: run {
+            val detector = globalFaceDetector ?: run {
                 detectionBitmap.recycle()
                 return fallback
             }
 
             return try {
-                val image = InputImage.fromBitmap(detectionBitmap, 0)
+                val image = com.google.mlkit.vision.common.InputImage.fromBitmap(detectionBitmap, 0)
                 val task = detector.process(image)
 
                 // CRITICAL: Only recycle when ML Kit task is completely finished.
@@ -2561,37 +2633,47 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 try {
                     if (visualEffectNode == null) {
                         visualEffectNode = RenderNode("VisualEffects")
+                        needsNodeUpdate = true
                     }
                     val node = visualEffectNode!!
                     node.setPosition(0, 0, w, h)
                     
-                    // SMART BLUR: If HQ is missing but thumbnail exists, apply heavy blur to thumbnail
-                    val hqBitmap = pageBitmaps[idx]
-                    val thumbBitmap = pageThumbnails[idx]
-                    val isUsingPlaceholder = hqBitmap == null && thumbBitmap != null
-                    
-                    // Apply Blur to the Node (Global background blur OR placeholder blur)
-                    val baseBlur = if (blurEnabled) blurRadius else 0f
-                    val placeholderBlur = if (isUsingPlaceholder) 40f else 0f
-                    val actualBlur = maxOf(baseBlur, placeholderBlur)
-                    
-                    if (actualBlur > 0f) {
-                        node.setRenderEffect(RenderEffect.createBlurEffect(actualBlur, actualBlur, Shader.TileMode.CLAMP))
-                    } else {
-                        node.setRenderEffect(null)
+                    // GPU SMART CACHE: Re-record cuma kalau perlu (Wallpaper ganti atau Efek berubah)
+                    if (needsNodeUpdate || lastRenderedIdx != idx) {
+                        // SMART BLUR: If HQ is missing but thumbnail exists, apply heavy blur to thumbnail
+                        val hqBitmap = pageBitmaps[idx]
+                        val thumbBitmap = pageThumbnails[idx]
+                        val isUsingPlaceholder = hqBitmap == null && thumbBitmap != null
+                        
+                        // Apply Blur to the Node (Global background blur OR placeholder blur)
+                        val baseBlur = if (blurEnabled) blurRadius else 0f
+                        val placeholderBlur = if (isUsingPlaceholder) 40f else 0f
+                        val actualBlur = maxOf(baseBlur, placeholderBlur)
+                        
+                        if (actualBlur > 0f) {
+                            node.setRenderEffect(RenderEffect.createBlurEffect(actualBlur, actualBlur, Shader.TileMode.CLAMP))
+                        } else {
+                            node.setRenderEffect(null)
+                        }
+
+                        // Record drawing into the Node
+                        val recordingCanvas = node.beginRecording()
+                        if (isUsingPlaceholder) {
+                            // Draw the thumbnail as base for blur
+                            drawSingleBitmap(recordingCanvas, thumbBitmap!!, w, h, idx)
+                        } else {
+                            drawWallpaperContent(recordingCanvas, w, h, isFluid, pos, idx)
+                        }
+                        node.endRecording()
+                        
+                        // Tandai sudah di-render, jangan update lagi kalau cuma Parallax (Tilt)
+                        if (!isFluid && !isTransitioning) {
+                            needsNodeUpdate = false
+                            lastRenderedIdx = idx
+                        }
                     }
 
-                    // Record drawing into the Node
-                    val recordingCanvas = node.beginRecording()
-                    if (isUsingPlaceholder) {
-                        // Draw the thumbnail as base for blur
-                        drawSingleBitmap(recordingCanvas, thumbBitmap!!, w, h, idx)
-                    } else {
-                        drawWallpaperContent(recordingCanvas, w, h, isFluid, pos, idx)
-                    }
-                    node.endRecording()
-
-                    // Draw the Node (Blurred background)
+                    // Draw the Node (Hasil render yang sudah di-cache di GPU)
                     canvas.drawRenderNode(node)
                     
                     // Apply Spotlight/Vignette (Drawn OUTSIDE the blurred node to keep edges sharp)
