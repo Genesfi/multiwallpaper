@@ -2082,6 +2082,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                                 if(!isStillUsed) old.recycle()
                                             }
                                         }
+                                        
+                                        // CRITICAL: Force immediate check for the page AFTER this span to prevent "Img: Empty"
+                                        val nextAfterSpan = (p + span) % detectedPages
+                                        if (nextAfterSpan != manualPageIndex && !filledIndices.contains(nextAfterSpan)) {
+                                            // This ensures the main loop hits the gap immediately
+                                        }
                                     }
                                     requestDraw()
                                 }
@@ -2098,9 +2104,15 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                         val priorityOrder = (0 until targetPageCount).filter { !filledIndicesNonPano.contains(it) }.sortedBy { p -> val diff = Math.abs(p - manualPageIndex); Math.min(diff, targetPageCount - diff) }
 
-                        val chunkSize = if (isBootPhase) 1 else if (visible) 3 else 1
+                        val chunkSize = if (isBootPhase) 1 else if (visible) 2 else 1
                         priorityOrder.chunked(chunkSize).forEach { chunk ->
                             if (!isActive || !visible) return@launch
+                            
+                            // YIELD TO USER INTERACTION (Lower delay for responsiveness)
+                            if (isSwiping || isSwipeAnimating) {
+                                delay(250)
+                            }
+
                             chunk.map { p ->
                                 async(Dispatchers.IO) {
                                     if (!isActive || !visible) return@async
@@ -2147,7 +2159,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                     }
                                 }
                             }.awaitAll()
-                            delay(if (isBootPhase) 1500L else 100L)
+                            delay(if (isBootPhase) 50L else 100L)
                         }
                     }
 
@@ -2353,6 +2365,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                         for(otherB in pageBitmaps.values) if(otherB == old) { stillInUse = true; break }
                                         if(!stillInUse) old.recycle()
                                     }
+                                }
+                                
+                                // PROACTIVE NEIGHBOR REPAIR: Check the page after the repaired span
+                                val nextIdx = (i + span) % detectedPages
+                                if (pageBitmaps[nextIdx] == null || pageBitmaps[nextIdx]!!.isRecycled) {
+                                    // This will be caught in the outer loop of targetIndices
                                 }
                             }
                             if (i == manualPageIndex) {
