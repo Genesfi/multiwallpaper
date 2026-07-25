@@ -301,7 +301,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         }
 
                         // Extra insurance: Check if we missed a rotation
-                        val currentTime = System.currentTimeMillis()
+                        val currentTime = android.os.SystemClock.elapsedRealtime()
                         val intervalMs = getRotationIntervalMs()
                         if (currentTime - lastRotationTime >= intervalMs) {
                             if (!visible) {
@@ -1061,16 +1061,23 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         override fun onVisibilityChanged(visible: Boolean) {
             this.visible = visible
             if (visible) {
-                // RESET IDLE TRACKER
+                // RESET IDLE TRACKER & TRANSITION SAFETY
                 hasRotatedWhileIdle = false
+                if (isTransitioning) {
+                    Log.w("MW_DEBUG", "[$prefsName] Resetting stuck transition on Wake-up.")
+                    isTransitioning = false
+                }
 
-                // 1. SMART UNLOCK: Jika ada gambar tapi spinner masih jalan, matikan spinner.
+                // 1. UPDATE SETTINGS FIRST: Ensure we have the latest interval values
+                updateSettings()
+
+                // 2. SMART UNLOCK: Jika ada gambar tapi spinner masih jalan, matikan spinner.
                 if (pageBitmaps.isNotEmpty() && isLoading) {
                     isLoading = false
                     requestDraw()
                 }
 
-                // 2. FORCE RELOAD:
+                // 3. FORCE RELOAD:
                 val currentSize = synchronized(bitmapLock) { pageBitmaps.size }
                 val hasGaps = synchronized(bitmapLock) { 
                     (0 until detectedPages).any { 
@@ -1091,19 +1098,40 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     }
                 }
 
-                // 3. CATCH-UP LOGIC: Jika sudah waktunya ganti saat HP di saku, ganti SEKARANG.
-                val currentTime = System.currentTimeMillis()
-                val intervalMs = getRotationIntervalMs()
-                val timeSinceLast = currentTime - lastRotationTime
+                // 4. CATCH-UP LOGIC: Sinkronisasi Jam Dinding (Wall Clock Sync)
+                val nowMs = System.currentTimeMillis()
+                val calendar = java.util.Calendar.getInstance().apply { timeInMillis = nowMs }
+                val currentSeconds = (calendar.get(java.util.Calendar.HOUR_OF_DAY) * 3600) +
+                                     (calendar.get(java.util.Calendar.MINUTE) * 60) +
+                                     calendar.get(java.util.Calendar.SECOND)
                 
-                Log.d("MW_DEBUG", "[$prefsName] Wake Check: Time since last rotation: ${timeSinceLast/1000}s / ${intervalMs/1000}s")
+                val intervalSeconds = getSharedPreferences(prefsName, Context.MODE_PRIVATE).getFloat("interval_seconds", 60f).toLong()
+                
+                if (intervalSeconds > 0) {
+                    // Kapan seharusnya rotasi TERAKHIR terjadi berdasarkan jam dinding?
+                    val lastScheduledSeconds = (currentSeconds / intervalSeconds) * intervalSeconds
+                    
+                    // Konversi waktu rotasi terakhir aplikasi ke detik dalam hari
+                    val lastRotCal = java.util.Calendar.getInstance().apply { timeInMillis = lastRotationTime }
+                    val lastRotSeconds = (lastRotCal.get(java.util.Calendar.HOUR_OF_DAY) * 3600) +
+                                         (lastRotCal.get(java.util.Calendar.MINUTE) * 60) +
+                                         lastRotCal.get(java.util.Calendar.SECOND)
 
-                if (intervalMs > 0 && timeSinceLast >= intervalMs) {
-                    Log.i("MW_DEBUG", "[$prefsName] Catch-up Rotation triggered (Wake up from Idle).")
-                    rotateWallpapers()
+                    // Jika kita sudah melewati jadwal seharusnya, atau ganti hari (lastRotSeconds > currentSeconds)
+                    val isMissed = currentSeconds >= lastScheduledSeconds && (lastRotationTime < nowMs - (intervalSeconds * 500L))
+                    val isNewDay = lastRotationTime < nowMs - 86400000L // Lebih dari 24 jam
+
+                    val nowTimeStr = String.format("%02d:%02d:%02d", (currentSeconds/3600)%24, (currentSeconds/60)%60, currentSeconds%60)
+                    val schedTimeStr = String.format("%02d:%02d:%02d", (lastScheduledSeconds/3600)%24, (lastScheduledSeconds/60)%60, lastScheduledSeconds%60)
+                    
+                    Log.d("MW_DEBUG", "[$prefsName] Wake Check: Now [$nowTimeStr] | Last Sched [$schedTimeStr] | Interval [${intervalSeconds}s]")
+
+                    if (isMissed || isNewDay || lastRotationTime <= 0) {
+                        Log.i("MW_DEBUG", "[$prefsName] Clock Sync Catch-up: Missed schedule detected. Rotating now.")
+                        rotateWallpapers()
+                    }
                 }
 
-                updateSettings()
                 registerSensor() // Resume parallax/shake
                 scheduleRotation()
                 requestDraw()
@@ -1303,19 +1331,28 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 return
             }
 
-            val intervalMs = getRotationIntervalMs()
-            val currentTime = System.currentTimeMillis()
+            val intervalSeconds = getSharedPreferences(prefsName, Context.MODE_PRIVATE).getFloat("interval_seconds", 60f).toLong()
+            if (intervalSeconds <= 0) return
+
+            val nowMs = System.currentTimeMillis()
+            val calendar = java.util.Calendar.getInstance().apply { timeInMillis = nowMs }
             
-            // PERSISTENT TIMER FIX: 
-            // Calculate remaining time instead of always resetting to full intervalMs.
-            // This prevents frequent screen on/off from indefinitely postponing rotation.
-            val elapsed = currentTime - lastRotationTime
-            val remainingMs = (intervalMs - elapsed).coerceIn(0L, intervalMs)
+            // Hitung detik sejak awal hari (00:00:00)
+            val secondsSinceDayStart = (calendar.get(java.util.Calendar.HOUR_OF_DAY) * 3600) +
+                                       (calendar.get(java.util.Calendar.MINUTE) * 60) +
+                                       calendar.get(java.util.Calendar.SECOND)
+            
+            // Tentukan detik target berikutnya yang selaras dengan interval
+            val nextTargetSeconds = ((secondsSinceDayStart / intervalSeconds) + 1) * intervalSeconds
+            val delayMs = (nextTargetSeconds - secondsSinceDayStart) * 1000L
             
             if (visible) {
-                Log.d("MultiWallpaper", "Engine scheduleRotation ($prefsName): next in ${remainingMs/1000}s (interval: ${intervalMs/1000}s, elapsed: ${elapsed/1000}s)")
+                val targetTimeStr = String.format("%02d:%02d:%02d", 
+                    (nextTargetSeconds / 3600) % 24, (nextTargetSeconds / 60) % 60, nextTargetSeconds % 60)
+                Log.d("MW_DEBUG", "[$prefsName] Clock Sync: Next rotation at $targetTimeStr (in ${delayMs/1000}s)")
             }
-            handler.postDelayed(rotationRunnable, remainingMs)
+            
+            handler.postDelayed(rotationRunnable, delayMs)
         }
 
         private suspend fun getNextWallpaperUriBatch(count: Int = 1): List<String> {
@@ -1400,6 +1437,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 needsNodeUpdate = true
 
                 // PRIORITAS: Selalu ganti halaman aktif (manualPageIndex) terlebih dahulu!
+                // GATING: Mode \"cut\" (instant swap) atau force reload tetap lewat jalur bawah.
                 if (transitionType != "cut" && pageBitmaps.isNotEmpty()) {
                     transitionDuration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L)
                     
@@ -1477,8 +1515,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             preloadNextWallpaper()
                         }
                     } else {
-                        // INSTANT START: Start transition even if bitmap is not ready
-                        startTransition()
+                        // INSTANT START: Trigger job to fetch next bitmap
+                        if (visible) {
+                            startTransition()
+                        }
                         startRotationTransition()
                     }
                     if (visible) {
@@ -1489,7 +1529,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         isLoading = false 
                     }
                 } else {
-                    // FORCE RELOAD MODE: Pastikan manualPageIndex di-load pertama!
+                    // FORCE RELOAD atau SCREEN OFF (Instant Mode)
                     loadWallpapersForPages()
                 }
             }
