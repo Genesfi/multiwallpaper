@@ -8,44 +8,42 @@ Identify and fix bugs causing persistent loading spinners on 1-3 pages, especial
 
 #### [MultiWallpaperLiveService.kt](file:///F:/Android%20Project/multiwallpaper/app/src/main/java/gustian/multiwallpaper/MultiWallpaperLiveService.kt)
 
-- **Fix Rendering Cache**: Add `needsNodeUpdate = true` in `repairGaps` and `refreshOtherPages`. This ensures the GPU-cached `RenderNode` is re-recorded when a background load completes. Without this, the screen might continue showing a "loading" state (spinner) even after the bitmap is ready.
-- **Fix `isLoading` State Leak**: Wrap `loadWallpapersForPages` and `repairGaps` logic in `try-finally` blocks. Reset `isLoading = false` in the `finally` block using `NonCancellable` to ensure the flag is cleared even if the job is cancelled or crashes.
-- **Break Corrupted Image Loop**: Update `getNextWallpaperUriBatch` or the calling sites to add URIs to history even if decoding fails. This prevents the app from repeatedly trying to load the same "unimplemented" or corrupted image.
-- **Improve Pano Repair Logic**: Ensure `repairGaps` Phase 1 (Self-Healing) correctly handles cases where a panorama neighbor is null, and that Phase 2 doesn't trigger redundant loads for pages being filled by a pano span.
-- **Concurrency Protection**: Add `repairJob` and `repairGapsJob` management to avoid overlapping background repairs that could lead to race conditions in bitmap recycling.
+- **Fix Rendering Cache (Critical)**: Add `needsNodeUpdate = true` in `repairGaps` (both Phase 1 and Phase 2) and `refreshOtherPages`.
+    - **Why**: When a background load completes, the `RenderNode` (which caches the UI on Android 12+) still contains the "loading" animation. Without setting this flag, the engine continues to draw the cached spinner even if the bitmap is now available in `pageBitmaps`.
+- **Fix `isLoading` State Leak**: Wrap `loadWallpapersForPages` logic in a `try-finally` block.
+    - **Why**: Currently, if the loading job is cancelled (e.g., rapid settings change or screen off), `isLoading` can stay `true`. Since `repairGaps` checks this flag before running, it effectively disables auto-repair until the next full reload.
+- **Break Corrupted Image Loop**: Update `repairGaps` and `refreshOtherPages` to call `addToHistory(uri)` even if the bitmap decoding fails (`b == null`).
+    - **Why**: Logcat shows multiple "unimplemented" errors. If decoding fails, the app currently doesn't add that URI to history, causing `getNextWallpaperUriBatch` to potentially return the same bad URI again for the next repair attempt, leading to an infinite loop of failed loads.
+- **Concurrency Protection**: Introduce `repairJob` and `repairGapsJob` variables to track active repair tasks and prevent overlapping operations on the same page indices.
+- **Pano Self-Healing Improvements**: Ensure that when a pano chain is repaired, all affected pages are marked for node update.
 
 ```kotlin
-// Example of the finally block fix
-mainLoadJob = engineScope.launch {
-    try {
-        // ... loading logic ...
-    } finally {
-        withContext(NonCancellable) {
-            withContext(Dispatchers.Main) {
-                isLoading = false
-                requestDraw()
-            }
-        }
+// Example of the critical fix in repairGaps
+withContext(Dispatchers.Main) {
+    synchronized(bitmapLock) {
+        // ... update pageBitmaps ...
+        needsNodeUpdate = true // CRITICAL: Tell GPU to re-record
     }
+    requestDraw()
 }
 ```
 
 ## Verification Plan
 
 ### Automated Tests
-- No existing unit tests for the LiveService rendering logic. Verification will be primarily manual on-device.
+- Verification will be primarily manual on-device.
 
 ### Manual Verification
 1. **Panorama Loading Test**:
     - Enable Panorama mode.
     - Change folders to trigger a full reload.
-    - Verify that all pages (including those in a span) load successfully and the spinner disappears on all pages.
+    - Verify that all pages load successfully and the spinner disappears on all pages.
 2. **Rapid Swipe Test**:
-    - Swipe rapidly through pages to trigger `repairGaps` and `refreshOtherPages`.
-    - Observe logcat for "Audit detected GENUINE gap" and verify they are fixed immediately.
+    - Swipe rapidly through pages to trigger `repairGaps`.
+    - Verify that any "Loading" states are temporary and resolve within seconds.
 3. **Corrupted Image Test**:
     - (Simulation) Mock a decode failure for a specific URI.
-    - Verify that the app moves on to a different image instead of getting stuck on that page.
+    - Verify that the app moves on to a different image and doesn't get stuck on Page 35 (or whichever index failed).
 4. **Visibility Toggle Test**:
     - Turn screen off/on during a load.
-    - Verify that `isLoading` is correctly reset and loading continues or completes upon wake.
+    - Verify that `isLoading` is correctly reset.
