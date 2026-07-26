@@ -564,6 +564,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var shakeThreshold = 14f // m/s^2 above gravity, now adjustable
         private var lastRotationTime = 0L
         private var hasRotatedWhileIdle = false
+        private var lastPanicRepairTime = 0L
         
         private val bitmapPaint = Paint().apply { isFilterBitmap = true }
         private val textPaint = Paint().apply { 
@@ -1112,6 +1113,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         loadWallpapersForPages()
                     } else {
                         Log.i("MW_DEBUG", "[$prefsName] Visibility Recovery: Repairing $currentSize/$detectedPages pages.")
+                        // Cancel stale repair job to ensure fresh start
+                        repairGapsJob?.cancel() 
                         engineScope.launch { repairGaps(manualPageIndex) }
                     }
                 }
@@ -1585,12 +1588,15 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     }
                 }
 
-                // SMART PRIORITY: Fill neighbors closest to the current page first in BOTH directions (Circular)
-                val fillOrder = (0 until detectedPages).filter { !protectedIndices.contains(it) }
-                    .sortedBy { p ->
-                        val diff = Math.abs(p - startIdx)
-                        Math.min(diff, detectedPages - diff) // Circular distance priority
+                // LINEAR CLOCKWISE FILL: Start filling from the active page onwards.
+                // This prevents fragmentation and maximizing panoramic fits.
+                val fillOrder = mutableListOf<Int>()
+                for (i in 0 until detectedPages) {
+                    val p = (startIdx + i) % detectedPages
+                    if (!protectedIndices.contains(p)) {
+                        fillOrder.add(p)
                     }
+                }
 
                         // --- CONSOLIDATED 3-LAYER LOADING (Instant + Consistent) ---
                         // We process pages in priority order, handling Thumbnail then HQ for the SAME URI
@@ -1604,6 +1610,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         var nextUri: String? = null
                         synchronized(pageUris) { if (candidates.isNotEmpty()) nextUri = candidates.removeAt(0) }
                         if (nextUri == null) break
+                        
+                        // MARK AS LOADING IMMEDIATELY
+                        synchronized(bitmapLock) { pageUris[p] = "Loading..." }
                         
                         // 1. QUICK THUMBNAIL (Stage A)
                         val thumb = decodeSampledBitmapFromUri(Uri.parse(nextUri!!), 240, 240, isBackground = true, isThumbnail = true)
@@ -1620,10 +1629,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         // 2. HQ UPGRADE (Stage B) - SAME URI
                         val b = decodeSampledBitmapFromUri(Uri.parse(nextUri!!), surfaceWidth, surfaceHeight, isBackground = true)
                         if (b != null) {
-                            val imgRatio = b.width.toFloat() / b.height.toFloat()
-                            val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
-                            val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
-                            val span = if (spanFactor > 1.2f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
+                            val span = calculateSmartSpan(b.width, b.height, p, maxPanoramicSpan)
                             val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b, nextUri!!) else null
                             
                                     withContext(Dispatchers.Main) {
@@ -1681,6 +1687,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 }
                                 if (nextUri == null) return@async
                                 
+                                // MARK AS LOADING IMMEDIATELY
+                                synchronized(bitmapLock) { pageUris[p] = "Loading..." }
+
                                 // 1. QUICK THUMBNAIL (Stage A)
                                 val thumb = decodeSampledBitmapFromUri(Uri.parse(nextUri!!), 240, 240, isBackground = true, isThumbnail = true)
                                 if (thumb != null) {
@@ -1749,7 +1758,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         val imgRatio = rawBmp!!.width.toFloat() / rawBmp!!.height.toFloat()
                         val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
                         val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
-                        span = if (spanFactor > 1.1f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
+                        span = when {
+                            spanFactor > 2.75f -> 3
+                            spanFactor > 1.25f -> 2
+                            else -> 1
+                        }.coerceAtMost(maxPanoramicSpan)
                         if (span > 1) scrollOffset = 0f // Start from left segment for the active page
                     }
 
@@ -1793,7 +1806,11 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         val imgRatio = rawBmp!!.width.toFloat() / rawBmp!!.height.toFloat()
                         val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
                         val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
-                        span = if (spanFactor > 1.1f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
+                        span = when {
+                            spanFactor > 2.75f -> 3
+                            spanFactor > 1.25f -> 2
+                            else -> 1
+                        }.coerceAtMost(maxPanoramicSpan)
                         if (span > 1) scrollOffset = 0f // Start from left segment for the active page
                     }
 
@@ -1884,6 +1901,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         val old = pageBitmaps[manualPageIndex]
                         Log.d("MW_DEBUG", "[$prefsName] Transition FINISHED. Next Span: $nextSpan")
 
+                        val currentUri = pageUris[manualPageIndex] ?: ""
                         // Finalize the active page
                         pageBitmaps[manualPageIndex] = next
                         pageFocalPoints[manualPageIndex] = nextFocalPoint
@@ -1891,7 +1909,6 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         
                         // PANORAMIC FINALIZATION: If it was a pano, fill the neighbors now
                         if (nextSpan > 1) {
-                            val currentUri = pageUris[manualPageIndex] ?: ""
                             for (i in 1 until nextSpan) {
                                 val targetP = (manualPageIndex + i) % detectedPages
                                 val oldNeighbor = pageBitmaps[targetP]
@@ -1899,7 +1916,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                 pageUris[targetP] = currentUri
                                 pageScrollOffsets[targetP] = i.toFloat() / (nextSpan - 1).toFloat()
                                 pageFocalPoints[targetP] = null
-                                if (oldNeighbor != next && oldNeighbor != null) oldNeighbor.recycle()
+                                if (oldNeighbor != next && oldNeighbor != null) {
+                                    val usedElsewhere = pageBitmaps.values.any { it == oldNeighbor }
+                                    if(!usedElsewhere) oldNeighbor.recycle()
+                                }
                             }
                         }
 
@@ -2024,17 +2044,26 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     val (firstBitmap, firstFocal, firstSpan) = withContext(Dispatchers.IO) {
                         if (!isActive) return@withContext Triple(null, null, 1)
                         val b = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight, isBackground = false)
-                        var span = 1
-                        if (b != null && panoramicScrollEnabled && !prefsName.contains("lock")) {
-                            val imgRatio = b.width.toFloat() / b.height.toFloat()
-                            val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
-                            val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
-                            span = if (spanFactor > 1.1f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
-                        }
                         
                         if (!isActive) {
                             b?.recycle()
                             return@withContext Triple(null, null, 1)
+                        }
+                        
+                        var span = 1
+                        if (b != null) {
+                            // First page is special: we allow it to take full target span since it's the anchor
+                            val imgRatio = b.width.toFloat() / b.height.toFloat()
+                            val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
+                            val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
+                            span = when {
+                                spanFactor > 2.75f -> 3
+                                spanFactor > 1.25f -> 2
+                                else -> 1
+                            }.coerceAtMost(maxPanoramicSpan)
+                            
+                            // Clamp to detected pages to avoid over-spanning
+                            span = span.coerceAtMost(detectedPages)
                         }
                         
                         val f = if (b != null && span == 1 && smartCropEnabled) detectFaceFocalPoint(b, visibleUri) else null
@@ -2092,11 +2121,16 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             for (i in 0 until firstSpan) filledIndices.add((manualPageIndex + i) % detectedPages) 
                         }
 
-                        val pOrder = (0 until detectedPages).filter { !filledIndices.contains(it) }
-                            .sortedBy { p -> 
-                                val diff = Math.abs(p - manualPageIndex)
-                                Math.min(diff, detectedPages - diff) 
+                        // LINEAR CLOCKWISE FILL: Start filling from the end of the first span.
+                        // This prevents fragmentation by always moving away from busy slots.
+                        val pOrder = mutableListOf<Int>()
+                        val startFrom = (manualPageIndex + firstSpan) % detectedPages
+                        for (i in 0 until detectedPages) {
+                            val p = (startFrom + i) % detectedPages
+                            if (!filledIndices.contains(p)) {
+                                pOrder.add(p)
                             }
+                        }
 
                         var iIdx = 0
                         while (iIdx < pOrder.size && isActive && visible) {
@@ -2116,10 +2150,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                             // 1. HQ DECODE (Atomic for Pano)
                             val b = withContext(Dispatchers.IO) { decodeSampledBitmapFromUri(Uri.parse(uri), surfaceWidth, surfaceHeight, isBackground = true) }
                             if (b != null) {
-                                val imgRatio = b.width.toFloat() / b.height.toFloat()
-                                val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
-                                val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
-                                val span = if (spanFactor > 1.2f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
+                                val span = calculateSmartSpan(b.width, b.height, p, maxPanoramicSpan)
                                 val focal = if (span == 1 && smartCropEnabled) detectFaceFocalPoint(b, uri) else null
                                 
                                 withContext(Dispatchers.Main) {
@@ -2360,26 +2391,21 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         
                         val isTrulyEmpty = synchronized(bitmapLock) { 
                             val b = pageBitmaps[i]
-                            var isPartOfLeftPano = false
-                            if (panoramicScrollEnabled && (i > 0 || detectedPages > 1)) {
-                                for (offset in 1 until maxPanoramicSpan) {
-                                    val prevIdx = (i - offset + detectedPages) % detectedPages
-                                    val prevB = pageBitmaps[prevIdx]
-                                    val prevScroll = pageScrollOffsets[prevIdx]
-                                    val prevUri = pageUris[prevIdx]
-                                    if (prevB != null && prevScroll != null && prevScroll < 0.99f) {
-                                        val nextInPanoIdx = (prevIdx + 1) % detectedPages
-                                        if (pageBitmaps[nextInPanoIdx] == prevB && pageUris[nextInPanoIdx] == prevUri) { isPartOfLeftPano = true; break }
-                                    }
-                                }
-                            }
-                            (b == null || b.isRecycled) && !isPartOfLeftPano
+                            (b == null || b.isRecycled)
                         }
                         
                         if (isTrulyEmpty) {
-                            val fallbackUri = getNextWallpaperUriBatch(1).firstOrNull() ?: continue
+                            val fallbackUri = getNextWallpaperUriBatch(1).firstOrNull()
+                            if (fallbackUri == null) {
+                                Log.e("MW_DEBUG", "[$prefsName] [REPAIR] Failed to fill Page $i: No unique images in DB!")
+                                continue
+                            }
+                            
                             Log.d("MW_DEBUG", "[$prefsName] [REPAIR] Filling GENUINE gap at Page $i")
                             if (i == manualPageIndex) { isLoading = true; withContext(Dispatchers.Main) { requestDraw() } }
+
+                            // MARK AS LOADING IMMEDIATELY
+                            synchronized(bitmapLock) { pageUris[i] = "Loading..." }
 
                             val b = withContext(Dispatchers.IO) { decodeSampledBitmapFromUri(Uri.parse(fallbackUri), surfaceWidth, surfaceHeight, isBackground = true) }
                             if (b != null) {
@@ -2388,7 +2414,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                     val imgRatio = b.width.toFloat() / b.height.toFloat()
                                     val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
                                     val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
-                                    span = if (spanFactor > 1.2f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
+                                    span = if (spanFactor > 1.1f) spanFactor.roundToInt().coerceIn(2, maxPanoramicSpan) else 1
                                     
                                     // SMART PANO FIT: Only use pano if the next page is ALSO empty/repairable
                                     if (span > 1) {
@@ -2421,13 +2447,28 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                             }
                                         }
                                         needsNodeUpdate = true
+                                        Log.d("MW_DEBUG", "[$prefsName] [REPAIR] SUCCESS: Page $i now contains $fallbackUri")
                                     }
                                     requestDraw()
                                 }
                                 addToHistory(fallbackUri)
                             } else {
+                                Log.e("MW_DEBUG", "[$prefsName] [REPAIR] Decode failed for Page $i: $fallbackUri")
                                 addToHistory(fallbackUri)
                             }
+                        }
+                    }
+                    
+                    // --- FINAL SYNC CHECK ---
+                    withContext(Dispatchers.Main) {
+                        val missingIndices = (0 until detectedPages).filter { 
+                            val b = pageBitmaps[it]
+                            b == null || b.isRecycled 
+                        }
+                        if (missingIndices.isNotEmpty() && !checkOnlyNeighbors) {
+                            Log.w("MW_DEBUG", "[$prefsName] [REPAIR] Still missing pages $missingIndices. Retrying in 1s...")
+                            delay(1000)
+                            repairGaps(priorityIndex)
                         }
                     }
                 } catch (e: Exception) {
@@ -2760,6 +2801,23 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 (rawPos % total + total) % total
             }
             val idx = pos.roundToInt() % detectedPages
+
+            if (pageBitmaps[idx] == null && !isTransitioning) {
+                // PANIC REPAIR: If the current visible page is empty, trigger immediate repair
+                val now = System.currentTimeMillis()
+                if (!isLoading && repairGapsJob?.isActive != true && (now - lastPanicRepairTime > 2000)) {
+                    lastPanicRepairTime = now
+                    Log.w("MW_DEBUG", "[$prefsName] Panic Repair: Visible page $idx is empty! (isLoading=$isLoading). Triggering repair.")
+                    engineScope.launch { repairGaps(idx, checkOnlyNeighbors = true) }
+                }
+                
+                if (isLoading) {
+                    drawLoadingState(canvas, w, h)
+                } else {
+                    canvas.drawText("Loading page $idx...", w / 2f, h / 2f, textPaint)
+                }
+                return
+            }
 
             if (pageBitmaps.isEmpty() && !isTransitioning) {
                 if (isLoading) {
@@ -3474,6 +3532,49 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
             sR.set((lOn / s).toInt(), (tOn / s).toInt(), (rOn / s).toInt(), (bOn / s).toInt())
             dR.set(maxOf(0f, cX), maxOf(0f, cY), minOf(w.toFloat(), cX + ow), minOf(h.toFloat(), cY + oh))
+        }
+
+        private fun calculateSmartSpan(imgWidth: Int, imgHeight: Int, startIdx: Int, maxAllowed: Int, isGapRepair: Boolean = false): Int {
+            if (!panoramicScrollEnabled || prefsName.contains("lock")) return 1
+            
+            val imgRatio = imgWidth.toFloat() / imgHeight.toFloat()
+            val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
+            val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
+            
+            // 1. REVISED THRESHOLDS (More sensitive to user preference)
+            var targetSpan = when {
+                spanFactor > 2.1f -> 3
+                spanFactor > 1.1f -> 2
+                else -> 1
+            }
+            
+            // Limit by global max setting
+            targetSpan = targetSpan.coerceAtMost(maxAllowed)
+            if (targetSpan <= 1) return 1
+            
+            // 2. CONTIGUOUS SLOT CHECK
+            var availableSlots = 1
+            for (i in 1 until targetSpan) {
+                val nextIdx = (startIdx + i) % detectedPages
+                if (nextIdx == manualPageIndex) break
+                
+                val isBusy = synchronized(bitmapLock) {
+                    val b = pageBitmaps[nextIdx]
+                    // REPAIR OPTIMIZATION: If we are repairing, we can overwrite "broken" or empty slots
+                    // But if it's a healthy bitmap, we respect it.
+                    b != null && !b.isRecycled
+                }
+                if (isBusy && !isGapRepair) break
+                availableSlots++
+            }
+            
+            val finalSpan = targetSpan.coerceAtMost(availableSlots)
+            
+            if (finalSpan < targetSpan) {
+                Log.d("MW_DEBUG", "[$prefsName] [SmartSpan] Downgraded $targetSpan -> $finalSpan for Page $startIdx (Blocked by slot)")
+            }
+            
+            return finalSpan
         }
 
         private fun drawSingleBitmap(canvas: Canvas, b: Bitmap, w: Int, h: Int, idx: Int) {
