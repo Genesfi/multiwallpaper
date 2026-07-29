@@ -73,6 +73,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _intervalSeconds = MutableStateFlow(60f)
     val intervalSeconds = _intervalSeconds.asStateFlow()
 
+    private val _serviceEnabled = MutableStateFlow(true)
+    val serviceEnabled = _serviceEnabled.asStateFlow()
+
     private val _useFavoritesOnly = MutableStateFlow(false)
     val useFavoritesOnly = _useFavoritesOnly.asStateFlow()
 
@@ -329,6 +332,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadSettings() {
         val prefs = currentPrefs ?: return
+        _serviceEnabled.value = prefs.getBoolean("service_enabled", true)
         _activePresetName.value = prefs.getString("active_preset_name", null)
         _intervalSeconds.value = prefs.getFloat("interval_seconds", 60f)
         _useFavoritesOnly.value = prefs.getBoolean("use_favorites_only", false)
@@ -382,6 +386,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val current = currentPrefs ?: return
         
         current.edit().apply {
+            putBoolean("service_enabled", otherPrefs.getBoolean("service_enabled", true))
             putFloat("interval_seconds", otherPrefs.getFloat("interval_seconds", 60f))
             putBoolean("use_favorites_only", otherPrefs.getBoolean("use_favorites_only", false))
             putString("transition_type", otherPrefs.getString("transition_type", "slide"))
@@ -675,6 +680,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun setTransitionType(type: String) {
         currentPrefs?.edit()?.putString("transition_type", type)?.apply()
         _transitionType.value = type
+    }
+
+    fun setServiceEnabled(enabled: Boolean) {
+        currentPrefs?.edit()?.putBoolean("service_enabled", enabled)?.apply()
+        _serviceEnabled.value = enabled
     }
 
     fun setIntervalSeconds(seconds: Float) {

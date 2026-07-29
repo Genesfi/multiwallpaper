@@ -1330,6 +1330,7 @@ fun FavoritesScreen(viewModel: HomeViewModel) {
 fun SettingsScreen(viewModel: HomeViewModel) {
     val settingsTarget by viewModel.settingsTarget.collectAsState()
     val totalSeconds by viewModel.intervalSeconds.collectAsState()
+    val serviceEnabled by viewModel.serviceEnabled.collectAsState()
     val transition by viewModel.transitionType.collectAsState()
     val useFav by viewModel.useFavoritesOnly.collectAsState()
     val doubleTap by viewModel.doubleTapEnabled.collectAsState()
@@ -1455,6 +1456,13 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
+                        SettingRow(
+                            title = "Enable MultiWallpaper",
+                            subtitle = if (serviceEnabled) "Wallpaper service is active" else "Wallpaper is hibernated (RAM free)",
+                            checked = serviceEnabled,
+                            onCheckedChange = { viewModel.setServiceEnabled(it) }
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         SettingRow(title = "Use Favorites Only", checked = useFav, onCheckedChange = { viewModel.setUseFavoritesOnly(it) })
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         SettingRow(

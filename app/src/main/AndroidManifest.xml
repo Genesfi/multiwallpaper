@@ -53,6 +53,18 @@
                 android:name="android.service.wallpaper"
                 android:resource="@xml/live_wallpaper_lock" />
         </service>
+
+        <receiver
+            android:name=".WallpaperControlWidget"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="gustian.multiwallpaper.TOGGLE_ACTION" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/wallpaper_control_widget_info" />
+        </receiver>
     </application>
 
 </manifest>

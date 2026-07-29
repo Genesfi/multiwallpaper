@@ -546,6 +546,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var manualPageCount = 0 // 0 means auto-detect
         private var panoramicScrollEnabled = false
         private var maxPanoramicSpan = 3
+        private var isServiceEnabled = true
         
         // Job tracking for concurrency safety
         private var mainLoadJob: Job? = null
@@ -689,6 +690,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             isStaticLauncher = manualPageCount > 0
             panoramicScrollEnabled = prefs.getBoolean("panoramic_scroll_enabled", false)
             maxPanoramicSpan = prefs.getInt("max_panoramic_span", 3)
+            val newServiceEnabled = prefs.getBoolean("service_enabled", true)
+            val serviceStatusChanged = isServiceEnabled != newServiceEnabled
+            isServiceEnabled = newServiceEnabled
             
             if (manualPageCount > 0) {
                 detectedPages = manualPageCount
@@ -791,7 +795,14 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
             }
 
-            if (useFavChanged || forceReload || oldQuality != wallpaperQuality || sortOrderChanged || oldManualPageCount != manualPageCount || oldPanoramicScrollEnabled != panoramicScrollEnabled) {
+            if (!isServiceEnabled) {
+                unregisterSensor()
+                recycleBitmaps()
+                requestDraw() // Draw black screen
+                return
+            }
+
+            if (useFavChanged || forceReload || oldQuality != wallpaperQuality || sortOrderChanged || oldManualPageCount != manualPageCount || oldPanoramicScrollEnabled != panoramicScrollEnabled || serviceStatusChanged) {
                 if (manualPageCount > 0) {
                     detectedPages = manualPageCount
                 }
@@ -1437,6 +1448,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         private fun rotateWallpapers() {
+            if (!isServiceEnabled) return
+
             synchronized(bitmapLock) {
                 if (isTransitioning) return // Avoid overlapping transitions
 
@@ -2307,7 +2320,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         private fun repairGaps(priorityIndex: Int, checkOnlyNeighbors: Boolean = false) {
-            if (detectedPages <= 0) return
+            if (detectedPages <= 0 || !isServiceEnabled) return
             
             // SMART GATING: Don't fight with the main loader for bulk repairs.
             // But if it's a specific neighbor check from a user swipe, BYPASS the gate.
@@ -2769,7 +2782,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private val loadingRect = RectF()
 
         private fun drawLoadingState(canvas: Canvas, w: Int, h: Int) {
-            canvas.drawColor(Color.parseColor("#1A1F2C"))
+            canvas.drawColor(Color.BLACK)
             val centerX = w / 2f
             val centerY = h / 2f
             val radius = 40f
@@ -2790,7 +2803,12 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val w = canvas.width; val h = canvas.height
             
             // CRITICAL: Always clear background to prevent smearing/ghosting
-            canvas.drawColor(Color.parseColor("#1A1F2C"))
+            canvas.drawColor(Color.BLACK)
+
+            if (!isServiceEnabled) {
+                // HIBERNATION MODE: Draw nothing but the background
+                return
+            }
 
             // SMART DRAW: Support per-page loading state instead of global check
             val pos = if (xStep > 0f) {
