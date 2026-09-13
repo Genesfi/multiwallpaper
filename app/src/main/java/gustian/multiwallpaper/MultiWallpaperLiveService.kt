@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package gustian.multiwallpaper
 
 import android.content.BroadcastReceiver
@@ -33,6 +35,7 @@ import android.os.Looper
 import android.service.wallpaper.WallpaperService
 import android.util.Log
 import android.view.Choreographer
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.animation.DecelerateInterpolator
 import com.google.mlkit.vision.common.InputImage
@@ -88,6 +91,13 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
     override fun onCreate() {
         super.onCreate()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                org.lsposed.hiddenapibypass.HiddenApiBypass.addHiddenApiExemptions("")
+            } catch (t: Throwable) {
+                Log.w("MultiWallpaper", "HiddenApiBypass init failed: ${t.message}")
+            }
+        }
         // SHARED RECEIVER: Cukup satu sistem yang ngecek menit berganti
         if (timeTickReceiver == null) {
             timeTickReceiver = object : BroadcastReceiver() {
@@ -483,7 +493,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
             db.scannedImageDao().deleteAllImages(targetName)
             db.scannedImageDao().insertImages(tempImages.map { 
-                gustian.multiwallpaper.data.ScannedImageEntity(it.uriString, it.folderUriString, it.displayName, targetName)
+                gustian.multiwallpaper.data.ScannedImageEntity(it.uriString, it.folderUriString, it.displayName, targetName, isVideo = it.isVideo)
             })
 
             // 5. Force Service to reload the new images and ROTATE IMMEDIATELY
@@ -496,11 +506,13 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private fun scanRecursive(file: java.io.File, list: MutableList<gustian.multiwallpaper.ui.WallpaperImg>, favoriteUris: Set<String>, blacklistedUris: Set<String>) {
             val files = file.listFiles()
             files?.forEach { f ->
-                if (f.isFile && (f.name.endsWith(".jpg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true))) {
+                val isImage = f.name.endsWith(".jpg", true) || f.name.endsWith(".jpeg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true)
+                val isVideo = f.name.endsWith(".mp4", true) || f.name.endsWith(".webm", true) || f.name.endsWith(".mkv", true) || f.name.endsWith(".mov", true)
+                if (f.isFile && (isImage || isVideo)) {
                     val fileUriStr = Uri.fromFile(f).toString()
                     if (!blacklistedUris.contains(fileUriStr)) {
                         val parentUriStr = Uri.fromFile(f.parentFile).toString()
-                        list.add(gustian.multiwallpaper.ui.WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr)))
+                        list.add(gustian.multiwallpaper.ui.WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr), isVideo = isVideo))
                     }
                 } else if (f.isDirectory && !f.name.startsWith(".")) {
                     scanRecursive(f, list, favoriteUris, blacklistedUris)
@@ -547,6 +559,210 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private var panoramicScrollEnabled = false
         private var maxPanoramicSpan = 3
         private var isServiceEnabled = true
+        private var mediaMode = "PHOTO_ONLY" // "PHOTO_ONLY", "VIDEO_ONLY"
+        private var videoSoundEnabled = false
+        private var exoPlayer: androidx.media3.exoplayer.ExoPlayer? = null
+        private var isPlayingVideo = false
+        private var currentVideoUri: String? = null
+        private var lastPlayedVideoUri: String? = null
+        private var isWaitingForCleanSurface = false
+        private var videoConflictRetryCount = 0
+        private val failedVideoUris = mutableSetOf<String>()
+        private var videoRetryJob: Job? = null
+        private var isSurfaceAttachedToPlayer = false
+
+        private fun isVideo(uriString: String?): Boolean {
+            if (uriString == null) return false
+            val lower = uriString.lowercase()
+            if (lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv") || lower.endsWith(".mov")) return true
+            return try {
+                val uri = Uri.parse(uriString)
+                val type = applicationContext.contentResolver.getType(uri)
+                type?.startsWith("video/") == true
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+        private fun playVideoWallpaper(videoUriString: String) {
+            // Mark video as active and stop canvas immediately
+            isPlayingVideo = true
+            isLoading = false
+            handler.removeCallbacks(drawRunnable)
+            isDrawScheduled = false
+            isTransitioning = false
+            Choreographer.getInstance().removeFrameCallback(frameCallback)
+
+            currentVideoUri = videoUriString
+            pageUris[manualPageIndex] = videoUriString
+            engineScope.launch(Dispatchers.IO) { addToHistory(videoUriString) }
+
+            // Ensure wallpaper surface dimensions are set to 1x screen width for video
+            if (surfaceWidth > 0 && surfaceHeight > 0) {
+                updateWallpaperDimensions(surfaceWidth, surfaceHeight)
+            }
+
+            // 1. Recycle & clear all canvas bitmaps & thumbnails to conserve RAM while video is running
+            synchronized(bitmapLock) {
+                pageBitmaps.values.forEach { if (!it.isRecycled) it.recycle() }
+                pageBitmaps.clear()
+                pageThumbnails.values.forEach { if (!it.isRecycled) it.recycle() }
+                pageThumbnails.clear()
+                pageFocalPoints.clear()
+                pageScrollOffsets.clear()
+                nextBitmap?.recycle()
+                nextBitmap = null
+                preloadedBitmap?.recycle()
+                preloadedBitmap = null
+                preloadedUri = null
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                visualEffectNode?.discardDisplayList()
+                visualEffectNode = null
+            }
+            System.gc()
+
+            isWaitingForCleanSurface = false
+            releaseSurfaceFromHwui(surfaceHolder?.surface)
+            startExoPlayerPlayback(videoUriString)
+        }
+
+        private fun releaseSurfaceFromHwui(surface: Surface?) {
+            if (surface == null || !surface.isValid) return
+            try {
+                val hwuiDestroy = Surface::class.java.getDeclaredMethod("hwuiDestroy")
+                hwuiDestroy.isAccessible = true
+                hwuiDestroy.invoke(surface)
+                Log.d("MultiWallpaper", "hwuiDestroy successfully released HWUI EGL context from surface")
+            } catch (t: Throwable) {
+                Log.d("MultiWallpaper", "hwuiDestroy: ${t.message}")
+            }
+        }
+
+        private fun startExoPlayerPlayback(videoUriString: String) {
+            if (!isPlayingVideo || !isServiceEnabled) return
+            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            val soundEnabled = prefs.getBoolean("video_sound_enabled", false)
+            val isNewVideo = (lastPlayedVideoUri != videoUriString)
+            lastPlayedVideoUri = videoUriString
+            currentVideoUri = videoUriString
+
+            if (exoPlayer == null) {
+                val renderersFactory = androidx.media3.exoplayer.DefaultRenderersFactory(applicationContext)
+                    .setEnableDecoderFallback(true)
+                val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        1500,  // minBufferMs (default 50,000)
+                        5000,  // maxBufferMs (default 50,000)
+                        1000,  // bufferForPlaybackMs (default 2,500)
+                        1500   // bufferForPlaybackAfterRebufferMs (default 5,000)
+                    )
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .build()
+                exoPlayer = androidx.media3.exoplayer.ExoPlayer.Builder(applicationContext, renderersFactory)
+                    .setLoadControl(loadControl)
+                    .build().apply {
+                    repeatMode = androidx.media3.common.Player.REPEAT_MODE_ONE
+                    videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                    volume = if (soundEnabled) 1.0f else 0.0f
+                    if (surfaceHolder.surface?.isValid == true && !isSurfaceAttachedToPlayer) {
+                        setVideoSurfaceHolder(surfaceHolder)
+                        isSurfaceAttachedToPlayer = true
+                    }
+                    addListener(object : androidx.media3.common.Player.Listener {
+                        override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                            exoPlayer?.videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                        }
+                        override fun onPlaybackStateChanged(playbackState: Int) {
+                            if (playbackState == androidx.media3.common.Player.STATE_READY) {
+                                exoPlayer?.videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                            }
+                        }
+                        override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                            exoPlayer?.videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                        }
+                        override fun onRenderedFirstFrame() {
+                            exoPlayer?.videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                            videoConflictRetryCount = 0
+                        }
+                        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                            Log.e("MultiWallpaper", "ExoPlayer playback error on $videoUriString: ${error.message}")
+                            this@MultiWallpaperEngine.isLoading = false
+                            videoRetryJob?.cancel()
+                            releaseExoPlayer()
+
+                            failedVideoUris.add(videoUriString)
+                            videoRetryJob = engineScope.launch {
+                                delay(2000)
+                                if (isActive && isServiceEnabled) {
+                                    loadWallpapersForPages()
+                                }
+                            }
+                        }
+                    })
+                }
+            } else {
+                exoPlayer?.volume = if (soundEnabled) 1.0f else 0.0f
+                if (surfaceHolder.surface?.isValid == true && !isSurfaceAttachedToPlayer) {
+                    exoPlayer?.setVideoSurfaceHolder(surfaceHolder)
+                    isSurfaceAttachedToPlayer = true
+                }
+            }
+
+            exoPlayer?.let { player ->
+                player.videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                if (isNewVideo || player.playbackState == androidx.media3.common.Player.STATE_IDLE || player.playerError != null) {
+                    val mediaItem = androidx.media3.common.MediaItem.fromUri(Uri.parse(videoUriString))
+                    player.setMediaItem(mediaItem)
+                    player.prepare()
+                } else {
+                    player.seekTo(0)
+                }
+                player.playWhenReady = (visible || isPreview)
+                if (visible || isPreview) {
+                    player.play()
+                }
+            }
+        }
+
+        private fun releaseExoPlayer() {
+            lastPlayedVideoUri = null
+            isSurfaceAttachedToPlayer = false
+            val player = exoPlayer
+            exoPlayer = null
+            if (player != null) {
+                try {
+                    player.clearVideoSurfaceHolder(surfaceHolder)
+                } catch (e: Exception) {
+                    Log.w("MultiWallpaper", "Error clearing surface holder: ${e.message}")
+                }
+                try {
+                    player.clearVideoSurface()
+                } catch (e: Exception) {
+                    Log.w("MultiWallpaper", "Error clearing video surface: ${e.message}")
+                }
+                try {
+                    player.stop()
+                    player.release()
+                } catch (e: Exception) {
+                    Log.w("MultiWallpaper", "Error releasing player: ${e.message}")
+                }
+            }
+        }
+
+        private fun stopVideoWallpaper() {
+            videoRetryJob?.cancel()
+            isWaitingForCleanSurface = false
+            isPlayingVideo = false
+            currentVideoUri = null
+            lastPlayedVideoUri = null
+
+            releaseExoPlayer()
+
+            if (mediaMode != "VIDEO_ONLY" || !isServiceEnabled) {
+                requestDraw()
+            }
+        }
         
         // Job tracking for concurrency safety
         private var mainLoadJob: Job? = null
@@ -615,6 +831,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             manualPageCount = prefs.getInt("manual_page_count", 0)
             isStaticLauncher = manualPageCount > 0
+            mediaMode = prefs.getString("media_mode", "PHOTO_ONLY") ?: "PHOTO_ONLY"
+            isServiceEnabled = prefs.getBoolean("service_enabled", true)
 
             if (isStaticLauncher) {
                 detectedPages = manualPageCount
@@ -645,7 +863,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
                 db.folderDao().getAllFolders(targetName).collectLatest {
                     if (it.isNotEmpty()) {
-                        if (isBootPhase) {
+                        if (isBootPhase && !isPreview) {
                             // Give other apps (WhatsApp, System, etc.) 8 seconds to finish booting first
                             delay(8000)
                         }
@@ -768,6 +986,13 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             panoramicScrollEnabled = prefs.getBoolean("panoramic_scroll_enabled", false)
             maxPanoramicSpan = prefs.getInt("max_panoramic_span", 3)
 
+            val oldMediaMode = mediaMode
+            val readMode = prefs.getString("media_mode", "PHOTO_ONLY") ?: "PHOTO_ONLY"
+            mediaMode = if (readMode == "BOTH") "PHOTO_ONLY" else readMode
+            val mediaModeChanged = (oldMediaMode != mediaMode)
+            videoSoundEnabled = prefs.getBoolean("video_sound_enabled", false)
+            exoPlayer?.volume = if (videoSoundEnabled) 1.0f else 0.0f
+
             // --- MANDATORY SCHEDULE OVERRIDES (Apply Last to ensure Priority) ---
             currentActiveSchedule?.let { schedule ->
                 Log.d("MultiWallpaper", "updateSettings: Applying Schedule Overrides for ${schedule.name}")
@@ -797,16 +1022,27 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
             if (!isServiceEnabled) {
                 unregisterSensor()
+                if (isPlayingVideo) {
+                    stopVideoWallpaper()
+                }
                 recycleBitmaps()
                 requestDraw() // Draw black screen
                 return
             }
 
-            if (useFavChanged || forceReload || oldQuality != wallpaperQuality || sortOrderChanged || oldManualPageCount != manualPageCount || oldPanoramicScrollEnabled != panoramicScrollEnabled || serviceStatusChanged) {
+            if (useFavChanged || forceReload || mediaModeChanged || oldQuality != wallpaperQuality || sortOrderChanged || oldManualPageCount != manualPageCount || oldPanoramicScrollEnabled != panoramicScrollEnabled || serviceStatusChanged) {
                 if (manualPageCount > 0) {
                     detectedPages = manualPageCount
                 }
                 
+                // CRITICAL: Always clean previous video/photo state when mediaMode changes
+                if (mediaModeChanged) {
+                    stopVideoWallpaper()
+                    synchronized(bitmapLock) {
+                        recycleBitmaps()
+                    }
+                }
+
                 // CRITICAL: Clear Pano Metadata if mode was toggled OFF
                 if (oldPanoramicScrollEnabled && !panoramicScrollEnabled) {
                     Log.d("MW_DEBUG", "[$prefsName] Pano Disabled: Purging scroll offsets and force reloading.")
@@ -816,7 +1052,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 }
 
                 // BYPASS DEBOUNCE for critical mode changes
-                if (oldPanoramicScrollEnabled != panoramicScrollEnabled || forceReload) {
+                if (oldPanoramicScrollEnabled != panoramicScrollEnabled || forceReload || mediaModeChanged || serviceStatusChanged) {
                     lastLoadRequestTime = 0L
                 }
                 needsNodeUpdate = true
@@ -902,7 +1138,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         private fun requestDraw() {
-            if (visible && !isDrawScheduled && engineScope.isActive) {
+            if (isPlayingVideo || mediaMode == "VIDEO_ONLY" || isVideo(pageUris[manualPageIndex])) return
+            if ((visible || isPreview) && !isDrawScheduled && engineScope.isActive) {
                 isDrawScheduled = true
                 handler.post(drawRunnable)
             }
@@ -921,15 +1158,27 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     
                     // If we're not currently visible, we can even release current bitmaps
                     // to be re-decoded when user returns to home.
-                    if (!visible) {
-                        recycleBitmaps()
+                    val activeIdx = manualPageIndex
+                    val toRecycle = pageBitmaps.filterKeys { it != activeIdx }
+                    toRecycle.forEach { (k, b) ->
+                        b.recycle()
+                        pageBitmaps.remove(k)
+                        pageUris.remove(k)
+                        pageFocalPoints.remove(k)
+                        pageScrollOffsets.remove(k)
                     }
+                    Log.d("MultiWallpaper", "Trimming memory: Retained active page $activeIdx, cleared other cached pages")
                 }
+                System.gc()
+                needsNodeUpdate = true
+                visualEffectNode = null
             }
         }
 
         override fun onDestroy() {
             super.onDestroy()
+            stopVideoWallpaper()
+            releaseExoPlayer()
             unregisterEngine(this)
             if (activeEngine == this) activeEngine = null
             engineScope.cancel()
@@ -948,7 +1197,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         override fun onTouchEvent(event: android.view.MotionEvent) {
             super.onTouchEvent(event)
             val numBitmaps = pageBitmaps.size
-            if (numBitmaps <= 0) return
+            if (numBitmaps <= 0 && !isPlayingVideo) return
 
             if (velocityTracker == null) {
                 velocityTracker = android.view.VelocityTracker.obtain()
@@ -1013,8 +1262,18 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     } else {
                         lastTapTime = currTime
                         
-                // MANUAL SWIPE: Hanya aktif jika isStaticLauncher = true (User set manual count)
-                        if (isStaticLauncher && shouldRotate && detectedPages > 1) {
+                        // SWIPE HANDLING (VIDEO vs IMAGE)
+                        if (shouldRotate && (isPlayingVideo || mediaMode == "VIDEO_ONLY")) {
+                            val isPrev = deltaX > 0
+                            manualPageIndex = if (isPrev) {
+                                (manualPageIndex - 1 + detectedPages) % detectedPages
+                            } else {
+                                (manualPageIndex + 1) % detectedPages
+                            }
+                            Log.i("MW_DEBUG", "[$prefsName] VIDEO SWIPE -> Page $manualPageIndex (isPrev=$isPrev). Changing video.")
+                            swipeOffset = 0f
+                            rotateWallpapers()
+                        } else if (isStaticLauncher && shouldRotate && detectedPages > 1) {
                             val isPrev = deltaX > 0
                             if (isPrev) {
                                 manualPageIndex = (manualPageIndex - 1 + detectedPages) % detectedPages
@@ -1099,7 +1358,10 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
         override fun onVisibilityChanged(visible: Boolean) {
             this.visible = visible
-            if (visible) {
+            if (visible || isPreview) {
+                if (isPlayingVideo && isServiceEnabled) {
+                    exoPlayer?.play()
+                }
                 // RESET IDLE TRACKER & TRANSITION SAFETY
                 hasRotatedWhileIdle = false
                 if (isTransitioning) {
@@ -1113,7 +1375,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 // 2. SMART UNLOCK: Jika ada gambar tapi spinner masih jalan, matikan spinner.
                 if (pageBitmaps.isNotEmpty() && isLoading) {
                     isLoading = false
-                    requestDraw()
+                    if (mediaMode != "VIDEO_ONLY") {
+                        requestDraw()
+                    }
                 }
 
                 // 3. FORCE RELOAD:
@@ -1127,7 +1391,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 
                 Log.d("MW_DEBUG", "[$prefsName] Visibility ON: Size=$currentSize, Det=$detectedPages, Gaps=$hasGaps")
 
-                if ((currentSize < detectedPages || hasGaps) && !isLoading) {
+                if ((currentSize < detectedPages || hasGaps) && !isLoading && !isPlayingVideo && mediaMode != "VIDEO_ONLY") {
                     if (currentSize == 0) {
                         Log.i("MW_DEBUG", "[$prefsName] Anti-1-Page: Critical gap detected (Size 0). Forcing full reload.")
                         loadWallpapersForPages()
@@ -1178,6 +1442,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 requestDraw()
             } else {
                 // EXTREME BATTERY SAVING: Layar Mati = Stop Total
+                if (isPlayingVideo) {
+                    exoPlayer?.pause()
+                }
                 
                 // Batalkan semua job aktif kecuali jika kita sedang di tengah rotasi idle pertama
                 if (hasRotatedWhileIdle) {
@@ -1221,18 +1488,22 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     
                     // SYNC manualPageIndex from launcher offset if possible (Even in Poco/Manual mode)
                     val effectiveStep = if (this.xStep > 0f) this.xStep else if (detectedPages > 1) 1f / (detectedPages - 1).toFloat() else 0f
-                    if (pageBitmaps.isNotEmpty() && effectiveStep > 0f) {
+                    val hasPages = pageBitmaps.isNotEmpty() || isPlayingVideo || mediaMode == "VIDEO_ONLY"
+                    if (hasPages && effectiveStep > 0f) {
                         val targetIndex = (validXOffset / effectiveStep).roundToInt()
                         val clampedIndex = targetIndex.coerceIn(0, detectedPages - 1)
                         if (manualPageIndex != clampedIndex) {
                             manualPageIndex = clampedIndex
-                            
-                            val currentUri = pageUris[manualPageIndex] ?: "Empty"
-                            val currentScroll = pageScrollOffsets[manualPageIndex]
-                            val panoStatus = if (currentScroll != null) "PANO (Offset: $currentScroll)" else "NO PANO"
-                            val imgName = currentUri.substringAfterLast("/")
-                            
-                            Log.i("MW_DEBUG", "[$prefsName] OFFSET CHANGE -> Page $clampedIndex | $panoStatus | Img: $imgName")
+                            if (isServiceEnabled && (isPlayingVideo || mediaMode == "VIDEO_ONLY")) {
+                                Log.i("MW_DEBUG", "[$prefsName] OFFSET CHANGE VIDEO (Static) -> Page $clampedIndex. Changing video.")
+                                rotateWallpapers()
+                            } else {
+                                val currentUri = pageUris[manualPageIndex] ?: "Empty"
+                                val currentScroll = pageScrollOffsets[manualPageIndex]
+                                val panoStatus = if (currentScroll != null) "PANO (Offset: $currentScroll)" else "NO PANO"
+                                val imgName = currentUri.substringAfterLast("/")
+                                Log.i("MW_DEBUG", "[$prefsName] OFFSET CHANGE -> Page $clampedIndex | $panoStatus | Img: $imgName")
+                            }
                         }
                     }
                     
@@ -1269,19 +1540,23 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 
                 // SYNC manualPageIndex from launcher offset
                 val effectiveStep = if (this.xStep > 0f) this.xStep else if (detectedPages > 1) 1f / (detectedPages - 1).toFloat() else 0f
-                if (pageBitmaps.isNotEmpty() && effectiveStep > 0f) {
+                val hasPages = pageBitmaps.isNotEmpty() || isPlayingVideo || mediaMode == "VIDEO_ONLY"
+                if (hasPages && effectiveStep > 0f) {
                     val targetIndex = (validXOffset / effectiveStep).roundToInt()
                     val clampedIndex = targetIndex.coerceIn(0, detectedPages - 1)
                     if (manualPageIndex != clampedIndex) {
                         manualPageIndex = clampedIndex
-                        
-                        val currentUri = pageUris[manualPageIndex] ?: "Empty"
-                        val currentScroll = pageScrollOffsets[manualPageIndex]
-                        val panoStatus = if (currentScroll != null) "PANO (Offset: $currentScroll)" else "NO PANO"
-                        val imgName = currentUri.substringAfterLast("/")
-                        
-                        Log.i("MW_DEBUG", "[$prefsName] OFFSET CHANGE -> Page $clampedIndex | $panoStatus | Img: $imgName")
-                        requestDraw()
+                        if (isServiceEnabled && (isPlayingVideo || mediaMode == "VIDEO_ONLY")) {
+                            Log.i("MW_DEBUG", "[$prefsName] OFFSET CHANGE VIDEO (Auto) -> Page $clampedIndex. Changing video.")
+                            rotateWallpapers()
+                        } else {
+                            val currentUri = pageUris[manualPageIndex] ?: "Empty"
+                            val currentScroll = pageScrollOffsets[manualPageIndex]
+                            val panoStatus = if (currentScroll != null) "PANO (Offset: $currentScroll)" else "NO PANO"
+                            val imgName = currentUri.substringAfterLast("/")
+                            Log.i("MW_DEBUG", "[$prefsName] OFFSET CHANGE -> Page $clampedIndex | $panoStatus | Img: $imgName")
+                            requestDraw()
+                        }
                     }
                 }
             }
@@ -1297,21 +1572,76 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             this.surfaceWidth = width
             this.surfaceHeight = height
             
-            // TRICK SISTEM: 
-            // Meskipun kita di mode Manual/Poco, kita tetap minta lebar 5 layar untuk HOME.
-            // Ini supaya Launcher tidak pelit membagikan touch event (Horizontal Swipe).
-            val targetW = if (prefsName.contains("lock")) width else width * 5
+            if (isPlayingVideo && currentVideoUri != null) {
+                if (isWaitingForCleanSurface) {
+                    Log.d("MultiWallpaper", "onSurfaceChanged: Clean surface format updated, starting video playback.")
+                    isWaitingForCleanSurface = false
+                    videoRetryJob?.cancel()
+                    startExoPlayerPlayback(currentVideoUri!!)
+                } else if (exoPlayer != null && holder?.surface?.isValid == true && !isSurfaceAttachedToPlayer) {
+                    exoPlayer?.setVideoSurfaceHolder(holder)
+                    isSurfaceAttachedToPlayer = true
+                }
+            }
+
+            val targetW = width
             updateWallpaperDimensions(targetW, height)
 
             // RECOVERY: If surface changed and we have no bitmaps, force a load
-            if (pageBitmaps.isEmpty() && !isLoading) {
+            if (pageBitmaps.isEmpty() && !isLoading && !isPlayingVideo && mediaMode != "VIDEO_ONLY") {
                 loadWallpapersForPages()
             }
-            requestDraw()
+            if (mediaMode != "VIDEO_ONLY") {
+                requestDraw()
+            }
+        }
+
+        override fun onSurfaceCreated(holder: SurfaceHolder) {
+            super.onSurfaceCreated(holder)
+            if (isPlayingVideo && currentVideoUri != null) {
+                if (isWaitingForCleanSurface) {
+                    Log.d("MultiWallpaper", "onSurfaceCreated: Clean surface created, starting video playback.")
+                    isWaitingForCleanSurface = false
+                    videoRetryJob?.cancel()
+                    startExoPlayerPlayback(currentVideoUri!!)
+                } else if (exoPlayer != null) {
+                    if (!isSurfaceAttachedToPlayer) {
+                        exoPlayer?.setVideoSurfaceHolder(holder)
+                        isSurfaceAttachedToPlayer = true
+                    }
+                    if (visible || isPreview) {
+                        exoPlayer?.play()
+                    }
+                } else {
+                    startExoPlayerPlayback(currentVideoUri!!)
+                }
+            }
+        }
+
+        override fun onSurfaceDestroyed(holder: SurfaceHolder) {
+            super.onSurfaceDestroyed(holder)
+            isSurfaceAttachedToPlayer = false
+            if (exoPlayer != null) {
+                try {
+                    exoPlayer?.clearVideoSurfaceHolder(holder)
+                    exoPlayer?.clearVideoSurface()
+                } catch (e: Exception) {
+                    Log.w("MultiWallpaper", "Error clearing surface on destroyed: ${e.message}")
+                }
+            }
         }
 
         private fun updateWallpaperDimensions(targetWidth: Int, targetHeight: Int) {
             if (targetWidth <= 0 || targetHeight <= 0) return
+            if (isPreview) {
+                try {
+                    val wm = getSystemService(Context.WALLPAPER_SERVICE) as android.app.WallpaperManager
+                    if (wm.desiredMinimumWidth > targetWidth) {
+                        wm.suggestDesiredDimensions(targetWidth, targetHeight)
+                    }
+                } catch (_: Exception) {}
+                return
+            }
             if (lastSuggestedWidth == targetWidth) return
             lastSuggestedWidth = targetWidth
             try {
@@ -1396,21 +1726,22 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             handler.postDelayed(rotationRunnable, delayMs)
         }
 
-        private suspend fun getNextWallpaperUriBatch(count: Int = 1): List<String> {
+        private suspend fun getNextWallpaperUriBatch(count: Int = 1, overrideTarget: String? = null): List<String> {
             val db = AppDatabase.getDatabase(applicationContext)
             val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             val useFavorites = prefs.getBoolean("use_favorites_only", false)
             val sortOrder = prefs.getString("rotation_sort_order", "RANDOM")
-            val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
+            val targetName = overrideTarget ?: (if (prefsName.contains("lock")) "LOCK" else "HOME")
+            val currentMediaMode = prefs.getString("media_mode", "PHOTO_ONLY") ?: "PHOTO_ONLY"
 
             // 1. Check History Exhaustion
-            val totalImages = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
+            val totalImages = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName, currentMediaMode) else db.scannedImageDao().getImageCount(targetName, currentMediaMode)
             
             val hasAvailableImages = withContext(Dispatchers.IO) {
                 if (useFavorites) {
-                    db.favoriteDao().getRandomFavoriteUrisExcludingHistory(targetName, 1).isNotEmpty()
+                    db.favoriteDao().getRandomFavoriteUrisExcludingHistory(targetName, 1, currentMediaMode).isNotEmpty()
                 } else {
-                    db.scannedImageDao().getRandomUrisExcludingHistory(targetName, 1).isNotEmpty()
+                    db.scannedImageDao().getRandomUrisExcludingHistory(targetName, 1, currentMediaMode).isNotEmpty()
                 }
             }
             
@@ -1427,25 +1758,25 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     withContext(Dispatchers.IO) {
                         // OPTIMIZED BALANCED RANDOM: 1 Query to get everything adil
                         val batch = if (useFavorites) {
-                            db.favoriteDao().getBalancedRandomFavorites(targetName, count).map { it.uriString }
+                            db.favoriteDao().getBalancedRandomFavorites(targetName, count, currentMediaMode).map { it.uriString }
                         } else {
-                            db.scannedImageDao().getBalancedRandomUris(targetName, count).map { it.uriString }
+                            db.scannedImageDao().getBalancedRandomUris(targetName, count, currentMediaMode).map { it.uriString }
                         }
                         finalUris.addAll(batch)
                         
                         // Fallback if CTE didn't fill the count (e.g. history exhaustion)
                         if (finalUris.size < count) {
                             val needed = count - finalUris.size
-                            val extra = if (useFavorites) db.favoriteDao().getRandomFavoriteUrisExcludingHistory(targetName, needed)
-                                        else db.scannedImageDao().getRandomUrisExcludingHistory(targetName, needed)
+                            val extra = if (useFavorites) db.favoriteDao().getRandomFavoriteUrisExcludingHistory(targetName, needed, currentMediaMode)
+                                        else db.scannedImageDao().getRandomUrisExcludingHistory(targetName, needed, currentMediaMode)
                             finalUris.addAll(extra)
                         }
                     }
                 } else {
                     val ordered = if (useFavorites)
-                        db.favoriteDao().getOrderedFavoriteUrisExcludingHistory(targetName, count)
+                        db.favoriteDao().getOrderedFavoriteUrisExcludingHistory(targetName, count, currentMediaMode)
                     else
-                        db.scannedImageDao().getOrderedUrisExcludingHistory(targetName, count)
+                        db.scannedImageDao().getOrderedUrisExcludingHistory(targetName, count, currentMediaMode)
                     
                     finalUris.addAll(ordered)
                 }
@@ -1453,7 +1784,18 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 Log.e("MultiWallpaper", "Rotation fetch error", e)
             }
             
-            return finalUris
+            val validUris = if (failedVideoUris.isNotEmpty()) {
+                val filtered = finalUris.filter { !failedVideoUris.contains(it) }
+                if (filtered.isEmpty()) {
+                    failedVideoUris.clear()
+                    finalUris
+                } else {
+                    filtered
+                }
+            } else {
+                finalUris
+            }
+            return validUris
         }
 
         private fun rotateWallpapers() {
@@ -1480,7 +1822,25 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 needsNodeUpdate = true
 
                 // PRIORITAS: Selalu ganti halaman aktif (manualPageIndex) terlebih dahulu!
-                // GATING: Mode \"cut\" (instant swap) atau force reload tetap lewat jalur bawah.
+                if (preloadedUri != null && isVideo(preloadedUri)) {
+                    val vUri = preloadedUri!!
+                    preloadedUri = null
+                    preloadedBitmap?.recycle()
+                    preloadedBitmap = null
+                    playVideoWallpaper(vUri)
+                    scheduleRotation()
+                    preloadNextWallpaper()
+                    return
+                }
+
+                val currentMediaMode = getSharedPreferences(prefsName, Context.MODE_PRIVATE).getString("media_mode", "PHOTO_ONLY") ?: "PHOTO_ONLY"
+                if (isPlayingVideo || currentMediaMode == "VIDEO_ONLY") {
+                    isTransitioning = false
+                    startRotationTransition()
+                    return
+                }
+
+                // GATING: Mode "cut" (instant swap) atau force reload tetap lewat jalur bawah.
                 if (transitionType != "cut" && pageBitmaps.isNotEmpty()) {
                     transitionDuration = (1300L - (fadeSpeed * 21L)).coerceIn(250L, 1200L)
                     
@@ -1513,6 +1873,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     requestDraw()
 
                     if (preloadedBitmap != null) {
+                        if (isPlayingVideo) {
+                            stopVideoWallpaper()
+                        }
                         if (visible) {
                             nextBitmap?.recycle()
                             nextBitmap = preloadedBitmap
@@ -1763,10 +2126,34 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 if (candidates.isEmpty()) return@launch
                 
                 var currentUri = candidates.removeAt(0)
+                if (isVideo(currentUri)) {
+                    withContext(Dispatchers.Main) {
+                        if (!isActive) return@withContext
+                        preloadedBitmap?.recycle()
+                        preloadedBitmap = null
+                        preloadedUri = currentUri
+                        preloadedFocalPoint = null
+                        preloadedScrollOffset = null
+                        preloadedSpan = 1
+                    }
+                    return@launch
+                }
                 // Rotation target starts as ARGB_8888 for high quality fade
                 var rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight, isBackground = false)
                 if (rawBmp == null && candidates.isNotEmpty()) {
                     currentUri = candidates.removeAt(0)
+                    if (isVideo(currentUri)) {
+                        withContext(Dispatchers.Main) {
+                            if (!isActive) return@withContext
+                            preloadedBitmap?.recycle()
+                            preloadedBitmap = null
+                            preloadedUri = currentUri
+                            preloadedFocalPoint = null
+                            preloadedScrollOffset = null
+                            preloadedSpan = 1
+                        }
+                        return@launch
+                    }
                     rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight, isBackground = false)
                 }
 
@@ -1804,10 +2191,34 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 if (candidates.isEmpty()) return@launch
                 
                 var currentUri = candidates.removeAt(0)
+                if (isVideo(currentUri)) {
+                    withContext(Dispatchers.Main) {
+                        if (!isActive) return@withContext
+                        playVideoWallpaper(currentUri)
+                        scheduleRotation()
+                        preloadNextWallpaper()
+                    }
+                    return@launch
+                }
+
+                withContext(Dispatchers.Main) {
+                    if (isPlayingVideo) {
+                        stopVideoWallpaper()
+                    }
+                }
                 // Rotation target starts as ARGB_8888 for high quality fade
                 var rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight, isBackground = false)
                 if (rawBmp == null && candidates.isNotEmpty()) {
                     currentUri = candidates.removeAt(0)
+                    if (isVideo(currentUri)) {
+                        withContext(Dispatchers.Main) {
+                            if (!isActive) return@withContext
+                            playVideoWallpaper(currentUri)
+                            scheduleRotation()
+                            preloadNextWallpaper()
+                        }
+                        return@launch
+                    }
                     rawBmp = decodeSampledBitmapFromUri(Uri.parse(currentUri), surfaceWidth, surfaceHeight, isBackground = false)
                 }
 
@@ -1997,8 +2408,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
             preloadJob?.cancel()
             rotationJob?.cancel()
 
-            isLoading = true
-            requestDraw()
+            val currentMode = getSharedPreferences(prefsName, Context.MODE_PRIVATE).getString("media_mode", "PHOTO_ONLY") ?: "PHOTO_ONLY"
+            isLoading = (currentMode != "VIDEO_ONLY")
 
             mainLoadJob = engineScope.launch {
                 try {
@@ -2018,12 +2429,24 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     val useFavorites = prefs.getBoolean("use_favorites_only", false)
                     
                     val targetName = if (prefsName.contains("lock")) "LOCK" else "HOME"
-                    var total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
+                    val currentMediaMode = prefs.getString("media_mode", "PHOTO_ONLY") ?: "PHOTO_ONLY"
+                    var effectiveTarget = targetName
+                    var total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName, currentMediaMode) else db.scannedImageDao().getImageCount(targetName, currentMediaMode)
                     
                     if (total <= 0) {
                         // RE-SCAN PROTECTION: If database is empty, wait a bit for background scan to finish
                         delay(1500)
-                        total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName) else db.scannedImageDao().getImageCount(targetName)
+                        total = if (useFavorites) db.favoriteDao().getFavoriteCount(targetName, currentMediaMode) else db.scannedImageDao().getImageCount(targetName, currentMediaMode)
+                    }
+
+                    if (total <= 0 && targetName == "LOCK") {
+                        // Fallback to HOME if LOCK has no media configured yet
+                        val homeTotal = if (useFavorites) db.favoriteDao().getFavoriteCount("HOME", currentMediaMode) else db.scannedImageDao().getImageCount("HOME", currentMediaMode)
+                        if (homeTotal > 0) {
+                            effectiveTarget = "HOME"
+                            total = homeTotal
+                            Log.i("MW_DEBUG", "[$prefsName] Lock screen has no media, falling back to HOME media ($total candidates)")
+                        }
                     }
 
                     if (total <= 0) {
@@ -2031,7 +2454,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         // JANGAN recycleBitmaps di sini jika kita sedang di tengah BootPhase atau Reload
                         // Cukup set isLoading ke false agar user tidak terjebak spinner
                         isLoading = false
-                        requestDraw()
+                        if (currentMediaMode != "VIDEO_ONLY") {
+                            requestDraw()
+                        }
                         return@launch
                     }
 
@@ -2040,15 +2465,35 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     }
 
                     val batchSize = 200.coerceAtMost(total)
-                    val uriCandidates = getNextWallpaperUriBatch(batchSize).toMutableList()
+                    val uriCandidates = getNextWallpaperUriBatch(batchSize, effectiveTarget).toMutableList()
                     if (uriCandidates.isEmpty()) {
                         Log.w("MW_DEBUG", "[$prefsName] No unique candidates found after history check. Stopping load.")
+                        isLoading = false
+                        if (currentMediaMode != "VIDEO_ONLY") {
+                            requestDraw()
+                        }
                         return@launch
                     }
 
                     // CANCELLABLE VISIBLE PAGE LOADING (Removing NonCancellable for responsiveness)
                     Log.d("MW_DEBUG", "[$prefsName] Forced Reload Triggered. Priority Index: $manualPageIndex (BootPhase: $isBootPhase)")
                     val visibleUri = uriCandidates.removeAt(0)
+                    if (isVideo(visibleUri)) {
+                        withContext(Dispatchers.Main) {
+                            if (!isActive) return@withContext
+                            pageUris[manualPageIndex] = visibleUri
+                            playVideoWallpaper(visibleUri)
+                            scheduleRotation()
+                            preloadNextWallpaper()
+                        }
+                        return@launch
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        if (isPlayingVideo) {
+                            stopVideoWallpaper()
+                        }
+                    }
                     val (firstBitmap, firstFocal, firstSpan) = withContext(Dispatchers.IO) {
                         if (!isActive) return@withContext Triple(null, null, 1)
                         val b = decodeSampledBitmapFromUri(Uri.parse(visibleUri), surfaceWidth, surfaceHeight, isBackground = false)
@@ -2109,16 +2554,18 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                                     pageScrollOffsets[targetP] = if (firstSpan > 1) i.toFloat() / (firstSpan - 1).toFloat() else null
                                 }
                                 needsNodeUpdate = true
+                                isLoading = false
                             }
                         }
                         if (firstBitmap != null) {
                             addToHistory(visibleUri)
                         }
                     }
-                    // SHOW CURRENT IMAGES IMMEDIATELY BUT KEEP isLoading=true FOR OTHERS
+                    // SHOW CURRENT IMAGES IMMEDIATELY
                     requestDraw()
 
-                    if (!isActive || !visible) {
+                    if (!isActive || (!visible && !isPreview)) {
+                        isLoading = false
                         return@launch
                     }
 
@@ -2141,7 +2588,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         }
 
                         var iIdx = 0
-                        while (iIdx < pOrder.size && isActive && visible) {
+                        while (iIdx < pOrder.size && isActive && (visible || isPreview)) {
                             // YIELD TO USER INTERACTION: Pause loading if user is swiping
                             if (isSwiping || isSwipeAnimating) {
                                 delay(300)
@@ -2204,9 +2651,9 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                         val priorityOrder = (0 until targetPageCount).filter { !filledIndicesNonPano.contains(it) }.sortedBy { p -> val diff = Math.abs(p - manualPageIndex); Math.min(diff, targetPageCount - diff) }
 
-                        val chunkSize = if (isBootPhase) 1 else if (visible) 2 else 1
+                        val chunkSize = if (isBootPhase) 1 else if (visible || isPreview) 2 else 1
                         priorityOrder.chunked(chunkSize).forEach { chunk ->
-                            if (!isActive || !visible) return@launch
+                            if (!isActive || (!visible && !isPreview)) return@launch
                             
                             // YIELD TO USER INTERACTION (Lower delay for responsiveness)
                             if (isSwiping || isSwipeAnimating) {
@@ -2215,7 +2662,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
 
                             chunk.map { p ->
                                 async(Dispatchers.IO) {
-                                    if (!isActive || !visible) return@async
+                                    if (!isActive || (!visible && !isPreview)) return@async
                                     var selectedUri: String? = null
                                     synchronized(uriCandidates) {
                                         if (uriCandidates.isNotEmpty()) {
@@ -2304,8 +2751,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 } finally {
                     withContext(NonCancellable) {
                         withContext(Dispatchers.Main) {
-                            if (mainLoadJob?.isActive != true) {
-                                isLoading = false
+                            isLoading = false
+                            if (!isPlayingVideo && mediaMode != "VIDEO_ONLY") {
                                 requestDraw()
                             }
                         }
@@ -2315,7 +2762,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         private fun repairGaps(priorityIndex: Int, checkOnlyNeighbors: Boolean = false) {
-            if (detectedPages <= 0 || !isServiceEnabled) return
+            if (detectedPages <= 0 || !isServiceEnabled || isPlayingVideo || mediaMode == "VIDEO_ONLY") return
             
             // SMART GATING: Don't fight with the main loader for bulk repairs.
             // But if it's a specific neighbor check from a user swipe, BYPASS the gate.
@@ -2486,8 +2933,8 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 } finally {
                     withContext(NonCancellable) { 
                         withContext(Dispatchers.Main) { 
-                            if (repairGapsJob?.isActive != true) {
-                                isLoading = false 
+                            isLoading = false 
+                            if (!isPlayingVideo && mediaMode != "VIDEO_ONLY") {
                                 requestDraw()
                             }
                         } 
@@ -2744,10 +3191,13 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         private fun drawFrame() {
+            if (isServiceEnabled) {
+                if (isPlayingVideo || mediaMode == "VIDEO_ONLY" || isVideo(pageUris[manualPageIndex])) return
+            }
             val holder = surfaceHolder ?: return
+            if (holder.surface?.isValid != true) return
             var canvas: Canvas? = null
             try {
-                // STRENGTHENED CANVAS LOCKING
                 canvas = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     holder.lockHardwareCanvas()
                 } else {
@@ -2777,6 +3227,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         private val loadingRect = RectF()
 
         private fun drawLoadingState(canvas: Canvas, w: Int, h: Int) {
+            if (isPlayingVideo || mediaMode == "VIDEO_ONLY") return
             canvas.drawColor(Color.BLACK)
             val centerX = w / 2f
             val centerY = h / 2f
@@ -2795,6 +3246,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
         }
 
         private fun drawCanvas(canvas: Canvas) {
+            if (isServiceEnabled && (isPlayingVideo || mediaMode == "VIDEO_ONLY")) return
             val w = canvas.width; val h = canvas.height
             
             // CRITICAL: Always clear background to prevent smearing/ghosting

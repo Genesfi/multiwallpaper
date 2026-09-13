@@ -35,29 +35,32 @@ interface FavoriteDao {
     @Query("SELECT * FROM favorites WHERE target = :target")
     fun getAllFavoritesSync(target: String): List<FavoriteImageEntity>
 
-    @Query("SELECT COUNT(*) FROM favorites WHERE target = :target")
-    suspend fun getFavoriteCount(target: String): Int
+    @Query("SELECT COUNT(*) FROM favorites WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov'))")
+    suspend fun getFavoriteCount(target: String, mediaMode: String = "BOTH"): Int
 
     @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE uriString = :uriString AND target = :target)")
     suspend fun isFavoriteSync(uriString: String, target: String): Boolean
 
-    @Query("SELECT uriString FROM favorites WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT 1")
-    suspend fun getRandomFavoriteUriExcludingHistorySubquery(target: String): String?
+    @Query("SELECT isVideo FROM favorites WHERE uriString = :uriString AND target = :target LIMIT 1")
+    suspend fun isVideo(uriString: String, target: String): Boolean?
 
-    @Query("SELECT uriString FROM favorites WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
-    suspend fun getOrderedFavoriteUriExcludingHistorySubquery(target: String): String?
+    @Query("SELECT uriString FROM favorites WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT 1")
+    suspend fun getRandomFavoriteUriExcludingHistorySubquery(target: String, mediaMode: String = "BOTH"): String?
 
-    @Query("SELECT uriString FROM favorites WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
-    suspend fun getRandomFavoriteUrisExcludingHistory(target: String, limit: Int): List<String>
+    @Query("SELECT uriString FROM favorites WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
+    suspend fun getOrderedFavoriteUriExcludingHistorySubquery(target: String, mediaMode: String = "BOTH"): String?
+
+    @Query("SELECT uriString FROM favorites WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun getRandomFavoriteUrisExcludingHistory(target: String, limit: Int, mediaMode: String = "BOTH"): List<String>
 
     @Query("SELECT DISTINCT folderUriString FROM favorites WHERE target = :target")
     suspend fun getDistinctFavoriteFolders(target: String): List<String>
 
-    @Query("SELECT uriString FROM favorites WHERE target = :target AND folderUriString = :folderUri AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
-    suspend fun getRandomFavoriteUrisFromFolderExcludingHistory(target: String, folderUri: String, limit: Int): List<String>
+    @Query("SELECT uriString FROM favorites WHERE target = :target AND folderUriString = :folderUri AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun getRandomFavoriteUrisFromFolderExcludingHistory(target: String, folderUri: String, limit: Int, mediaMode: String = "BOTH"): List<String>
 
-    @Query("SELECT uriString FROM favorites WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT :limit")
-    suspend fun getOrderedFavoriteUrisExcludingHistory(target: String, limit: Int): List<String>
+    @Query("SELECT uriString FROM favorites WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT :limit")
+    suspend fun getOrderedFavoriteUrisExcludingHistory(target: String, limit: Int, mediaMode: String = "BOTH"): List<String>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFavorite(favorite: FavoriteImageEntity)
@@ -71,8 +74,8 @@ interface FavoriteDao {
     @Query("DELETE FROM favorites WHERE uriString = :uriString AND target = :target")
     suspend fun deleteFavoriteByUri(uriString: String, target: String)
 
-    @Query("DELETE FROM favorites WHERE folderUriString = :folderUriString AND target = :target")
-    suspend fun deleteFavoritesByFolderUri(folderUriString: String, target: String)
+    @Query("DELETE FROM favorites WHERE folderUriString = :folderUri AND target = :target")
+    suspend fun deleteFavoritesByFolderUri(folderUri: String, target: String)
 
     @Query("DELETE FROM favorites WHERE target = :target")
     suspend fun deleteAllFavorites(target: String)
@@ -89,13 +92,14 @@ interface FavoriteDao {
             ROW_NUMBER() OVER (PARTITION BY folderUriString ORDER BY RANDOM()) as rn
             FROM favorites 
             WHERE target = :targetName 
+            AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov'))
             AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :targetName)
         )
         SELECT * FROM RankedFavorites 
         ORDER BY rn, RANDOM() 
         LIMIT :count
     """)
-    suspend fun getBalancedRandomFavorites(targetName: String, count: Int): List<FavoriteImageEntity>
+    suspend fun getBalancedRandomFavorites(targetName: String, count: Int, mediaMode: String = "BOTH"): List<FavoriteImageEntity>
 
     @Query("UPDATE favorites SET focalX = :x, focalY = :y WHERE uriString = :uriString AND target = :target")
     suspend fun updateFocalPoint(uriString: String, target: String, x: Float, y: Float)
@@ -111,8 +115,11 @@ interface ScannedImageDao {
     @Query("SELECT * FROM scanned_images WHERE target = :target")
     fun getAllImagesSync(target: String): List<ScannedImageEntity>
 
-    @Query("SELECT COUNT(*) FROM scanned_images WHERE target = :target")
-    suspend fun getImageCount(target: String): Int
+    @Query("SELECT COUNT(*) FROM scanned_images WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov'))")
+    suspend fun getImageCount(target: String, mediaMode: String = "BOTH"): Int
+
+    @Query("SELECT isVideo FROM scanned_images WHERE uriString = :uriString AND target = :target LIMIT 1")
+    suspend fun isVideo(uriString: String, target: String): Boolean?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertImages(images: List<ScannedImageEntity>)
@@ -123,23 +130,23 @@ interface ScannedImageDao {
     @Query("DELETE FROM scanned_images WHERE uriString = :uriString AND target = :target")
     suspend fun deleteImageByUriSync(uriString: String, target: String)
 
-    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT 1")
-    suspend fun getRandomUriExcludingHistorySubquery(target: String): String?
+    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT 1")
+    suspend fun getRandomUriExcludingHistorySubquery(target: String, mediaMode: String = "BOTH"): String?
 
-    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
-    suspend fun getOrderedUriExcludingHistorySubquery(target: String): String?
+    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT 1")
+    suspend fun getOrderedUriExcludingHistorySubquery(target: String, mediaMode: String = "BOTH"): String?
 
-    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
-    suspend fun getRandomUrisExcludingHistory(target: String, limit: Int): List<String>
+    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun getRandomUrisExcludingHistory(target: String, limit: Int, mediaMode: String = "BOTH"): List<String>
 
     @Query("SELECT DISTINCT folderUriString FROM scanned_images WHERE target = :target")
     suspend fun getDistinctFolders(target: String): List<String>
 
-    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND folderUriString = :folderUri AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
-    suspend fun getRandomUrisFromFolderExcludingHistory(target: String, folderUri: String, limit: Int): List<String>
+    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND folderUriString = :folderUri AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY RANDOM() LIMIT :limit")
+    suspend fun getRandomUrisFromFolderExcludingHistory(target: String, folderUri: String, limit: Int, mediaMode: String = "BOTH"): List<String>
 
-    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT :limit")
-    suspend fun getOrderedUrisExcludingHistory(target: String, limit: Int): List<String>
+    @Query("SELECT uriString FROM scanned_images WHERE target = :target AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov')) AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :target) ORDER BY folderUriString ASC, displayName ASC LIMIT :limit")
+    suspend fun getOrderedUrisExcludingHistory(target: String, limit: Int, mediaMode: String = "BOTH"): List<String>
 
     @Query("SELECT focalX, focalY FROM scanned_images WHERE uriString = :uriString AND target = :target LIMIT 1")
     suspend fun getFocalPoint(uriString: String, target: String): FocalPointProjection?
@@ -150,13 +157,14 @@ interface ScannedImageDao {
             ROW_NUMBER() OVER (PARTITION BY folderUriString ORDER BY RANDOM()) as rn
             FROM scanned_images 
             WHERE target = :targetName 
+            AND (:mediaMode = 'BOTH' OR (:mediaMode = 'VIDEO_ONLY' AND (isVideo = 1 OR uriString LIKE '%.mp4' OR uriString LIKE '%.webm' OR uriString LIKE '%.mkv' OR uriString LIKE '%.mov')) OR (:mediaMode = 'PHOTO_ONLY' AND (isVideo = 0 OR isVideo IS NULL) AND uriString NOT LIKE '%.mp4' AND uriString NOT LIKE '%.webm' AND uriString NOT LIKE '%.mkv' AND uriString NOT LIKE '%.mov'))
             AND uriString NOT IN (SELECT uriString FROM rotation_history WHERE target = :targetName)
         )
         SELECT * FROM RankedImages 
         ORDER BY rn, RANDOM() 
         LIMIT :count
     """)
-    suspend fun getBalancedRandomUris(targetName: String, count: Int): List<ScannedImageEntity>
+    suspend fun getBalancedRandomUris(targetName: String, count: Int, mediaMode: String = "BOTH"): List<ScannedImageEntity>
 
     @Query("UPDATE scanned_images SET focalX = :x, focalY = :y WHERE uriString = :uriString AND target = :target")
     suspend fun updateFocalPoint(uriString: String, target: String, x: Float, y: Float)
@@ -265,6 +273,9 @@ interface CustomPaletteDao {
 
     @Delete
     suspend fun deletePalette(palette: CustomPaletteEntity)
+
+    @Query("DELETE FROM custom_palettes")
+    suspend fun deleteAllPalettes()
 }
 
 @Dao
@@ -286,4 +297,10 @@ interface ScheduleDao {
 
     @Query("SELECT * FROM schedules WHERE id = :id")
     suspend fun getScheduleById(id: Int): ScheduleEntity?
+
+    @Query("DELETE FROM schedules WHERE target = :target")
+    suspend fun deleteAllSchedules(target: String)
+
+    @Query("DELETE FROM schedules")
+    suspend fun deleteAllSchedulesAll()
 }

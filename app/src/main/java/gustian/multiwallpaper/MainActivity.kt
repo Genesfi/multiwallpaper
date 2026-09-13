@@ -49,6 +49,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -59,6 +62,15 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.pager.*
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.C
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
+import coil.ImageLoader
+import coil.decode.VideoFrameDecoder
+import coil.Coil
 import coil.compose.AsyncImage
 import gustian.multiwallpaper.data.FolderEntity
 import gustian.multiwallpaper.data.PresetEntity
@@ -70,6 +82,8 @@ import gustian.multiwallpaper.ui.WallpaperImg
 import gustian.multiwallpaper.ui.theme.MyApplicationTheme
 
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import android.util.Log
 import android.provider.Settings
 import androidx.compose.ui.graphics.asComposeRenderEffect
@@ -85,6 +99,13 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val imageLoader = ImageLoader.Builder(this)
+            .components {
+                add(VideoFrameDecoder.Factory())
+            }
+            .crossfade(true)
+            .build()
+        Coil.setImageLoader(imageLoader)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
@@ -132,6 +153,7 @@ fun MainLayout() {
     val gallerySearchQuery by viewModel.gallerySearchQuery.collectAsState()
     val gallerySortType by viewModel.gallerySortType.collectAsState()
     val gallerySortOrder by viewModel.gallerySortOrder.collectAsState()
+    val galleryMediaFilter by viewModel.galleryMediaFilter.collectAsState()
     val isLoadingPreset by viewModel.isLoadingPreset.collectAsState()
     val latestVersionInfo by viewModel.latestVersionInfo.collectAsState()
     val updateMessage by viewModel.updateMessage.collectAsState()
@@ -201,8 +223,46 @@ fun MainLayout() {
 
                         var showSortMenu by remember { mutableStateOf(false) }
                         Box {
-                            IconButton(onClick = { showSortMenu = true }) { Icon(Icons.AutoMirrored.Filled.Sort, null, tint = MaterialTheme.colorScheme.primary) }
+                            val isFilterActive = galleryMediaFilter != "ALL"
+                            IconButton(onClick = { showSortMenu = true }) { 
+                                Icon(
+                                    Icons.AutoMirrored.Filled.Sort, 
+                                    null, 
+                                    tint = if (isFilterActive) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary 
+                                ) 
+                            }
                             DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                                Text(
+                                    "MEDIA FILTER",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                                )
+                                listOf("ALL" to "All Media", "PHOTO" to "Photos Only", "VIDEO" to "Videos Only").forEach { (filter, label) ->
+                                    DropdownMenuItem(
+                                        text = { 
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(label)
+                                                if (galleryMediaFilter == filter) {
+                                                    Spacer(Modifier.width(8.dp))
+                                                    Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                                }
+                                            }
+                                        }, 
+                                        onClick = { viewModel.setGalleryMediaFilter(filter); showSortMenu = false }
+                                    )
+                                }
+
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                                Text(
+                                    "SORT BY",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                                )
                                 listOf("NAME" to "Name", "DATE" to "Date Added", "STAR" to "Star First").forEach { (type, label) ->
                                     DropdownMenuItem(
                                         text = { 
@@ -1057,6 +1117,21 @@ fun GalleryScreen(viewModel: HomeViewModel) {
                                         onLongClick = { viewModel.toggleGalleryUriSelection(img.uriString) }
                                     )) {
                                         AsyncImage(model = Uri.parse(img.uriString), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(if (sel) 0.6f else 1f), contentScale = ContentScale.Crop)
+                                        if (img.isVideo) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomStart)
+                                                    .padding(4.dp)
+                                                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(10.dp))
+                                                    Spacer(Modifier.width(2.dp))
+                                                    Text("VIDEO", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                                                }
+                                            }
+                                        }
                                         if (img.isFavorite) Icon(Icons.Default.Star, null, tint = Color.Yellow, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(16.dp))
                                         if (sel) Icon(Icons.Default.CheckCircle, null, tint = Color.White, modifier = Modifier.align(Alignment.Center).size(32.dp))
                                     }
@@ -1257,8 +1332,23 @@ fun FavoritesScreen(viewModel: HomeViewModel) {
                         itemsIndexed(favorites) { index, f ->
                             Box(modifier = Modifier.aspectRatio(0.85f).clip(RoundedCornerShape(16.dp)).clickable { selectedFavIndex = index }) {
                                 AsyncImage(model = Uri.parse(f.uriString), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                if (f.isVideo) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomStart)
+                                            .padding(4.dp)
+                                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(10.dp))
+                                            Spacer(Modifier.width(2.dp))
+                                            Text("VIDEO", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
                                 IconButton(
-                                    onClick = { viewModel.toggleFavorite(WallpaperImg(f.uriString, f.folderUriString, f.displayName, true)) },
+                                    onClick = { viewModel.toggleFavorite(WallpaperImg(f.uriString, f.folderUriString, f.displayName, true, isVideo = f.isVideo)) },
                                     modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f), RoundedCornerShape(8.dp)).size(32.dp)
                                 ) { 
                                     Icon(Icons.Default.Star, null, tint = Color(0xFFEAB308), modifier = Modifier.size(18.dp)) 
@@ -1300,7 +1390,7 @@ fun FavoritesScreen(viewModel: HomeViewModel) {
     
     // --- DIALOGS ---
     if (selectedFavIndex != -1) {
-        val favImgs = favorites.map { WallpaperImg(it.uriString, it.folderUriString, it.displayName, true) }
+        val favImgs = favorites.map { WallpaperImg(it.uriString, it.folderUriString, it.displayName, true, isVideo = it.isVideo) }
         ImageDetailDialog(
             images = favImgs,
             initialIndex = selectedFavIndex,
@@ -1331,6 +1421,8 @@ fun SettingsScreen(viewModel: HomeViewModel) {
     val settingsTarget by viewModel.settingsTarget.collectAsState()
     val totalSeconds by viewModel.intervalSeconds.collectAsState()
     val serviceEnabled by viewModel.serviceEnabled.collectAsState()
+    val mediaMode by viewModel.mediaMode.collectAsState()
+    val videoSoundEnabled by viewModel.videoSoundEnabled.collectAsState()
     val transition by viewModel.transitionType.collectAsState()
     val useFav by viewModel.useFavoritesOnly.collectAsState()
     val doubleTap by viewModel.doubleTapEnabled.collectAsState()
@@ -1517,6 +1609,55 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                                 steps = 9
                             )
                             Text("${(shakeSensitivity * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                Text("WALLPAPER MEDIA TYPE", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Display Mode", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text(
+                            when (mediaMode) {
+                                "VIDEO_ONLY" -> "Only display video live wallpapers"
+                                else -> "Only display photo wallpapers"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(
+                                "PHOTO_ONLY" to "Photo",
+                                "VIDEO_ONLY" to "Video"
+                            ).forEach { (mode, label) ->
+                                val isSelected = (mediaMode == mode || (mode == "PHOTO_ONLY" && mediaMode == "BOTH"))
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { viewModel.setMediaMode(mode) },
+                                    label = { Text(label, fontSize = 12.sp) },
+                                    leadingIcon = if (isSelected) {
+                                        { Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp)) }
+                                    } else null,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+
+                        if (mediaMode != "PHOTO_ONLY") {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            SettingRow(
+                                title = "Video Audio",
+                                subtitle = if (videoSoundEnabled) "Video wallpaper audio enabled" else "Video wallpaper is muted (silent)",
+                                checked = videoSoundEnabled,
+                                onCheckedChange = { viewModel.setVideoSoundEnabled(it) }
+                            )
                         }
                     }
                 }
@@ -2415,6 +2556,34 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                                                 modifier = Modifier.fillMaxSize().alpha(if (isSelected) 0.6f else 1f),
                                                 contentScale = ContentScale.Crop
                                             )
+                                            if (isVideoUri(uri)) {
+                                                Surface(
+                                                    color = Color.Black.copy(alpha = 0.65f),
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    modifier = Modifier
+                                                        .align(Alignment.BottomEnd)
+                                                        .padding(6.dp)
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Default.PlayArrow,
+                                                            contentDescription = null,
+                                                            tint = Color.White,
+                                                            modifier = Modifier.size(10.dp)
+                                                        )
+                                                        Spacer(Modifier.width(2.dp))
+                                                        Text(
+                                                            "VIDEO",
+                                                            color = Color.White,
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
+                                            }
                                             if (isSelected) {
                                                 Box(
                                                     modifier = Modifier
@@ -2535,15 +2704,26 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                                         horizontalAlignment = Alignment.CenterHorizontally,
                                         verticalArrangement = Arrangement.Center
                                     ) {
-                                        AsyncImage(
-                                            model = Uri.parse(uri),
-                                            contentDescription = null,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .weight(1f)
-                                                .clip(RoundedCornerShape(12.dp)),
-                                            contentScale = ContentScale.Fit
-                                        )
+                                        if (isVideoUri(uri)) {
+                                            VideoPlayerPreview(
+                                                uri = Uri.parse(uri),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .weight(1f)
+                                                    .clip(RoundedCornerShape(12.dp)),
+                                                isPlaying = (page == pagerState.currentPage)
+                                            )
+                                        } else {
+                                            AsyncImage(
+                                                model = Uri.parse(uri),
+                                                contentDescription = null,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .weight(1f)
+                                                    .clip(RoundedCornerShape(12.dp)),
+                                                contentScale = ContentScale.Fit
+                                            )
+                                        }
                                         Spacer(Modifier.height(16.dp))
                                         val cleanName = remember(uri) {
                                             val rawName = uri.substringAfterLast("/")
@@ -2689,7 +2869,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 Spacer(modifier = Modifier.height(24.dp))
                 
                 // --- FULL BACKUP (Total Sync) ---
-                Text("DATA MANAGEMENT (TOTAL BACKUP)", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("DATA MANAGEMENT (TOTAL BACKUP - HOME & LOCK)", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(modifier = Modifier.height(12.dp))
                 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2702,12 +2882,15 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                                 if (json != null) {
                                     try {
                                         context.contentResolver.openOutputStream(it)?.use { output ->
-                                            output.write(json.toByteArray())
+                                            output.write(json.toByteArray(Charsets.UTF_8))
+                                            output.flush()
                                         }
-                                        Toast.makeText(context, "Full Backup exported!", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Full Backup exported (Home & Lock)!", Toast.LENGTH_SHORT).show()
                                     } catch (e: Exception) {
                                         Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
                                     }
+                                } else {
+                                    Toast.makeText(context, "Export failed: Could not generate backup data", Toast.LENGTH_LONG).show()
                                 }
                             }
                         }
@@ -2724,8 +2907,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
 
                     Button(
                         onClick = { 
-                            val targetName = settingsTarget.name.lowercase()
-                            fullExportLauncher.launch("multi_wallpaper_full_backup_$targetName.json") 
+                            fullExportLauncher.launch("multi_wallpaper_full_backup.json") 
                         },
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(12.dp),
@@ -2755,7 +2937,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Multi Wallpaper Live", fontWeight = FontWeight.Bold)
-                        Text("Version 2.0.0", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Version ${BuildConfig.VERSION_NAME}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(modifier = Modifier.height(8.dp))
                         
                         Button(
@@ -2790,6 +2972,10 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                                 title = { Text("Release History") },
                                 text = {
                                     Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                        HistoryItem("v2.1.0", "• Video Live Wallpaper Engine (MP4, MKV, WebM, MOV)\n• Modern Video Player & Scrubbing Seekbar\n• YouTube-Style Double Tap Seek (±5s)\n• Clean Floating Playback Controls\n• File Location & Un-truncated Details Dialog\n• Gallery Media Filter (Photos / Videos / All)")
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        HistoryItem("v2.0.0", "• Smart Panoramic Engine & Page Intelligence\n• Automation Hub & Time-Based Scheduling\n• Decoupled Home & Lock Screen Setups\n• Pro Duotone & Tritone Color Palette Manager\n• Panic Repair & Sync Recovery System")
+                                        Spacer(modifier = Modifier.height(12.dp))
                                         HistoryItem("v1.1.0", "• Blacklist System (Gesture & Gallery)\n• AI Portrait Mode (Background Blur)\n• GitHub Update Sync\n• Focus Smoothing Control")
                                         Spacer(modifier = Modifier.height(12.dp))
                                         HistoryItem("v1.0.1", "• Critical Memory Leak Fix\n• AI 480px Downscaling Optimization\n• Scalable Database Indexing\n• Hardware Canvas Acceleration")
@@ -3026,6 +3212,158 @@ fun HistoryItem(version: String, details: String) {
     }
 }
 
+fun isVideoUri(uriString: String?): Boolean {
+    if (uriString == null) return false
+    val lower = uriString.lowercase()
+    if (lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv") || lower.endsWith(".mov")) return true
+    return uriString.contains("video", ignoreCase = true)
+}
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+fun VideoPlayerPreview(
+    uri: Uri,
+    modifier: Modifier = Modifier,
+    isPlaying: Boolean = true,
+    onPlayerReady: (ExoPlayer?) -> Unit = {},
+    onTap: () -> Unit = {}
+) {
+    val context = LocalContext.current
+    val exoPlayer = remember(uri) {
+        val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(1500, 5000, 1000, 1500)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+        ExoPlayer.Builder(context)
+            .setLoadControl(loadControl)
+            .build().apply {
+            setMediaItem(MediaItem.fromUri(uri))
+            repeatMode = Player.REPEAT_MODE_ONE
+            videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+            prepare()
+            playWhenReady = isPlaying
+        }
+    }
+
+    DisposableEffect(exoPlayer) {
+        onPlayerReady(exoPlayer)
+        onDispose {
+            onPlayerReady(null)
+            exoPlayer.stop()
+            exoPlayer.release()
+        }
+    }
+
+    LaunchedEffect(isPlaying) {
+        exoPlayer.playWhenReady = isPlaying
+        if (!isPlaying) {
+            exoPlayer.pause()
+        }
+    }
+
+    var seekFeedbackSide by remember { mutableStateOf<String?>(null) }
+    var feedbackCounter by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(feedbackCounter) {
+        if (seekFeedbackSide != null) {
+            delay(650)
+            seekFeedbackSide = null
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = { onTap() },
+                    onDoubleTap = { offset ->
+                        val isLeft = offset.x < (size.width / 2f)
+                        if (isLeft) {
+                            val newPos = (exoPlayer.currentPosition - 5000L).coerceAtLeast(0L)
+                            exoPlayer.seekTo(newPos)
+                            seekFeedbackSide = "LEFT"
+                        } else {
+                            val targetMax = if (exoPlayer.duration > 0) exoPlayer.duration else Long.MAX_VALUE
+                            val newPos = (exoPlayer.currentPosition + 5000L).coerceAtMost(targetMax)
+                            exoPlayer.seekTo(newPos)
+                            seekFeedbackSide = "RIGHT"
+                        }
+                        feedbackCounter++
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exoPlayer
+                    useController = false
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // YouTube-style Double Tap Seek Indicator Overlay
+        AnimatedVisibility(
+            visible = seekFeedbackSide != null,
+            enter = fadeIn() + scaleIn(initialScale = 0.85f),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(if (seekFeedbackSide == "LEFT") Alignment.CenterStart else Alignment.CenterEnd)
+                .padding(horizontal = 48.dp)
+        ) {
+            Surface(
+                color = Color.Black.copy(alpha = 0.65f),
+                shape = RoundedCornerShape(24.dp),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (seekFeedbackSide == "LEFT") {
+                        Icon(
+                            Icons.Default.Replay5,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Text(
+                            text = "-5s",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                    } else {
+                        Text(
+                            text = "+5s",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                        Icon(
+                            Icons.Default.Forward5,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun formatTimeMs(millis: Long): String {
+    val totalSeconds = (millis / 1000).coerceAtLeast(0)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return String.format(Locale.US, "%02d:%02d", minutes, seconds)
+}
+
 @Composable
 fun ImageDetailDialog(
     images: List<WallpaperImg>,
@@ -3047,6 +3385,48 @@ fun ImageDetailDialog(
     
     // Smart Preview state
     var isSmartPreview by remember { mutableStateOf(false) }
+    var showLocationDialog by remember { mutableStateOf(false) }
+
+    // UI visibility state - tapping toggles controls for a 100% clean full-screen preview
+    var isUiVisible by remember { mutableStateOf(true) }
+
+    // Active video player and playback state tracked per page
+    val activePlayers = remember { mutableStateMapOf<Int, ExoPlayer>() }
+    val currentVideoPlayer = activePlayers[pagerState.currentPage]
+    var videoDurationMs by remember { mutableLongStateOf(0L) }
+    var videoPositionMs by remember { mutableLongStateOf(0L) }
+    var isVideoPlaying by remember { mutableStateOf(true) }
+    var isDraggingSlider by remember { mutableStateOf(false) }
+    var sliderPosition by remember { mutableFloatStateOf(0f) }
+
+    // Periodically sync position and duration with current player
+    LaunchedEffect(currentVideoPlayer, pagerState.currentPage) {
+        val player = currentVideoPlayer
+        if (player != null) {
+            while (isActive) {
+                if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
+                    videoDurationMs = player.duration.coerceAtLeast(0L)
+                    if (!isDraggingSlider) {
+                        videoPositionMs = player.currentPosition.coerceAtLeast(0L)
+                    }
+                    isVideoPlaying = player.isPlaying
+                }
+                delay(150)
+            }
+        } else {
+            videoDurationMs = 0L
+            videoPositionMs = 0L
+            isVideoPlaying = false
+        }
+    }
+
+    // Auto-hide UI controls after 4 seconds of playback if user is not actively scrubbing
+    LaunchedEffect(isUiVisible, isVideoPlaying, isDraggingSlider) {
+        if (isUiVisible && isVideoPlaying && !isDraggingSlider) {
+            delay(4000)
+            isUiVisible = false
+        }
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -3058,6 +3438,7 @@ fun ImageDetailDialog(
                 .background(Color.Black)
                 .pointerInput(Unit) {
                     detectTapGestures(
+                        onTap = { isUiVisible = !isUiVisible },
                         onDoubleTap = {
                             if (scale > 1.1f) {
                                 scale = 1f
@@ -3094,41 +3475,61 @@ fun ImageDetailDialog(
 
                 val img = images.getOrNull(page) ?: return@HorizontalPager
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(bottom = 120.dp)
-                        .graphicsLayer {
-                            val isCurrentPage = page == pagerState.currentPage
-                            scaleX = if (isCurrentPage) animatedScale else 1f
-                            scaleY = if (isCurrentPage) animatedScale else 1f
-                            translationX = if (isCurrentPage) animatedOffsetX else 0f
-                            translationY = if (isCurrentPage) animatedOffsetY else 0f
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    val focalPoint = remember(img, isSmartPreview) {
-                        if (isSmartPreview && img.focalX != null && img.focalY != null) {
-                            androidx.compose.ui.graphics.TransformOrigin(img.focalX, img.focalY)
-                        } else {
-                            androidx.compose.ui.graphics.TransformOrigin.Center
-                        }
+                if (img.isVideo) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        VideoPlayerPreview(
+                            uri = Uri.parse(img.uriString),
+                            modifier = Modifier.fillMaxSize(),
+                            isPlaying = (page == pagerState.currentPage),
+                            onPlayerReady = { player ->
+                                if (player != null) {
+                                    activePlayers[page] = player
+                                } else {
+                                    activePlayers.remove(page)
+                                }
+                            },
+                            onTap = { isUiVisible = !isUiVisible }
+                        )
                     }
-
-                    AsyncImage(
-                        model = Uri.parse(img.uriString),
-                        contentDescription = null,
+                } else {
+                    Box(
                         modifier = Modifier
                             .fillMaxSize()
                             .graphicsLayer {
-                                if (isSmartPreview && img.focalX != null && img.focalY != null) {
-                                    transformOrigin = focalPoint
-                                    scaleX = 1.35f // Default AI Slack simulation
-                                    scaleY = 1.35f
-                                }
+                                val isCurrentPage = page == pagerState.currentPage
+                                scaleX = if (isCurrentPage) animatedScale else 1f
+                                scaleY = if (isCurrentPage) animatedScale else 1f
+                                translationX = if (isCurrentPage) animatedOffsetX else 0f
+                                translationY = if (isCurrentPage) animatedOffsetY else 0f
                             },
-                        contentScale = if (isSmartPreview) ContentScale.Crop else ContentScale.Fit
-                    )
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val focalPoint = remember(img, isSmartPreview) {
+                            if (isSmartPreview && img.focalX != null && img.focalY != null) {
+                                androidx.compose.ui.graphics.TransformOrigin(img.focalX, img.focalY)
+                            } else {
+                                androidx.compose.ui.graphics.TransformOrigin.Center
+                            }
+                        }
+
+                        AsyncImage(
+                            model = Uri.parse(img.uriString),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    if (isSmartPreview && img.focalX != null && img.focalY != null) {
+                                        transformOrigin = focalPoint
+                                        scaleX = 1.35f // Default AI Slack simulation
+                                        scaleY = 1.35f
+                                    }
+                                },
+                            contentScale = if (isSmartPreview) ContentScale.Crop else ContentScale.Fit
+                        )
+                    }
                 }
             }
 
@@ -3136,200 +3537,563 @@ fun ImageDetailDialog(
             val img = images.getOrNull(currentIndex)
             
             if (img != null) {
-                // Navigation Overlays (Arrows) - Only show if not zoomed
+                // Navigation Overlays (Arrows) - Only show if not zoomed and UI is visible
                 if (scale <= 1.05f) {
-                    val scope = rememberCoroutineScope()
-                    if (currentIndex > 0) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .width(60.dp)
-                                .align(Alignment.CenterStart)
-                                .clickable { scope.launch { pagerState.animateScrollToPage(currentIndex - 1) } },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                Icons.Default.ChevronLeft,
-                                null,
-                                tint = Color.White.copy(alpha = 0.5f),
-                                modifier = Modifier.size(48.dp)
-                            )
-                        }
-                    }
-                    if (currentIndex < images.size - 1) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .width(60.dp)
-                                .align(Alignment.CenterEnd)
-                                .clickable { scope.launch { pagerState.animateScrollToPage(currentIndex + 1) } },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                Icons.Default.ChevronRight,
-                                null,
-                                tint = Color.White.copy(alpha = 0.5f),
-                                modifier = Modifier.size(48.dp)
-                            )
-                        }
-                    }
-                }
-
-                // Top Bar
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 48.dp, start = 20.dp, end = 20.dp)
-                        .align(Alignment.TopCenter),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "${currentIndex + 1} / ${images.size}",
-                            color = Color.White,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        if (isSmartPreview) {
-                            Text(
-                                "Wallpaper Preview Mode",
-                                color = MaterialTheme.colorScheme.primary,
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    }
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.background(Color.White.copy(alpha = 0.1f), CircleShape)
+                    AnimatedVisibility(
+                        visible = isUiVisible,
+                        enter = fadeIn(),
+                        exit = fadeOut()
                     ) {
-                        Icon(Icons.Default.Close, null, tint = Color.White)
+                        val scope = rememberCoroutineScope()
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (currentIndex > 0) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxHeight()
+                                        .width(60.dp)
+                                        .align(Alignment.CenterStart)
+                                        .clickable { scope.launch { pagerState.animateScrollToPage(currentIndex - 1) } },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.ChevronLeft,
+                                        null,
+                                        tint = Color.White.copy(alpha = 0.5f),
+                                        modifier = Modifier.size(48.dp)
+                                    )
+                                }
+                            }
+                            if (currentIndex < images.size - 1) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxHeight()
+                                        .width(60.dp)
+                                        .align(Alignment.CenterEnd)
+                                        .clickable { scope.launch { pagerState.animateScrollToPage(currentIndex + 1) } },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.ChevronRight,
+                                        null,
+                                        tint = Color.White.copy(alpha = 0.5f),
+                                        modifier = Modifier.size(48.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
-                // Bottom Control Panel
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 24.dp)
-                        .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(28.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(28.dp))
-                        .padding(16.dp)
-                        .navigationBarsPadding(),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                // Top Bar (Soft gradient with shadow for clear visibility over bright images)
+                AnimatedVisibility(
+                    visible = isUiVisible,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.align(Alignment.TopCenter)
                 ) {
-                    Text(
-                        text = img.displayName,
-                        color = Color.White,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    
-                    Spacer(modifier = Modifier.height(16.dp))
-                    
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                androidx.compose.ui.graphics.Brush.verticalGradient(
+                                    colors = listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent)
+                                )
+                            )
+                            .padding(top = 48.dp, bottom = 24.dp, start = 20.dp, end = 20.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Smart Preview Toggle
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            IconButton(
-                                onClick = { isSmartPreview = !isSmartPreview },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .background(
-                                        if (isSmartPreview) MaterialTheme.colorScheme.primary 
-                                        else Color.White.copy(alpha = 0.1f), 
-                                        RoundedCornerShape(12.dp)
+                        Column {
+                            Text(
+                                text = "${currentIndex + 1} / ${images.size}",
+                                color = Color.White,
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    shadow = androidx.compose.ui.graphics.Shadow(
+                                        color = Color.Black.copy(alpha = 0.9f),
+                                        offset = Offset(1.5f, 1.5f),
+                                        blurRadius = 4f
                                     )
-                            ) {
-                                Icon(
-                                    if (isSmartPreview) Icons.Default.AutoFixHigh else Icons.Default.AutoFixOff,
-                                    null,
-                                    modifier = Modifier.size(20.dp),
-                                    tint = if (isSmartPreview) Color.White else Color.White.copy(alpha = 0.7f)
+                                )
+                            )
+                            if (isSmartPreview && !img.isVideo) {
+                                Text(
+                                    "Wallpaper Preview Mode",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        shadow = androidx.compose.ui.graphics.Shadow(
+                                            color = Color.Black.copy(alpha = 0.9f),
+                                            offset = Offset(1f, 1f),
+                                            blurRadius = 3f
+                                        )
+                                    )
+                                )
+                            } else if (img.isVideo) {
+                                Text(
+                                    "Video Preview",
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        shadow = androidx.compose.ui.graphics.Shadow(
+                                            color = Color.Black.copy(alpha = 0.9f),
+                                            offset = Offset(1f, 1f),
+                                            blurRadius = 3f
+                                        )
+                                    )
                                 )
                             }
-                            if (isSmartPreview && (img.focalX == null || img.focalY == null)) {
-                                Text("No AI Data", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.5f), fontSize = 8.sp)
-                            }
                         }
-
-                        Button(
-                            onClick = { onToggleFavorite(img) },
-                            modifier = Modifier.weight(1f).height(48.dp),
-                            shape = RoundedCornerShape(12.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (img.isFavorite) Color(0xFFEAB308) else MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
-                            )
-                        ) {
-                            Icon(
-                                if (img.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder, 
-                                null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                text = if (img.isFavorite) "Starred" else "Star", 
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-                        
-                        Button(
-                            onClick = { saveImageToGallery(context, Uri.parse(img.uriString), img.displayName) },
-                            modifier = Modifier.weight(1f).height(48.dp),
-                            shape = RoundedCornerShape(12.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color.White.copy(alpha = 0.1f)
-                            )
-                        ) {
-                            Icon(
-                                Icons.Default.Download, 
-                                null, 
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                text = "Export", 
-                                fontWeight = FontWeight.Bold, 
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-
-                        // Blacklist Button
                         IconButton(
-                            onClick = { onBlacklist(img) },
+                            onClick = onDismiss,
                             modifier = Modifier
-                                .size(48.dp)
-                                .background(MaterialTheme.colorScheme.error.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
+                                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                .border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape)
                         ) {
-                            Icon(
-                                Icons.Default.Block,
-                                null,
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.error
-                            )
+                            Icon(Icons.Default.Close, null, tint = Color.White)
                         }
                     }
-                    
-                    TextButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.padding(top = 8.dp)
+                }
+
+                // Center Playback Controls (100% polosan without circular background, drop shadow for high contrast)
+                if (img.isVideo && currentVideoPlayer != null) {
+                    AnimatedVisibility(
+                        visible = isUiVisible,
+                        enter = fadeIn(),
+                        exit = fadeOut(),
+                        modifier = Modifier.align(Alignment.Center)
                     ) {
-                        Text("CLOSE", color = Color.White.copy(alpha = 0.5f), letterSpacing = 1.sp, fontSize = 11.sp)
+                        Row(
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = {
+                                    currentVideoPlayer?.let { player ->
+                                        val newPos = (player.currentPosition - 5000L).coerceAtLeast(0L)
+                                        player.seekTo(newPos)
+                                        videoPositionMs = newPos
+                                    }
+                                },
+                                modifier = Modifier.size(56.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Replay5,
+                                    contentDescription = "Rewind 5s",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(36.dp))
+
+                            IconButton(
+                                onClick = {
+                                    currentVideoPlayer?.let { player ->
+                                        if (player.isPlaying) {
+                                            player.pause()
+                                            isVideoPlaying = false
+                                        } else {
+                                            player.play()
+                                            isVideoPlaying = true
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.size(72.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isVideoPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = if (isVideoPlaying) "Pause" else "Play",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(54.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(36.dp))
+
+                            IconButton(
+                                onClick = {
+                                    currentVideoPlayer?.let { player ->
+                                        val targetMax = if (videoDurationMs > 0) videoDurationMs else Long.MAX_VALUE
+                                        val newPos = (player.currentPosition + 5000L).coerceAtMost(targetMax)
+                                        player.seekTo(newPos)
+                                        videoPositionMs = newPos
+                                    }
+                                },
+                                modifier = Modifier.size(56.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Forward5,
+                                    contentDescription = "Forward 5s",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Bottom Controls (Direct on screen with generous bottom padding and shadow)
+                AnimatedVisibility(
+                    visible = isUiVisible,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                androidx.compose.ui.graphics.Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color.Transparent, 
+                                        Color.Black.copy(alpha = 0.55f), 
+                                        Color.Black.copy(alpha = 0.92f)
+                                    )
+                                )
+                            )
+                            .navigationBarsPadding()
+                            .padding(horizontal = 20.dp)
+                            .padding(top = 16.dp, bottom = 76.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        // Seek Slider with Timers & Primary Theme Color
+                        if (img.isVideo && currentVideoPlayer != null) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                val displayedPos = if (isDraggingSlider) (sliderPosition * videoDurationMs).toLong() else videoPositionMs
+                                Text(
+                                    text = formatTimeMs(displayedPos),
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    style = androidx.compose.ui.text.TextStyle(
+                                        shadow = androidx.compose.ui.graphics.Shadow(
+                                            color = Color.Black.copy(alpha = 0.9f),
+                                            offset = Offset(1.5f, 1.5f),
+                                            blurRadius = 4f
+                                        )
+                                    )
+                                )
+
+                                val progress = if (videoDurationMs > 0) {
+                                    (videoPositionMs.toFloat() / videoDurationMs.toFloat()).coerceIn(0f, 1f)
+                                } else 0f
+
+                                Slider(
+                                    value = if (isDraggingSlider) sliderPosition else progress,
+                                    onValueChange = { frac ->
+                                        isDraggingSlider = true
+                                        sliderPosition = frac
+                                    },
+                                    onValueChangeFinished = {
+                                        val targetMs = (sliderPosition * videoDurationMs).toLong()
+                                        currentVideoPlayer?.seekTo(targetMs)
+                                        videoPositionMs = targetMs
+                                        isDraggingSlider = false
+                                    },
+                                    modifier = Modifier.weight(1f).height(24.dp),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = MaterialTheme.colorScheme.primary,
+                                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                                        inactiveTrackColor = Color.White.copy(alpha = 0.35f)
+                                    )
+                                )
+
+                                Text(
+                                    text = formatTimeMs(videoDurationMs),
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    style = androidx.compose.ui.text.TextStyle(
+                                        shadow = androidx.compose.ui.graphics.Shadow(
+                                            color = Color.Black.copy(alpha = 0.9f),
+                                            offset = Offset(1.5f, 1.5f),
+                                            blurRadius = 4f
+                                        )
+                                    )
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+                        }
+
+                        // Title & Action Buttons Row (Direct overlay with shadow & dark circular backings)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = img.displayName,
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontWeight = FontWeight.SemiBold,
+                                    shadow = androidx.compose.ui.graphics.Shadow(
+                                        color = Color.Black.copy(alpha = 0.9f),
+                                        offset = Offset(1.5f, 1.5f),
+                                        blurRadius = 4f
+                                    )
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f).padding(end = 12.dp)
+                            )
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (!img.isVideo) {
+                                    IconButton(
+                                        onClick = { isSmartPreview = !isSmartPreview },
+                                        modifier = Modifier
+                                            .size(42.dp)
+                                            .background(
+                                                if (isSmartPreview) MaterialTheme.colorScheme.primary 
+                                                else Color.Black.copy(alpha = 0.6f), 
+                                                CircleShape
+                                            )
+                                            .border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+                                    ) {
+                                        Icon(
+                                            if (isSmartPreview) Icons.Default.AutoFixHigh else Icons.Default.AutoFixOff,
+                                            contentDescription = "Smart Preview",
+                                            modifier = Modifier.size(20.dp),
+                                            tint = Color.White
+                                        )
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = { onToggleFavorite(img) },
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                        .border(
+                                            1.dp, 
+                                            if (img.isFavorite) Color(0xFFEAB308).copy(alpha = 0.6f) else Color.White.copy(alpha = 0.25f), 
+                                            CircleShape
+                                        )
+                                ) {
+                                    Icon(
+                                        if (img.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                                        contentDescription = "Favorite",
+                                        tint = if (img.isFavorite) Color(0xFFEAB308) else Color.White,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = { showLocationDialog = true },
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                        .border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+                                ) {
+                                    Icon(
+                                        Icons.Default.FolderOpen,
+                                        contentDescription = "File Location",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = { onBlacklist(img) },
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                        .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f), CircleShape)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Block,
+                                        contentDescription = "Blacklist",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // File Location Details Dialog Overlay
+                if (showLocationDialog) {
+                    val currentImg = images.getOrNull(pagerState.currentPage)
+                    if (currentImg != null) {
+                        val folderRaw = currentImg.folderUriString.ifEmpty { currentImg.uriString }
+                        val parsedFolder = Uri.parse(folderRaw)
+                        val cleanFolderPath = if (parsedFolder.scheme == "file") parsedFolder.path ?: folderRaw else Uri.decode(folderRaw)
+
+                        val fileRaw = currentImg.uriString
+                        val parsedFile = Uri.parse(fileRaw)
+                        val cleanFilePath = if (parsedFile.scheme == "file") parsedFile.path ?: fileRaw else Uri.decode(fileRaw)
+
+                        val clipboardManager = LocalClipboardManager.current
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.75f))
+                                .clickable { showLocationDialog = false },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.92f)
+                                    .clickable(enabled = false) {},
+                                shape = RoundedCornerShape(20.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surface
+                                ),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(20.dp),
+                                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                                ) {
+                                    // Header
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(36.dp)
+                                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f), CircleShape),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.FolderOpen,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                            Text(
+                                                text = "File Details",
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+
+                                        IconButton(
+                                            onClick = { showLocationDialog = false },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Close,
+                                                contentDescription = "Close",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+
+                                    // Media Name
+                                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        Text(
+                                            text = "FILE NAME",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = currentImg.displayName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+
+                                    // Folder Path Container
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(
+                                            text = "FOLDER LOCATION",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                            shape = RoundedCornerShape(10.dp),
+                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            SelectionContainer {
+                                                Text(
+                                                    text = cleanFolderPath,
+                                                    style = MaterialTheme.typography.bodySmall.copy(
+                                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                        fontSize = 11.5.sp,
+                                                        lineHeight = 16.sp
+                                                    ),
+                                                    modifier = Modifier.padding(10.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // Action Buttons
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                clipboardManager.setText(AnnotatedString(cleanFolderPath))
+                                                Toast.makeText(context, "Folder path copied", Toast.LENGTH_SHORT).show()
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                            shape = RoundedCornerShape(10.dp),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                                        ) {
+                                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Copy Path", fontSize = 12.sp)
+                                        }
+
+                                        Button(
+                                            onClick = {
+                                                openFileLocation(context, currentImg)
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                            shape = RoundedCornerShape(10.dp),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                                        ) {
+                                            Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Open Folder", fontSize = 12.sp)
+                                        }
+                                    }
+
+                                    // Direct file viewer button
+                                    OutlinedButton(
+                                        onClick = {
+                                            openFileDirectly(context, currentImg)
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                                    ) {
+                                        Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Open File in System Viewer", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3344,9 +4108,12 @@ fun ManualFocalEditorDialog(viewModel: HomeViewModel, onDismiss: () -> Unit) {
     val manualFocalX by viewModel.manualFocalX.collectAsState()
     val manualFocalY by viewModel.manualFocalY.collectAsState()
     
-    // Choose a preview image: prefer first favorite, then first scanned image, then null
+    // Choose a preview image: prefer first photo favorite, then scanned photo, then fallback
     val previewUri = remember(favorites, scannedImages) {
-        favorites.firstOrNull()?.uriString ?: scannedImages.firstOrNull()?.uriString
+        favorites.firstOrNull { !it.isVideo }?.uriString
+            ?: scannedImages.firstOrNull { !it.isVideo }?.uriString
+            ?: favorites.firstOrNull()?.uriString
+            ?: scannedImages.firstOrNull()?.uriString
     }
 
     var currentX by remember { mutableFloatStateOf(manualFocalX) }
@@ -4180,21 +4947,30 @@ private fun triggerLiveWallpaperSelection(context: Context, serviceClass: Class<
     }
 }
 
-private fun saveImageToGallery(context: Context, imageUri: Uri, displayName: String) {
+private fun saveMediaToGallery(context: Context, mediaUri: Uri, displayName: String, isVideo: Boolean = false) {
     try {
         val resolver = context.contentResolver
-        val name = if (displayName.contains(".")) displayName else "$displayName.jpg"
+        val defaultExt = if (isVideo) ".mp4" else ".jpg"
+        val name = if (displayName.contains(".")) displayName else "$displayName$defaultExt"
+        val mimeType = if (isVideo) "video/mp4" else "image/jpeg"
+        val relativeDir = if (isVideo) Environment.DIRECTORY_MOVIES + "/MultiWallpaper" else Environment.DIRECTORY_PICTURES + "/MultiWallpaper"
+        val collection = if (isVideo) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "MW_$name")
-            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MultiWallpaper")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
         }
-        val uri = resolver.insert(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        val uri = resolver.insert(collection, values)
         if (uri != null) {
-            resolver.openInputStream(imageUri)?.use { input -> resolver.openOutputStream(uri)?.use { output -> input.copyTo(output) } }
+            resolver.openInputStream(mediaUri)?.use { input -> resolver.openOutputStream(uri)?.use { output -> input.copyTo(output) } }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 values.clear(); values.put(MediaStore.MediaColumns.IS_PENDING, 0); resolver.update(uri, values, null, null)
             }
@@ -4202,3 +4978,179 @@ private fun saveImageToGallery(context: Context, imageUri: Uri, displayName: Str
         }
     } catch (e: Exception) {}
 }
+
+private fun saveImageToGallery(context: Context, imageUri: Uri, displayName: String) {
+    saveMediaToGallery(context, imageUri, displayName, isVideo = false)
+}
+
+private fun openFileLocation(context: Context, img: WallpaperImg) {
+    val uriStr = img.folderUriString.ifEmpty { img.uriString }
+    val parsedUri = Uri.parse(uriStr)
+    val folderPath = if (parsedUri.scheme == "file") parsedUri.path ?: "" else Uri.decode(uriStr)
+
+    // Automatically copy folder path to clipboard as a guarantee
+    try {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val clip = android.content.ClipData.newPlainText("Folder Location", folderPath)
+        clipboard?.setPrimaryClip(clip)
+    } catch (_: Exception) {}
+
+    val relPath = when {
+        folderPath.contains("/storage/emulated/0/") -> folderPath.substringAfter("/storage/emulated/0/").trimStart('/')
+        folderPath.contains("/sdcard/") -> folderPath.substringAfter("/sdcard/").trimStart('/')
+        else -> ""
+    }
+
+    // Relax VM strict mode for file:// URIs
+    try {
+        val m = android.os.StrictMode::class.java.getMethod("disableDeathOnFileUriExposure")
+        m.invoke(null)
+    } catch (_: Exception) {
+        val builder = android.os.StrictMode.VmPolicy.Builder()
+        android.os.StrictMode.setVmPolicy(builder.build())
+    }
+
+    // Method 1: If it's a file:// path on local storage
+    if (parsedUri.scheme == "file") {
+        // Try DocumentsUI for primary storage
+        if (relPath.isNotEmpty()) {
+            try {
+                val docUri = android.provider.DocumentsContract.buildDocumentUri(
+                    "com.android.externalstorage.documents",
+                    "primary:$relPath"
+                )
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(docUri, "vnd.android.document/directory")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                return
+            } catch (_: Exception) {}
+
+            try {
+                val rootUri = android.provider.DocumentsContract.buildRootUri("com.android.externalstorage.documents", "primary")
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(rootUri, "vnd.android.document/root")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+                return
+            } catch (_: Exception) {}
+        }
+
+        val targetFile = java.io.File(folderPath)
+        val targetFolder = if (targetFile.isDirectory) targetFile else targetFile.parentFile ?: targetFile
+
+        // Try Samsung My Files custom intent
+        try {
+            val samsungIntent = Intent("samsung.myfiles.intent.action.VIEW").apply {
+                putExtra("samsung.myfiles.intent.extra.START_PATH", targetFolder.absolutePath)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(samsungIntent)
+            return
+        } catch (_: Exception) {}
+
+        // Try direct folder intent (ZArchiver, Mi File Manager, Solid Explorer, etc.)
+        val folderUri = Uri.fromFile(targetFolder)
+        val folderIntents = listOf(
+            Intent(Intent.ACTION_VIEW).apply { setDataAndType(folderUri, "resource/folder") },
+            Intent(Intent.ACTION_VIEW).apply { setDataAndType(folderUri, "vnd.android.document/directory") },
+            Intent(Intent.ACTION_VIEW).apply { setDataAndType(folderUri, "*/*") }
+        )
+
+        for (intent in folderIntents) {
+            try {
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                return
+            } catch (_: Exception) {}
+        }
+    } else {
+        // Method 2: SAF tree URI
+        try {
+            val docId = try {
+                android.provider.DocumentsContract.getTreeDocumentId(parsedUri)
+            } catch (_: Exception) {
+                null
+            }
+            val targetUri = if (docId != null) {
+                android.provider.DocumentsContract.buildDocumentUriUsingTree(parsedUri, docId)
+            } else {
+                parsedUri
+            }
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(targetUri, android.provider.DocumentsContract.Document.MIME_TYPE_DIR)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            return
+        } catch (_: Exception) {}
+    }
+
+    // Method 3: Launch installed file manager app directly
+    val fileManagerPackages = listOf(
+        "com.google.android.apps.nbu.files",
+        "com.google.android.documentsui",
+        "com.android.documentsui",
+        "com.sec.android.app.myfiles",
+        "com.mi.android.globalFileexplorer",
+        "com.android.fileexplorer",
+        "com.coloros.filemanager",
+        "com.vivo.FileManager",
+        "pl.solidexplorer2",
+        "ru.zdevs.zarchiver",
+        "com.cxinventor.file.explorer",
+        "bin.mt.plus"
+    )
+    for (pkg in fileManagerPackages) {
+        try {
+            val launchIntent = context.packageManager.getLaunchIntentForPackage(pkg)
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(launchIntent)
+                Toast.makeText(context, "Opening File Manager (path copied)", Toast.LENGTH_SHORT).show()
+                return
+            }
+        } catch (_: Exception) {}
+    }
+
+    // Method 4: Fallback open the file itself with system viewer chooser
+    try {
+        val fileUri = Uri.parse(img.uriString)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(fileUri, if (img.isVideo) "video/*" else "image/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val chooser = Intent.createChooser(intent, "Open with...")
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(chooser)
+        return
+    } catch (_: Exception) {}
+
+    Toast.makeText(context, "Folder path copied to clipboard", Toast.LENGTH_SHORT).show()
+}
+
+private fun openFileDirectly(context: Context, img: WallpaperImg) {
+    try {
+        val m = android.os.StrictMode::class.java.getMethod("disableDeathOnFileUriExposure")
+        m.invoke(null)
+    } catch (_: Exception) {
+        val builder = android.os.StrictMode.VmPolicy.Builder()
+        android.os.StrictMode.setVmPolicy(builder.build())
+    }
+
+    try {
+        val fileUri = Uri.parse(img.uriString)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(fileUri, if (img.isVideo) "video/*" else "image/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val chooser = Intent.createChooser(intent, "Open file with...")
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(chooser)
+    } catch (e: Exception) {
+        Toast.makeText(context, "Unable to open file: ${e.message}", Toast.LENGTH_SHORT).show()
+    }
+}
+

@@ -4,6 +4,21 @@ A professional, high-performance Android Live Wallpaper application designed to 
 
 ## What's New
 
+### v2.1.0: Video Live Wallpaper & Media Overhaul (Current)
+#### 🎬 Video Live Wallpaper Engine
+- **Full Video Wallpaper Support**: Seamlessly set videos (`.mp4`, `.webm`, `.mkv`, `.mov`) as high-performance Live Wallpapers for both Home and Lock screens with continuous looping and battery-optimized hardware decoding.
+- **Independent Media Modes**: Choose between **Both (Photos & Videos)**, **Photo Only**, or **Video Only** for granular control over what plays on your screen.
+
+#### 📱 Modern Video Player & Gallery Experience
+- **Interactive Fullscreen Video Preview**: Real-time video preview equipped with playback controls, duration timer, and custom seekbar scrubbing styled after top streaming apps.
+- **YouTube-Style Double Tap to Seek**: Quickly skip forward (+5s) or backward (-5s) by double-tapping the right or left sides of the screen with animated feedback bubbles.
+- **Clean Floating Playback Controls**: Pure white, distraction-free floating playback controls (Play/Pause, Rewind 5s, Forward 5s) without obstructive dark container circles.
+- **Instant Video Swipe Transitions**: Fixed player state tracking during horizontal gallery swiping to immediately bind audio/video controls to the active visible page.
+
+#### 📂 File Details & Location Inspector
+- **Full Un-truncated Path Inspector**: A dedicated File Details dialog showing the complete file and folder path with zero truncation and full text selection.
+- **1-Click Copy & Open**: Quickly copy folder/file paths to the clipboard or launch installed File Managers (Google Files, Xiaomi Mi File Explorer, Samsung My Files, ZArchiver, etc.) via comprehensive `<queries>` package visibility.
+
 ### v2.0: The Ultimate Stability & Smart Panoramic Update (Major)
 #### 🧠 Panoramic & Page Intelligence
 - **Smart Panoramic Engine**: Introduced **Linear Clockwise Fill** logic for consistent wide-image distribution across 2-3 pages without fragmentation.

@@ -3,6 +3,7 @@ package gustian.multiwallpaper.ui
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
@@ -82,6 +83,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _transitionType = MutableStateFlow("slide")
     val transitionType = _transitionType.asStateFlow()
 
+    private val _mediaMode = MutableStateFlow("PHOTO_ONLY") // "PHOTO_ONLY", "VIDEO_ONLY"
+    val mediaMode = _mediaMode.asStateFlow()
+
+    private val _videoSoundEnabled = MutableStateFlow(false)
+    val videoSoundEnabled = _videoSoundEnabled.asStateFlow()
+
     private val _doubleTapEnabled = MutableStateFlow(true)
     val doubleTapEnabled = _doubleTapEnabled.asStateFlow()
 
@@ -127,6 +134,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val _gallerySortOrder = MutableStateFlow("DESC")
     val gallerySortOrder = _gallerySortOrder.asStateFlow()
 
+    private val _galleryMediaFilter = MutableStateFlow("ALL") // "ALL", "PHOTO", "VIDEO"
+    val galleryMediaFilter = _galleryMediaFilter.asStateFlow()
+
     private val _selectedGalleryFolderUris = MutableStateFlow<Set<String>>(emptySet())
     val selectedGalleryFolderUris = _selectedGalleryFolderUris.asStateFlow()
 
@@ -142,12 +152,18 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         scannedImages,
         gallerySortType,
         gallerySortOrder,
-        debouncedSearchQuery
-    ) { images, sortType, sortOrder, query ->
-        val filtered = if (query.isBlank()) images 
+        debouncedSearchQuery,
+        galleryMediaFilter
+    ) { images, sortType, sortOrder, query, mediaFilter ->
+        val byMedia = when (mediaFilter) {
+            "PHOTO" -> images.filter { !it.isVideo }
+            "VIDEO" -> images.filter { it.isVideo }
+            else -> images
+        }
+        val filtered = if (query.isBlank()) byMedia 
                        else {
                            val q = query.trim()
-                           images.filter { img ->
+                           byMedia.filter { img ->
                                val folderName = try {
                                    val uri = Uri.parse(img.folderUriString)
                                    if (uri.scheme == "file") java.io.File(uri.path ?: "").name 
@@ -360,6 +376,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _aiSensitivityY.value = prefs.getFloat("ai_sensitivity_y", 0.4f)
         _gallerySortType.value = prefs.getString("gallery_sort_type", "NAME") ?: "NAME"
         _gallerySortOrder.value = prefs.getString("gallery_sort_order", "DESC") ?: "DESC"
+        _galleryMediaFilter.value = prefs.getString("gallery_media_filter", "ALL") ?: "ALL"
         _blurRadius.value = prefs.getFloat("blur_radius", 0f)
         _dimIntensity.value = prefs.getFloat("dim_intensity", 0f)
         _blurEnabled.value = prefs.getBoolean("blur_enabled", false)
@@ -382,6 +399,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _filterColor1.value = prefs.getInt("filter_color_1", 0xFF000000.toInt())
         _filterColor2.value = prefs.getInt("filter_color_2", 0xFFFFFFFF.toInt())
         _filterColor3.value = prefs.getInt("filter_color_3", 0xFF808080.toInt())
+        val readMode = prefs.getString("media_mode", "PHOTO_ONLY") ?: "PHOTO_ONLY"
+        _mediaMode.value = if (readMode == "BOTH") "PHOTO_ONLY" else readMode
+        _videoSoundEnabled.value = prefs.getBoolean("video_sound_enabled", false)
         
         if (_autoLimitEnabled.value) {
             _historyLimit.value = _scannedImages.value.size.coerceAtLeast(150)
@@ -398,6 +418,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             putFloat("interval_seconds", otherPrefs.getFloat("interval_seconds", 60f))
             putBoolean("use_favorites_only", otherPrefs.getBoolean("use_favorites_only", false))
             putString("transition_type", otherPrefs.getString("transition_type", "slide"))
+            putString("media_mode", otherPrefs.getString("media_mode", "BOTH"))
+            putBoolean("video_sound_enabled", otherPrefs.getBoolean("video_sound_enabled", false))
             putBoolean("double_tap_enabled", otherPrefs.getBoolean("double_tap_enabled", true))
             putInt("fade_speed", otherPrefs.getInt("fade_speed", 15))
             putBoolean("parallax_enabled", otherPrefs.getBoolean("parallax_enabled", false))
@@ -492,7 +514,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         favUris.contains(it.uriString), 
                         it.dateModified,
                         it.focalX,
-                        it.focalY
+                        it.focalY,
+                        it.isVideo
                     )
                 }
                 _scannedImages.value = images
@@ -662,7 +685,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                             uriString = img.uriString,
                             folderUriString = img.folderUriString,
                             displayName = img.displayName,
-                            target = targetName
+                            target = targetName,
+                            isVideo = img.isVideo
                         )
                     )
                 }
@@ -683,6 +707,23 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             addFolders(uris)
             _selectedFolders.value = emptySet()
         }
+    }
+
+    fun setMediaMode(mode: String) {
+        currentPrefs?.edit()?.putString("media_mode", mode)
+            ?.putBoolean("force_reload_trigger", true)
+            ?.apply()
+        _mediaMode.value = mode
+        if (mode == "VIDEO_ONLY" || mode == "BOTH") {
+            scanFolders()
+        }
+        triggerReload()
+    }
+
+    fun setVideoSoundEnabled(enabled: Boolean) {
+        currentPrefs?.edit()?.putBoolean("video_sound_enabled", enabled)?.apply()
+        _videoSoundEnabled.value = enabled
+        triggerReload()
     }
 
     fun setTransitionType(type: String) {
@@ -1120,6 +1161,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _gallerySortOrder.value = order
     }
 
+    fun setGalleryMediaFilter(filter: String) {
+        currentPrefs?.edit()?.putString("gallery_media_filter", filter)?.apply()
+        _galleryMediaFilter.value = filter
+    }
+
     fun setGallerySearchQuery(query: String) {
         _gallerySearchQuery.value = query
     }
@@ -1282,7 +1328,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         // Sync with Database Cache
         scannedImageDao.deleteAllImages(targetName)
         scannedImageDao.insertImages(tempImages.map { 
-            ScannedImageEntity(it.uriString, it.folderUriString, it.displayName, targetName, dateModified = it.date)
+            ScannedImageEntity(it.uriString, it.folderUriString, it.displayName, targetName, dateModified = it.date, isVideo = it.isVideo)
         })
     }
 
@@ -1339,38 +1385,51 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun getFullBackupJson(): String? = withContext(Dispatchers.IO) {
         try {
-            val targetName = _settingsTarget.value.name
-            val prefs = currentPrefs ?: return@withContext null
+            val app = getApplication<Application>()
+            val homePrefs = app.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+            val lockPrefs = app.getSharedPreferences("multi_wallpaper_prefs_lock", Context.MODE_PRIVATE)
             
-            val backupMap = mutableMapOf<String, Any>()
-            
-            // 1. All Presets
-            val allPresets = presetDao.getAllPresets(targetName).first()
-            backupMap["presets"] = allPresets
-            
-            // 2. Global Settings (SharedPreferences)
-            val settingsMap = mutableMapOf<String, Any>()
-            prefs.all.forEach { (key, value) -> settingsMap[key] = value ?: "" }
-            backupMap["settings"] = settingsMap
-            
-            // 3. Custom Palettes
-            val palettes = customPaletteDao.getPalettesByType("DUOTONE").first() + 
-                           customPaletteDao.getPalettesByType("TRITONE").first()
-            backupMap["palettes"] = palettes
-            
-            // 4. Schedules
-            val schedulesList = scheduleDao.getAllSchedules(targetName).first()
-            backupMap["schedules"] = schedulesList
-            
-            // 5. Scanned Images (Includes AI Focal Points)
-            val scannedList = scannedImageDao.getAllImagesSync(targetName)
-            backupMap["scanned_images"] = scannedList
-
             val moshi = com.squareup.moshi.Moshi.Builder()
                 .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
                 .build()
-            val adapter = moshi.adapter(Any::class.java)
-            adapter.toJson(backupMap)
+
+            val folderListAdapter = moshi.adapter<List<FolderEntity>>(com.squareup.moshi.Types.newParameterizedType(List::class.java, FolderEntity::class.java))
+            val favoriteListAdapter = moshi.adapter<List<FavoriteImageEntity>>(com.squareup.moshi.Types.newParameterizedType(List::class.java, FavoriteImageEntity::class.java))
+            val presetListAdapter = moshi.adapter<List<PresetEntity>>(com.squareup.moshi.Types.newParameterizedType(List::class.java, PresetEntity::class.java))
+            val scheduleListAdapter = moshi.adapter<List<ScheduleEntity>>(com.squareup.moshi.Types.newParameterizedType(List::class.java, ScheduleEntity::class.java))
+            val scannedImageListAdapter = moshi.adapter<List<ScannedImageEntity>>(com.squareup.moshi.Types.newParameterizedType(List::class.java, ScannedImageEntity::class.java))
+            val paletteListAdapter = moshi.adapter<List<CustomPaletteEntity>>(com.squareup.moshi.Types.newParameterizedType(List::class.java, CustomPaletteEntity::class.java))
+            val blacklistedListAdapter = moshi.adapter<List<BlacklistedImageEntity>>(com.squareup.moshi.Types.newParameterizedType(List::class.java, BlacklistedImageEntity::class.java))
+
+            val root = org.json.JSONObject()
+            root.put("backup_version", 2)
+            root.put("timestamp", System.currentTimeMillis())
+
+            suspend fun exportTarget(target: String, prefs: SharedPreferences): org.json.JSONObject {
+                val obj = org.json.JSONObject()
+                val settingsObj = org.json.JSONObject()
+                prefs.all.forEach { (k, v) -> settingsObj.put(k, v ?: "") }
+                obj.put("settings", settingsObj)
+                obj.put("folders", org.json.JSONArray(folderListAdapter.toJson(folderDao.getAllFoldersSync(target))))
+                obj.put("favorites", org.json.JSONArray(favoriteListAdapter.toJson(favoriteDao.getAllFavoritesSync(target))))
+                obj.put("presets", org.json.JSONArray(presetListAdapter.toJson(presetDao.getAllPresets(target).first())))
+                obj.put("schedules", org.json.JSONArray(scheduleListAdapter.toJson(scheduleDao.getAllSchedules(target).first())))
+                obj.put("scanned_images", org.json.JSONArray(scannedImageListAdapter.toJson(scannedImageDao.getAllImagesSync(target))))
+                return obj
+            }
+
+            root.put("home", exportTarget("HOME", homePrefs))
+            root.put("lock", exportTarget("LOCK", lockPrefs))
+
+            val globalObj = org.json.JSONObject()
+            val palettes = customPaletteDao.getPalettesByType("DUOTONE").first() + 
+                           customPaletteDao.getPalettesByType("TRITONE").first()
+            val blacklisted = blacklistedDao.getAllBlacklistedSync()
+            globalObj.put("palettes", org.json.JSONArray(paletteListAdapter.toJson(palettes)))
+            globalObj.put("blacklisted", org.json.JSONArray(blacklistedListAdapter.toJson(blacklisted)))
+            root.put("global", globalObj)
+
+            root.toString(2)
         } catch (e: Exception) {
             Log.e("HomeViewModel", "Failed to generate full backup", e)
             null
@@ -1380,74 +1439,157 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun importFullBackup(json: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val targetName = _settingsTarget.value.name
+                val app = getApplication<Application>()
+                val homePrefs = app.getSharedPreferences("multi_wallpaper_prefs", Context.MODE_PRIVATE)
+                val lockPrefs = app.getSharedPreferences("multi_wallpaper_prefs_lock", Context.MODE_PRIVATE)
+                
                 val moshi = com.squareup.moshi.Moshi.Builder()
                     .add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory())
                     .build()
                 val map = moshi.adapter(Map::class.java).fromJson(json) as? Map<String, Any> ?: return@launch
 
-                // 1. Restore Presets
-                (map["presets"] as? List<*>)?.let { list ->
-                    presetDao.deleteAllPresets(targetName)
-                    val adapter = moshi.adapter(PresetEntity::class.java)
-                    list.forEach { item ->
-                        val p = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
-                        if (p != null) presetDao.insertPreset(p.copy(id = 0, target = targetName))
-                    }
-                }
+                val version = (map["backup_version"] as? Number)?.toInt() ?: 1
 
-                // 2. Restore Palettes
-                (map["palettes"] as? List<*>)?.let { list ->
-                    val adapter = moshi.adapter(CustomPaletteEntity::class.java)
-                    list.forEach { item ->
-                        val p = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
-                        if (p != null) customPaletteDao.insertPalette(p.copy(id = 0))
+                if (version >= 2 || map.containsKey("home") || map.containsKey("lock")) {
+                    // Unified v2 backup with HOME and LOCK
+                    (map["home"] as? Map<*, *>)?.let { targetMap ->
+                        @Suppress("UNCHECKED_CAST")
+                        restoreTargetData("HOME", targetMap as Map<String, Any>, homePrefs, moshi)
                     }
-                }
 
-                // 3. Restore Schedules
-                (map["schedules"] as? List<*>)?.let { list ->
-                    val adapter = moshi.adapter(ScheduleEntity::class.java)
-                    list.forEach { item ->
-                        val s = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
-                        if (s != null) scheduleDao.insertSchedule(s.copy(id = 0, target = targetName))
+                    (map["lock"] as? Map<*, *>)?.let { targetMap ->
+                        @Suppress("UNCHECKED_CAST")
+                        restoreTargetData("LOCK", targetMap as Map<String, Any>, lockPrefs, moshi)
                     }
-                }
 
-                // 4. Restore Settings
-                (map["settings"] as? Map<*, *>)?.let { settings ->
-                    val editor = currentPrefs?.edit() ?: return@let
-                    settings.forEach { (k, v) ->
-                        val key = k.toString()
-                        when (v) {
-                            is Boolean -> editor.putBoolean(key, v)
-                            is Float -> editor.putFloat(key, v)
-                            is Int -> editor.putInt(key, v)
-                            is Long -> editor.putLong(key, v)
-                            is String -> editor.putString(key, v)
+                    // Restore Global Shared Data (Palettes & Blacklist)
+                    (map["global"] as? Map<*, *>)?.let { globalMap ->
+                        (globalMap["palettes"] as? List<*>)?.let { list ->
+                            customPaletteDao.deleteAllPalettes()
+                            val adapter = moshi.adapter(CustomPaletteEntity::class.java)
+                            list.forEach { item ->
+                                val p = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
+                                if (p != null) customPaletteDao.insertPalette(p.copy(id = 0))
+                            }
+                        }
+
+                        (globalMap["blacklisted"] as? List<*>)?.let { list ->
+                            blacklistedDao.deleteAllBlacklisted()
+                            val adapter = moshi.adapter(BlacklistedImageEntity::class.java)
+                            list.forEach { item ->
+                                val b = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
+                                if (b != null) blacklistedDao.insertBlacklist(b)
+                            }
                         }
                     }
-                    editor.apply()
+                } else {
+                    // Legacy v1 backup (single target)
+                    val targetName = _settingsTarget.value.name
+                    val prefs = currentPrefs ?: homePrefs
+                    restoreTargetData(targetName, map, prefs, moshi)
+
+                    (map["palettes"] as? List<*>)?.let { list ->
+                        customPaletteDao.deleteAllPalettes()
+                        val adapter = moshi.adapter(CustomPaletteEntity::class.java)
+                        list.forEach { item ->
+                            val p = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
+                            if (p != null) customPaletteDao.insertPalette(p.copy(id = 0))
+                        }
+                    }
                 }
 
-                // 5. Restore Scanned Images
-                (map["scanned_images"] as? List<*>)?.let { list ->
-                    scannedImageDao.deleteAllImages(targetName)
-                    val adapter = moshi.adapter(ScannedImageEntity::class.java)
-                    val entities = list.mapNotNull { item ->
-                        adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
-                    }
-                    if (entities.isNotEmpty()) {
-                        scannedImageDao.insertImages(entities)
-                    }
-                }
+                // Trigger wallpaper reload for both Home and Lock services
+                homePrefs.edit().putBoolean("force_reload_trigger", true).apply()
+                lockPrefs.edit().putBoolean("force_reload_trigger", true).apply()
 
                 withContext(Dispatchers.Main) {
                     loadSettings()
-                    Toast.makeText(getApplication(), "Full Data Restored!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(getApplication(), "Full Data Restored (Home & Lock)!", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 Log.e("HomeViewModel", "Import fail", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(getApplication(), "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private suspend fun restoreTargetData(
+        targetName: String,
+        targetMap: Map<String, Any>,
+        prefs: SharedPreferences,
+        moshi: com.squareup.moshi.Moshi
+    ) {
+        // 1. Restore Folders (Clean wipe first)
+        (targetMap["folders"] as? List<*>)?.let { list ->
+            folderDao.deleteAllFolders(targetName)
+            val adapter = moshi.adapter(FolderEntity::class.java)
+            val entities = list.mapNotNull { item ->
+                adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))?.copy(id = 0, target = targetName)
+            }
+            if (entities.isNotEmpty()) folderDao.insertFolders(entities)
+        }
+
+        // 2. Restore Favorites (Clean wipe first)
+        (targetMap["favorites"] as? List<*>)?.let { list ->
+            favoriteDao.deleteAllFavorites(targetName)
+            val adapter = moshi.adapter(FavoriteImageEntity::class.java)
+            val entities = list.mapNotNull { item ->
+                adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))?.copy(target = targetName)
+            }
+            if (entities.isNotEmpty()) favoriteDao.insertFavorites(entities)
+        }
+
+        // 3. Restore Presets (Clean wipe first)
+        (targetMap["presets"] as? List<*>)?.let { list ->
+            presetDao.deleteAllPresets(targetName)
+            val adapter = moshi.adapter(PresetEntity::class.java)
+            list.forEach { item ->
+                val p = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
+                if (p != null) presetDao.insertPreset(p.copy(id = 0, target = targetName))
+            }
+        }
+
+        // 4. Restore Schedules (Clean wipe first)
+        (targetMap["schedules"] as? List<*>)?.let { list ->
+            scheduleDao.deleteAllSchedules(targetName)
+            val adapter = moshi.adapter(ScheduleEntity::class.java)
+            list.forEach { item ->
+                val s = adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))
+                if (s != null) scheduleDao.insertSchedule(s.copy(id = 0, target = targetName))
+            }
+        }
+
+        // 5. Restore Settings (SharedPreferences)
+        (targetMap["settings"] as? Map<*, *>)?.let { settings ->
+            val editor = prefs.edit().clear()
+            settings.forEach { (k, v) ->
+                val key = k.toString()
+                when (v) {
+                    is Boolean -> editor.putBoolean(key, v)
+                    is Float -> editor.putFloat(key, v)
+                    is Number -> {
+                        if (v is Int) editor.putInt(key, v)
+                        else if (v is Long) editor.putLong(key, v)
+                        else if (v.toDouble() == v.toLong().toDouble()) editor.putInt(key, v.toInt())
+                        else editor.putFloat(key, v.toFloat())
+                    }
+                    is String -> editor.putString(key, v)
+                }
+            }
+            editor.apply()
+        }
+
+        // 6. Restore Scanned Images (Clean wipe first)
+        (targetMap["scanned_images"] as? List<*>)?.let { list ->
+            scannedImageDao.deleteAllImages(targetName)
+            val adapter = moshi.adapter(ScannedImageEntity::class.java)
+            val entities = list.mapNotNull { item ->
+                adapter.fromJson(moshi.adapter(Any::class.java).toJson(item))?.copy(target = targetName)
+            }
+            if (entities.isNotEmpty()) {
+                scannedImageDao.insertImages(entities)
             }
         }
     }
@@ -1617,7 +1759,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             if (exists) {
                 favoriteDao.deleteFavoriteByUri(img.uriString, targetName)
             } else {
-                favoriteDao.insertFavorite(FavoriteImageEntity(img.uriString, img.folderUriString, img.displayName, targetName))
+                favoriteDao.insertFavorite(FavoriteImageEntity(img.uriString, img.folderUriString, img.displayName, targetName, isVideo = img.isVideo))
             }
             val currentList = _scannedImages.value.toMutableList()
             val index = currentList.indexOfFirst { it.uriString == img.uriString }
@@ -1643,12 +1785,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private fun scanRecursive(file: java.io.File, rootUri: String, list: MutableList<WallpaperImg>, favoriteUris: Set<String>, blacklistedUris: Set<String>) {
         val files = file.listFiles()
         files?.forEach { f ->
-            if (f.isFile && (f.name.endsWith(".jpg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true))) {
+            val isImage = f.name.endsWith(".jpg", true) || f.name.endsWith(".jpeg", true) || f.name.endsWith(".png", true) || f.name.endsWith(".webp", true)
+            val isVideo = f.name.endsWith(".mp4", true) || f.name.endsWith(".webm", true) || f.name.endsWith(".mkv", true) || f.name.endsWith(".mov", true)
+            if (f.isFile && (isImage || isVideo)) {
                 val fileUriStr = Uri.fromFile(f).toString()
                 if (!blacklistedUris.contains(fileUriStr)) {
                     // Use immediate parent as folderUriString for better search/grouping
                     val parentUriStr = Uri.fromFile(f.parentFile).toString()
-                    list.add(WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr), f.lastModified()))
+                    list.add(WallpaperImg(fileUriStr, parentUriStr, f.name, favoriteUris.contains(fileUriStr), f.lastModified(), isVideo = isVideo))
                 }
             } else if (f.isDirectory && !f.name.startsWith(".")) {
                 scanRecursive(f, rootUri, list, favoriteUris, blacklistedUris)
@@ -1681,17 +1825,21 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 cursor?.use { c ->
                     while (c.moveToNext()) {
                         val docId = c.getString(0)
-                        val name = c.getString(1) ?: "Image"
+                        val name = c.getString(1) ?: "Media"
                         val mimeType = c.getString(2)
                         val lastMod = c.getLong(3)
                         if (mimeType != null) {
                             if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
                                 folderQueue.add(DocumentsContract.buildDocumentUriUsingTree(treeUri, docId))
-                            } else if (mimeType.startsWith("image/")) {
-                                val childUriStr = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId).toString()
-                                if (!blacklistedUris.contains(childUriStr)) {
-                                    // For SAF, the currentUri is the immediate parent
-                                    list.add(WallpaperImg(childUriStr, currentUri.toString(), name, favoriteUris.contains(childUriStr), lastMod))
+                            } else {
+                                val isImage = mimeType.startsWith("image/")
+                                val isVideo = mimeType.startsWith("video/")
+                                if (isImage || isVideo) {
+                                    val childUriStr = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId).toString()
+                                    if (!blacklistedUris.contains(childUriStr)) {
+                                        // For SAF, the currentUri is the immediate parent
+                                        list.add(WallpaperImg(childUriStr, currentUri.toString(), name, favoriteUris.contains(childUriStr), lastMod, isVideo = isVideo))
+                                    }
                                 }
                             }
                         }
@@ -1709,7 +1857,8 @@ data class WallpaperImg(
     val isFavorite: Boolean,
     val date: Long = 0,
     val focalX: Float? = null,
-    val focalY: Float? = null
+    val focalY: Float? = null,
+    val isVideo: Boolean = false
 )
 
 data class FileItem(
