@@ -1432,13 +1432,44 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                     )
                 }
                 
+                var showConfirmCopyDialog by remember { mutableStateOf(false) }
+                val otherTargetName = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) "Lock" else "Home"
+                val currentTargetName = if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) "Home" else "Lock"
+
                 TextButton(
-                    onClick = { viewModel.copySettingsFromOther() },
+                    onClick = { showConfirmCopyDialog = true },
                     modifier = Modifier.align(Alignment.End)
                 ) {
                     Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(14.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Copy from ${if (settingsTarget == gustian.multiwallpaper.ui.SettingTarget.HOME) "Lock" else "Home"}", fontSize = 11.sp)
+                    Text("Copy from $otherTargetName", fontSize = 11.sp)
+                }
+
+                if (showConfirmCopyDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showConfirmCopyDialog = false },
+                        icon = { Icon(Icons.Default.ContentCopy, null, tint = MaterialTheme.colorScheme.primary) },
+                        title = { Text("Copy Settings from $otherTargetName?") },
+                        text = { 
+                            Text("This will overwrite your current $currentTargetName settings (intervals, effects, filters, etc.) with settings from $otherTargetName.") 
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    showConfirmCopyDialog = false
+                                    viewModel.copySettingsFromOther()
+                                }
+                            ) {
+                                Text("Copy")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showConfirmCopyDialog = false }) {
+                                Text("Cancel")
+                            }
+                        },
+                        shape = RoundedCornerShape(16.dp)
+                    )
                 }
             }
 
@@ -2724,7 +2755,7 @@ fun SettingsScreen(viewModel: HomeViewModel) {
                 Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Multi Wallpaper Live", fontWeight = FontWeight.Bold)
-                        Text("Version 1.1.0", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Version 2.0.0", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(modifier = Modifier.height(8.dp))
                         
                         Button(

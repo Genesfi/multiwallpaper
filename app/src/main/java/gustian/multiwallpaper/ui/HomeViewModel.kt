@@ -301,20 +301,28 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadMoreHistory() {
         if (_isLoadingHistory.value || !hasMoreHistory) return
+        _isLoadingHistory.value = true
         
         viewModelScope.launch(Dispatchers.IO) {
-            _isLoadingHistory.value = true
-            val targetName = _settingsTarget.value.name
-            val currentSize = _historyList.value.size
-            val more = historyDao.getHistoryPaged(targetName, 100, currentSize)
-            
-            if (more.isNotEmpty()) {
-                _historyList.value = _historyList.value + more
-                hasMoreHistory = more.size == 100
-            } else {
+            try {
+                val targetName = _settingsTarget.value.name
+                val currentSize = _historyList.value.size
+                val more = historyDao.getHistoryPaged(targetName, 100, currentSize)
+                
+                if (more.isNotEmpty()) {
+                    val existing = _historyList.value.toSet()
+                    val newUnique = more.filter { !existing.contains(it) }
+                    _historyList.value = _historyList.value + newUnique
+                    hasMoreHistory = more.size == 100
+                } else {
+                    hasMoreHistory = false
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("HomeViewModel", "Error loading more history", e)
                 hasMoreHistory = false
+            } finally {
+                _isLoadingHistory.value = false
             }
-            _isLoadingHistory.value = false
         }
     }
 

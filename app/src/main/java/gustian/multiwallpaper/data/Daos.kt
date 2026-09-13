@@ -209,13 +209,31 @@ interface RotationHistoryDao {
     @Query("SELECT uriString FROM rotation_history WHERE target = :target ORDER BY id DESC")
     fun getAllHistory(target: String): Flow<List<String>>
 
-    @Query("SELECT uriString FROM rotation_history WHERE target = :target ORDER BY id DESC LIMIT :limit OFFSET :offset")
+    @Query("""
+        SELECT uriString FROM rotation_history 
+        WHERE target = :target 
+          AND (uriString IN (SELECT uriString FROM scanned_images WHERE target = :target) 
+               OR uriString IN (SELECT uriString FROM favorites WHERE target = :target))
+        GROUP BY uriString
+        ORDER BY MAX(id) DESC 
+        LIMIT :limit OFFSET :offset
+    """)
     suspend fun getHistoryPaged(target: String, limit: Int, offset: Int): List<String>
 
-    @Query("SELECT COUNT(*) FROM rotation_history WHERE target = :target")
+    @Query("""
+        SELECT COUNT(DISTINCT uriString) FROM rotation_history 
+        WHERE target = :target 
+          AND (uriString IN (SELECT uriString FROM scanned_images WHERE target = :target) 
+               OR uriString IN (SELECT uriString FROM favorites WHERE target = :target))
+    """)
     fun getHistoryCount(target: String): Flow<Int>
 
-    @Query("SELECT COUNT(*) FROM rotation_history WHERE target = :target")
+    @Query("""
+        SELECT COUNT(DISTINCT uriString) FROM rotation_history 
+        WHERE target = :target 
+          AND (uriString IN (SELECT uriString FROM scanned_images WHERE target = :target) 
+               OR uriString IN (SELECT uriString FROM favorites WHERE target = :target))
+    """)
     suspend fun getHistoryCountSync(target: String): Int
 
     @Query("SELECT uriString FROM rotation_history WHERE target = :target ORDER BY id DESC")

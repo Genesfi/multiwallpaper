@@ -806,6 +806,15 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                 if (manualPageCount > 0) {
                     detectedPages = manualPageCount
                 }
+                
+                // CRITICAL: Clear Pano Metadata if mode was toggled OFF
+                if (oldPanoramicScrollEnabled && !panoramicScrollEnabled) {
+                    Log.d("MW_DEBUG", "[$prefsName] Pano Disabled: Purging scroll offsets and force reloading.")
+                    synchronized(bitmapLock) {
+                        pageScrollOffsets.clear()
+                    }
+                }
+
                 // BYPASS DEBOUNCE for critical mode changes
                 if (oldPanoramicScrollEnabled != panoramicScrollEnabled || forceReload) {
                     lastLoadRequestTime = 0L
@@ -1768,14 +1777,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     var span = 1
                     var scrollOffset: Float? = null
                     if (panoramicScrollEnabled && !prefsName.contains("lock")) {
-                        val imgRatio = rawBmp!!.width.toFloat() / rawBmp!!.height.toFloat()
-                        val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
-                        val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
-                        span = when {
-                            spanFactor > 2.75f -> 3
-                            spanFactor > 1.25f -> 2
-                            else -> 1
-                        }.coerceAtMost(maxPanoramicSpan)
+                        span = calculateSmartSpan(rawBmp!!.width, rawBmp!!.height, manualPageIndex, maxPanoramicSpan)
                         if (span > 1) scrollOffset = 0f // Start from left segment for the active page
                     }
 
@@ -1816,14 +1818,7 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                     var span = 1
                     var scrollOffset: Float? = null
                     if (panoramicScrollEnabled && !prefsName.contains("lock")) {
-                        val imgRatio = rawBmp!!.width.toFloat() / rawBmp!!.height.toFloat()
-                        val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
-                        val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
-                        span = when {
-                            spanFactor > 2.75f -> 3
-                            spanFactor > 1.25f -> 2
-                            else -> 1
-                        }.coerceAtMost(maxPanoramicSpan)
+                        span = calculateSmartSpan(rawBmp!!.width, rawBmp!!.height, manualPageIndex, maxPanoramicSpan)
                         if (span > 1) scrollOffset = 0f // Start from left segment for the active page
                     }
 
@@ -2064,14 +2059,14 @@ abstract class BaseMultiWallpaperService : WallpaperService() {
                         }
                         
                         var span = 1
-                        if (b != null) {
+                        if (b != null && panoramicScrollEnabled && !prefsName.contains("lock")) {
                             // First page is special: we allow it to take full target span since it's the anchor
                             val imgRatio = b.width.toFloat() / b.height.toFloat()
                             val screenRatio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
                             val spanFactor = (imgRatio / screenRatio).coerceIn(1.0f, maxPanoramicSpan.toFloat())
                             span = when {
-                                spanFactor > 2.75f -> 3
-                                spanFactor > 1.25f -> 2
+                                spanFactor > 2.1f -> 3
+                                spanFactor > 1.1f -> 2
                                 else -> 1
                             }.coerceAtMost(maxPanoramicSpan)
                             
